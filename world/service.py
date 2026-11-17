@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 
-
 import hashlib
 import json
 from astrbot.api import logger
@@ -11,8 +10,7 @@ import os
 import re
 from typing import Any
 
-from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.star import Context
+from astrbot.api.event import AstrMessageEvent
 
 try:
     from astrbot.api import AstrBotConfig
@@ -132,14 +130,6 @@ def _safe_int(value: Any, default: int, minimum: int | None = None) -> int:
     return result
 
 
-
-
-
-
-
-
-
-
 class WorldService:
     def __init__(self, context, config, data_dir):
         self.context = context
@@ -174,7 +164,9 @@ class WorldService:
         """
         if not self.settings.seed_worldbook:
             return
-        mocai_path = os.path.join(PLUGIN_DIR, "..", "presets", "manosaba", "worldbook.json")
+        mocai_path = os.path.join(
+            PLUGIN_DIR, "..", "presets", "manosaba", "worldbook.json"
+        )
         if not os.path.exists(mocai_path):
             return
         target_name = self.settings.seed_worldbook_name
@@ -225,13 +217,17 @@ class WorldService:
                     card.linked_book_id = book.id
                 self.store.upsert_card(card)
                 existing = card
-                logger.info("%s seeded character card %s id=%s", PLUGIN_NAME, card_name, card.id)
+                logger.info(
+                    "%s seeded character card %s id=%s", PLUGIN_NAME, card_name, card.id
+                )
             # 按配置把内置卡设为默认（可被用户改默认覆盖）
             if existing is not None and self.settings.default_card_anan:
                 self.store.set_default_card(existing.id)
                 # 修正关联世界书
                 if not existing.linked_book_id:
-                    book = self.store.find_book_by_name(self.settings.seed_worldbook_name)
+                    book = self.store.find_book_by_name(
+                        self.settings.seed_worldbook_name
+                    )
                     if book:
                         existing.linked_book_id = book.id
                         self.store.upsert_card(existing)
@@ -308,7 +304,11 @@ class WorldService:
         return body
 
     def _session_id(self, event: AstrMessageEvent) -> str:
-        return str(getattr(event, "unified_msg_origin", None) or event.get_session_id() or "default")
+        return str(
+            getattr(event, "unified_msg_origin", None)
+            or event.get_session_id()
+            or "default"
+        )
 
     def _is_group_event(self, event: AstrMessageEvent) -> bool:
         """群聊判定：优先 UMO，其次消息对象上的 group_id。"""
@@ -320,8 +320,10 @@ class WorldService:
     def _message_text(self, event: AstrMessageEvent) -> str:
         for getter in (
             lambda: getattr(event, "message_str", None),
-            lambda: event.get_message_str() if hasattr(event, "get_message_str") else None,
-            lambda: getattr(event, "message_str", "") ,
+            lambda: (
+                event.get_message_str() if hasattr(event, "get_message_str") else None
+            ),
+            lambda: getattr(event, "message_str", ""),
         ):
             try:
                 val = getter()
@@ -331,7 +333,9 @@ class WorldService:
                 return str(val).strip()
         return ""
 
-    def _extract_tail(self, event: AstrMessageEvent, text: Any, names: list[str]) -> str:
+    def _extract_tail(
+        self, event: AstrMessageEvent, text: Any, names: list[str]
+    ) -> str:
         """取指令之后的整段参数。
 
         兼容两种情况：
@@ -553,7 +557,9 @@ class WorldService:
     def _cmd_list(self) -> str:
         books = self.store.list_books()
         if not books:
-            return "暂无世界书。可用：\n/群间世界 导入示例\n/群间世界 导入 <名称> <JSON>"
+            return (
+                "暂无世界书。可用：\n/群间世界 导入示例\n/群间世界 导入 <名称> <JSON>"
+            )
         lines = ["📚 世界书列表："]
         for b in books:
             flag = "🟢" if b.enabled else "⚪"
@@ -657,10 +663,7 @@ class WorldService:
     def _cmd_import(self, arg: str) -> str:
         arg = str(arg or "").strip()
         if not arg:
-            return (
-                "用法：/群间世界 导入 <名称> <JSON或文本>\n"
-                "或：/群间世界 导入示例"
-            )
+            return "用法：/群间世界 导入 <名称> <JSON或文本>\n或：/群间世界 导入示例"
         # name + payload: first token name if payload looks like json/text block
         name = ""
         payload = arg
@@ -706,10 +709,24 @@ class WorldService:
                     "用法：/群间世界 加条 书名 | 名称 | 关键词 | 场景 | 行为 | 内容\n"
                     "关键词/场景可用逗号分隔；不需要可写 -"
                 )
-            book_name, name, keys_s, sc_s, behavior = parts[0], parts[1], parts[2], parts[3], parts[4]
+            book_name, name, keys_s, sc_s, behavior = (
+                parts[0],
+                parts[1],
+                parts[2],
+                parts[3],
+                parts[4],
+            )
             content = " | ".join(parts[5:]) if len(parts) > 5 else ""
-            keys = [] if keys_s in {"-", "无", ""} else [x.strip() for x in re.split(r"[,，/]+", keys_s) if x.strip()]
-            scenarios = [] if sc_s in {"-", "无", ""} else [x.strip() for x in re.split(r"[,，/]+", sc_s) if x.strip()]
+            keys = (
+                []
+                if keys_s in {"-", "无", ""}
+                else [x.strip() for x in re.split(r"[,，/]+", keys_s) if x.strip()]
+            )
+            scenarios = (
+                []
+                if sc_s in {"-", "无", ""}
+                else [x.strip() for x in re.split(r"[,，/]+", sc_s) if x.strip()]
+            )
 
         book = self._resolve_book(book_name)
         if not book:
@@ -743,7 +760,9 @@ class WorldService:
         state = self.store.get_session(sid)
         arg = str(arg or "").strip()
         if not arg:
-            return f"当前会话场景：{state.scenario or '（未设置，将尝试关键词自动识别）'}"
+            return (
+                f"当前会话场景：{state.scenario or '（未设置，将尝试关键词自动识别）'}"
+            )
 
         parts = arg.split(None, 1)
         sub = parts[0].lower()
@@ -886,7 +905,11 @@ class WorldService:
         arg = str(arg or "").strip()
         body = (card.group_addendum or "").strip()
         if not arg:
-            state = "是群聊，适配层生效" if self._is_group_event(event) else "不是群聊，适配层不注入"
+            state = (
+                "是群聊，适配层生效"
+                if self._is_group_event(event)
+                else "不是群聊，适配层不注入"
+            )
             preview = body if len(body) <= 300 else body[:300] + "…"
             return "\n".join(
                 [
@@ -1092,7 +1115,11 @@ class WorldService:
             event, card.persona_id or slug_persona_id(card.name)
         )
 
-        first = (card.first_mes[:200] + "…") if len(card.first_mes) > 200 else card.first_mes
+        first = (
+            (card.first_mes[:200] + "…")
+            if len(card.first_mes) > 200
+            else card.first_mes
+        )
         lines = [
             f"✅ 已应用角色卡「{card.name}」",
             f"会话：{sid}",
@@ -1157,16 +1184,21 @@ class WorldService:
             logger.warning("sync persona failed: %s", e, exc_info=True)
             return f"⚠️ 同步人格失败（仍会插件注入）：{e}"
 
-    async def _bind_session_persona(self, event: AstrMessageEvent, persona_id: str) -> str:
+    async def _bind_session_persona(
+        self, event: AstrMessageEvent, persona_id: str
+    ) -> str:
         if not persona_id:
             return "未绑定会话人格（将依赖插件注入）"
         umo = self._session_id(event)
         try:
             from astrbot.api import sp
 
-            cfg = await sp.get_async(
-                scope="umo", scope_id=umo, key="session_service_config", default={}
-            ) or {}
+            cfg = (
+                await sp.get_async(
+                    scope="umo", scope_id=umo, key="session_service_config", default={}
+                )
+                or {}
+            )
             if not isinstance(cfg, dict):
                 cfg = {}
             cfg["persona_id"] = persona_id
@@ -1200,11 +1232,7 @@ class WorldService:
         elif state.card_id:
             card_label = card.name if card else f"（丢失 id={state.card_id}）"
         else:
-            card_label = (
-                f"{card.name}（全局默认）"
-                if card
-                else "（无）"
-            )
+            card_label = f"{card.name}（全局默认）" if card else "（无）"
         lines = [
             "📊 世界书会话状态",
             f"全局开关: {'开' if self.inject_enabled_global else '关'}",
@@ -1341,37 +1369,48 @@ class WorldService:
                 lines.append(f"行为指引：{entry.behavior}")
             if entry.content:
                 lines.append(entry.content)
-            world_items.append({
-                "text": "\n".join(lines),
-                "source_id": source_id,
-                "occurred_at": matched.book.updated_at,
-                "scope": dict(resolved_scope),
-                "fact_kind": "world_setting",
-                "confidence": "established_setting",
-                "unknown": False,
-            })
+            world_items.append(
+                {
+                    "text": "\n".join(lines),
+                    "source_id": source_id,
+                    "occurred_at": matched.book.updated_at,
+                    "scope": dict(resolved_scope),
+                    "fact_kind": "world_setting",
+                    "confidence": "established_setting",
+                    "unknown": False,
+                }
+            )
             source_ids.append(source_id)
-        result.update({
-            "available": True,
-            "scope": resolved_scope,
-            "persona_id": persona_id,
-            "instance_id": instance_id,
-            "card_id": card.id,
-            "name": card.name,
-            "core_prompt": core_prompt,
-            "group_rules": group_rules,
-            "world_items": world_items,
-            "world_prompt": build_injection_text(
-                matches, active_scenario=scenario, style=self.settings
-            ),
-            "scenario": scenario,
-            "source_ids": source_ids,
-        })
+        result.update(
+            {
+                "available": True,
+                "scope": resolved_scope,
+                "persona_id": persona_id,
+                "instance_id": instance_id,
+                "card_id": card.id,
+                "name": card.name,
+                "core_prompt": core_prompt,
+                "group_rules": group_rules,
+                "world_items": world_items,
+                "world_prompt": build_injection_text(
+                    matches, active_scenario=scenario, style=self.settings
+                ),
+                "scenario": scenario,
+                "source_ids": source_ids,
+            }
+        )
         material = {
             key: result[key]
             for key in (
-                "persona_id", "instance_id", "card_id", "core_prompt",
-                "group_rules", "world_items", "world_prompt", "scenario", "source_ids",
+                "persona_id",
+                "instance_id",
+                "card_id",
+                "core_prompt",
+                "group_rules",
+                "world_items",
+                "world_prompt",
+                "scenario",
+                "source_ids",
             )
         }
         result["fingerprint"] = hashlib.sha256(
@@ -1459,7 +1498,11 @@ class WorldService:
             get_extra = getattr(event, "get_extra", None)
             if callable(get_extra) and get_extra("_narrative_managed_v1"):
                 return
-            blocking_context = get_extra("_autonomous_blocking_context_v1", None) if callable(get_extra) else None
+            blocking_context = (
+                get_extra("_autonomous_blocking_context_v1", None)
+                if callable(get_extra)
+                else None
+            )
             if (
                 isinstance(blocking_context, dict)
                 and blocking_context.get("schema_version") == 1

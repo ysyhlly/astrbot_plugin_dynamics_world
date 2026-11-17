@@ -254,6 +254,17 @@ class ResidentRunner:
             scope = engine._global_scope()
             now = engine.clock()
             cid = request_id or "resident:" + uuid.uuid4().hex
+            if not manual and request_id is None:
+                with engine._db(notify=False) as db:
+                    if engine._paused(db, scope):
+                        return {"status": "paused"}
+                    interval = max(60, int(engine.config.get("resident_tick_seconds", 300)))
+                    last = db.execute(
+                        "SELECT last FROM maintenance WHERE identity=? AND kind='resident_tick'",
+                        (identity(scope),),
+                    ).fetchone()
+                    if last and now - last[0] < interval:
+                        return {"status": "not_due"}
             with engine._db() as db:
                 db.execute("BEGIN IMMEDIATE")
                 prior = db.execute(
@@ -273,6 +284,13 @@ class ResidentRunner:
                     }
                 if engine._paused(db, scope):
                     return {"status": "paused"}
+                interval = max(60, int(engine.config.get("resident_tick_seconds", 300)))
+                last = db.execute(
+                    "SELECT last FROM maintenance WHERE identity=? AND kind='resident_tick'",
+                    (identity(scope),),
+                ).fetchone()
+                if not manual and last and now - last[0] < interval:
+                    return {"status": "not_due"}
                 causal.advance(db, scope, now)
                 _, doc = causal.load(db, scope)
                 available = [
@@ -287,13 +305,6 @@ class ResidentRunner:
                     available = [a for a in available if a["id"] == actor_id]
                 if not available:
                     return {"status": "no_ready_resident"}
-                interval = max(60, int(engine.config.get("resident_tick_seconds", 300)))
-                last = db.execute(
-                    "SELECT last FROM maintenance WHERE identity=? AND kind='resident_tick'",
-                    (identity(scope),),
-                ).fetchone()
-                if not manual and last and now - last[0] < interval:
-                    return {"status": "not_due"}
                 # Waiting invitations receive priority only within a bounded fairness window.
                 due = {
                     i["guest"]

@@ -185,7 +185,8 @@ class WorldSpaceService:
 
     def settle(self, db, scope: dict, now: float, actor: dict | None = None, character_name: str = "") -> dict:
         key = identity(scope)
-        db.execute("DELETE FROM world_space_guests WHERE ends_at<=?", (now,))
+        if db.execute("SELECT 1 FROM world_space_guests WHERE ends_at<=? LIMIT 1", (now,)).fetchone():
+            db.execute("DELETE FROM world_space_guests WHERE ends_at<=?", (now,))
         row = db.execute("SELECT world_id,label,character_name FROM world_space_bindings WHERE identity=?", (key,)).fetchone()
         if row and character_name and row["character_name"] != character_name:
             db.execute("UPDATE world_space_bindings SET character_name=? WHERE identity=?", (character_name[:60], key))

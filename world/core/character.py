@@ -6,7 +6,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from .models import WorldBook, new_uid, _as_bool, _as_int, _as_str_list
+from .models import WorldBook, new_uid, _as_int, _as_str_list
 from .importer import import_worldbook
 
 
@@ -37,7 +37,12 @@ def is_group_session(session_id: str) -> bool:
     """会话是否为群聊。"""
     text = str(session_id or "").strip().lower()
     parts = text.split(":", 2)
-    return len(parts) == 3 and bool(parts[0]) and parts[1] in GROUP_SESSION_MARKERS and bool(parts[2])
+    return (
+        len(parts) == 3
+        and bool(parts[0])
+        and parts[1] in GROUP_SESSION_MARKERS
+        and bool(parts[2])
+    )
 
 
 @dataclass
@@ -131,9 +136,7 @@ class CharacterCard:
         if self.scenario:
             parts.append(f"【场景】\n{self.scenario.strip()}")
         if include_group_addendum and self.group_addendum:
-            parts.append(
-                "【群聊适配层 · 仅群聊生效】\n" + self.group_addendum.strip()
-            )
+            parts.append("【群聊适配层 · 仅群聊生效】\n" + self.group_addendum.strip())
         if self.post_history_instructions:
             parts.append(f"【输出要求】\n{self.post_history_instructions.strip()}")
         if include_world_hint:
@@ -192,7 +195,9 @@ def _parse_mes_example(text: str, char_name: str) -> list[str]:
     """解析 ST 风格 mes_example 为 user/assistant 交替列表。"""
     text = text.strip()
     # SillyTavern 的 <START> 只作轮次分隔标记：解析前去掉，避免混进对白
-    text = re.sub(r"(?im)^[ \t]*<START>[ \t]*$", "", text).replace("<START>", "").strip()
+    text = (
+        re.sub(r"(?im)^[ \t]*<START>[ \t]*$", "", text).replace("<START>", "").strip()
+    )
     if not text:
         return []
     # 常见：{{user}}: / {{char}}: 或 User: / Char:
@@ -209,7 +214,9 @@ def _parse_mes_example(text: str, char_name: str) -> list[str]:
         re.I | re.S,
     )
     users = [m.group(1).strip() for m in pattern.finditer(text) if m.group(1).strip()]
-    chars = [m.group(1).strip() for m in pattern_char.finditer(text) if m.group(1).strip()]
+    chars = [
+        m.group(1).strip() for m in pattern_char.finditer(text) if m.group(1).strip()
+    ]
     dialogs: list[str] = []
     for i in range(min(len(users), len(chars))):
         dialogs.append(users[i])
@@ -260,7 +267,9 @@ def import_character_card(raw: str | dict, *, default_name: str = "") -> Charact
         return card
 
     # V1 flat
-    if any(k in obj for k in ("first_mes", "description", "personality", "mes_example")):
+    if any(
+        k in obj for k in ("first_mes", "description", "personality", "mes_example")
+    ):
         card = CharacterCard.from_dict(obj)
         card.source = "tavern_v1"
         if default_name and (not card.name or card.name == "未命名角色"):
@@ -287,7 +296,9 @@ def character_book_to_worldbook(card: CharacterCard) -> WorldBook | None:
             {
                 "name": f"{card.name}·角色书",
                 "description": f"来自角色卡「{card.name}」的 character_book",
-                "entries": card.character_book_raw.get("entries", card.character_book_raw),
+                "entries": card.character_book_raw.get(
+                    "entries", card.character_book_raw
+                ),
             },
             default_name=f"{card.name}·角色书",
         )

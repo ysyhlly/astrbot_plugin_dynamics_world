@@ -1,4 +1,5 @@
 """One AstrBot plugin owns character, world and narrative life services."""
+# ruff: noqa: E402
 from __future__ import annotations
 
 from .reload_bootstrap import ensure_current
@@ -6,7 +7,7 @@ ensure_current(
     __package__,
     __name__,
     __file__,
-    version="v0.22.1-horizons.1.reliability.1.io.1.expression.1.allchats.1.quietcontext.1",
+    version="v0.23.0-rc.1",
     checks=[
         ("life.core.narrative", "NarrativeEngine", "_world_map_v1"),
         ("life.core.narrative", "NarrativeEngine", "_horizons_sync_v1"),
@@ -117,7 +118,7 @@ class Main(Star):
     def get_dynamics_capabilities(self):
         return {
             "schema_version": 1,
-            "version": "0.22.1-horizons.1.reliability.1.io.1.expression.1.allchats.1.quietcontext.1",
+            "version": "v0.23.0-rc.1",
             "world_integration_version": 2,
             "provider_id": "astrbot_plugin_dynamics_world",
             "display_name": "群间世界",
@@ -143,6 +144,42 @@ class Main(Star):
 
     def get_world_integration_capabilities(self):
         return self.get_dynamics_capabilities()
+
+    def get_reference_assets_directory(self) -> str:
+        """Public read-only accessor for the active World visual-assets directory."""
+        life = getattr(self, "life", None)
+        narrative = getattr(life, "narrative", None)
+        visuals = getattr(narrative, "visuals", None)
+        profiles = getattr(visuals, "profiles", None)
+        asset_root = getattr(profiles, "asset_root", None)
+        if asset_root is not None:
+            return str(Path(asset_root).resolve())
+        base = getattr(self, "data_dir", None) or active_directory(self.data_root)
+        return str((Path(base) / "visual-assets").resolve())
+
+    def authorize_visual_reference_access(self) -> dict:
+        """Grant Visual Media read access limited to World's active visual-assets directory."""
+        _, media = self.onboarding.companion("astrbot_plugin_visual_media")
+        if media is None or not callable(getattr(media, "grant_world_reference_access", None)):
+            raise ValueError("请安装支持世界参考图授权接口的视觉工坊")
+        return media.grant_world_reference_access(self.get_reference_assets_directory())
+
+    def get_dynamics_summary(self, umo: str = "") -> dict:
+        """Public, non-secret status summary for series companions."""
+        world = getattr(self, "world", None)
+        store = getattr(world, "store", None)
+        cards = len(store.list_cards()) if store is not None and callable(getattr(store, "list_cards", None)) else 0
+        sessions = list(self.config.get("narrative_sessions") or [])
+        return {
+            "schema_version": 1,
+            "enabled": self.config.get("runtime_enabled") is True,
+            "ready": self.runtime_allowed(),
+            "persona_id": str(self.config.get("persona_id") or ""),
+            "card_count": cards,
+            "active_sessions": len(sessions),
+            "scope_bound": bool(umo and umo in sessions) if sessions else bool(self.config.get("narrative_all_groups")),
+            "visual_assets_dir": self.get_reference_assets_directory(),
+        }
 
     def _require_runtime(self):
         if not self.runtime_allowed():

@@ -338,7 +338,8 @@ class MailboxVisitorService:
 
     def settle(self, db, scope: dict, scene_state: dict | None, actor: dict | None, now: float) -> list[dict]:
         """Expire departed garden visitors; auto-open aged parcels when character is home & idle."""
-        db.execute("DELETE FROM world_garden_visitors WHERE departs_at<=?", (now,))
+        if db.execute("SELECT 1 FROM world_garden_visitors WHERE departs_at<=? LIMIT 1", (now,)).fetchone():
+            db.execute("DELETE FROM world_garden_visitors WHERE departs_at<=?", (now,))
         if not scene_state or scene_state.get("paused_at") is not None or scene_state.get("flow"):
             return []
         home_places = {r["place_id"] for r in scene_state.get("rooms", {}).values()}
@@ -361,7 +362,8 @@ class MailboxVisitorService:
 
     def snapshot(self, db, scope: dict, now: float, character_context: dict | None = None) -> dict:
         key = identity(scope)
-        db.execute("DELETE FROM world_garden_visitors WHERE departs_at<=?", (now,))
+        if db.execute("SELECT 1 FROM world_garden_visitors WHERE departs_at<=? LIMIT 1", (now,)).fetchone():
+            db.execute("DELETE FROM world_garden_visitors WHERE departs_at<=?", (now,))
         mode = self.policy_for(db, scope, character_context)
         unopened_count = db.execute(
             "SELECT COUNT(*) FROM world_mailbox WHERE identity=? AND status='unopened'",

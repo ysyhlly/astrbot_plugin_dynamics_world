@@ -103,6 +103,16 @@ class CausalLifeService(BackgroundResidentsMixin):
     def advance(self, db, scope, now):
         """Integrate only a confirmed interval; no LLM and no unattended auto-harvest."""
         rev, doc = self.load(db, scope)
+        before_meta = (bool(doc.get("agenda_initialized")), doc.get("paused_at"))
+        before_body_state = encode(
+            [
+                doc["body"].get("energy"),
+                doc["body"].get("satiety"),
+                doc["body"].get("hydration"),
+                doc["body"].get("basis"),
+                doc["body"].get("reasons"),
+            ]
+        )
         before_residents = encode([doc["residents"], doc["invitations"], doc["agenda"]])
         row = db.execute(
             "SELECT state FROM lives WHERE identity=?", (identity(scope),)
@@ -152,6 +162,7 @@ class CausalLifeService(BackgroundResidentsMixin):
             code = {"rest": "resting", "travel": "walking", "read": "reading"}.get(
                 op, "chores"
             )
+        integrated = False
         if paused:
             if doc["paused_at"] is None:
                 doc["paused_at"] = now
@@ -167,6 +178,7 @@ class CausalLifeService(BackgroundResidentsMixin):
                 start = now  # paused wall time is not activity
             hours = max(0, end - start) / 3600
             if code != "unknown" and hours:
+                integrated = True
                 rate = (
                     0.075
                     if code == "sleeping"
@@ -229,6 +241,29 @@ class CausalLifeService(BackgroundResidentsMixin):
                         },
                     )
                     entry["receipts"] = (entry.get("receipts", []) + [eid])[-40:]
+        after_residents = encode([doc["residents"], doc["invitations"], doc["agenda"]])
+        residents_changed = before_residents != after_residents
+        body_changed = before_body_state != encode(
+            [
+                body.get("energy"),
+                body.get("satiety"),
+                body.get("hydration"),
+                body.get("basis"),
+                body.get("reasons"),
+            ]
+        )
+        meta_changed = (
+            bool(doc.get("agenda_initialized")),
+            doc.get("paused_at"),
+        ) != before_meta
+        if (
+            rev > 0
+            and not integrated
+            and not body_changed
+            and not meta_changed
+            and not residents_changed
+        ):
+            return
         body["settled_at"] = max(now, body["settled_at"])
         doc["last_settled_at"] = now
         self.save(
@@ -236,9 +271,7 @@ class CausalLifeService(BackgroundResidentsMixin):
             scope,
             rev,
             doc,
-            bump=rev == 0
-            or before_residents
-            != encode([doc["residents"], doc["invitations"], doc["agenda"]]),
+            bump=rev == 0 or residents_changed,
         )
 
     def scene_receipt(self, db, scope, event_id, kind, now, payload):

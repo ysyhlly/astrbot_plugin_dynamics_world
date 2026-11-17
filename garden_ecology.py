@@ -152,8 +152,10 @@ class EcologyService:
 
         # Care is proposed through timed world actions; reads never auto-harvest.
         c3 = False
+        if not (c1 or c2 or c3):
+            return state
         state["last_settled_at"] = now
-        self.save(db, key, rev, state, now, bump=(c1 or c2 or c3))
+        self.save(db, key, rev, state, now, bump=True)
         return state
 
     def check_step(self, db, scope, scene_state: dict, step: dict, actor: dict, now: float) -> int:

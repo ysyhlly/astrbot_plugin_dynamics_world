@@ -95,6 +95,9 @@ class NarrativeSchemaMixin:
                 CREATE INDEX IF NOT EXISTS event_queue ON events(identity,umo,status,received);
                 CREATE INDEX IF NOT EXISTS event_fifo ON events(identity,umo,status,occurred,received,event_id);
                 CREATE INDEX IF NOT EXISTS event_recent_scopes ON events(identity,occurred,umo);
+                CREATE INDEX IF NOT EXISTS event_pending_identity ON events(identity,status) WHERE status='pending';
+                CREATE INDEX IF NOT EXISTS event_outreach_window ON events(identity,occurred,umo) WHERE umo<>'' AND status!='blocked_policy';
+                CREATE INDEX IF NOT EXISTS event_outreach_type ON events(identity,json_extract(payload,'$.type'),occurred) WHERE umo<>'' AND status!='blocked_policy';
                 CREATE TABLE IF NOT EXISTS validation_failures(
                     failure_id TEXT PRIMARY KEY, event_ids TEXT NOT NULL,
                     reason_code TEXT NOT NULL, occurred REAL NOT NULL);

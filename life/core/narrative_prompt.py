@@ -142,7 +142,7 @@ def build_narrative_prompt(request: dict, character: dict) -> str:
         }
     if isinstance(snap_proj.get('mailbox'), dict):
         mb = snap_proj['mailbox']
-        if scope_umo := request.get('scope', {}).get('umo'):
+        if request.get('scope', {}).get('umo'):
             # Conversation prompt only sees opened reactions from this session or general count
             snap_proj['mailbox'] = {'unopened_count': mb.get('unopened_count', 0)}
         else:

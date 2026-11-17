@@ -14,10 +14,8 @@ from apscheduler.executors.asyncio import AsyncIOExecutor
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from astrbot.api import logger
-from astrbot.api.all import Context, Star
-from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.event import AstrMessageEvent
 from astrbot.core.agent.message import TextPart
-from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.provider.entities import ProviderRequest
 
 from .. import creative_projects
@@ -100,37 +98,53 @@ class LifeService:
         self.data_mgr = DataManager(self.state_file)
         self.generator = Generator(self.context, self.config, self.data_mgr)
         self.narrative = NarrativeEngine(
-            self.data_dir / "narrative.sqlite3", self.config, self._narrative_model,
+            self.data_dir / "narrative.sqlite3",
+            self.config,
+            self._narrative_model,
             owner_active=self.is_active,
         )
         from ..world_spaces import WorldSpaceService
+
         self.narrative.world_spaces = WorldSpaceService(self.narrative)
         from ..spatial import SpatialState
+
         self.narrative.spatial = SpatialState(self.narrative)
         from ..weather import EnvironmentService
+
         self.narrative.environment = EnvironmentService(self.narrative)
         from ..keepsakes import KeepsakeTimelineService
+
         self.narrative.keepsakes = KeepsakeTimelineService(self.narrative)
         from ..garden_ecology import EcologyService
+
         self.narrative.ecology = EcologyService(self.narrative)
         from ..mailbox_visitors import MailboxVisitorService
+
         self.narrative.mailbox = MailboxVisitorService(self.narrative)
         from ..scenes import SceneService
+
         self.narrative.scenes = SceneService(self.narrative)
         from ..visual_context import WorldVisualContext
+
         self.narrative.visuals = WorldVisualContext(self.narrative)
         from ..horizons_sync import HorizonsSyncService
+
         if self.narrative.horizons is None:
             self.narrative.horizons = HorizonsSyncService(self.narrative)
         from ..causal_life import CausalLifeService
+
         self.narrative.causal = CausalLifeService(self.narrative)
         self.narrative.causal.card_resolver = lambda card_id: (
-            card.to_dict() if (card := self.world.store.get_card(card_id)) else None)
+            card.to_dict() if (card := self.world.store.get_card(card_id)) else None
+        )
         try:
             self.narrative.migrate_legacy(self.state_file)
         except Exception as exc:
-            logger.error(f"[DynamicLifeState] Legacy import failed: {type(exc).__name__}")
+            logger.error(
+                f"[DynamicLifeState] Legacy import failed: {type(exc).__name__}"
+            )
         from ..resident_runtime import ResidentRunner
+
         self.residents = ResidentRunner(self)
         self.narrative.resident_runner = self.residents
         self._resident_task = asyncio.create_task(self._resident_loop())
@@ -142,8 +156,11 @@ class LifeService:
     async def terminate(self) -> None:
         """停止午夜定时调度。"""
         self._stop_scheduler()
-        tasks = [task for name in ('_narrative_task', '_outreach_task', '_resident_task')
-                 if (task := getattr(self, name, None)) is not None]
+        tasks = [
+            task
+            for name in ("_narrative_task", "_outreach_task", "_resident_task")
+            if (task := getattr(self, name, None)) is not None
+        ]
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -161,7 +178,9 @@ class LifeService:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.warning(f"[DynamicLifeState] Narrative tick failed: {type(exc).__name__}")
+                logger.warning(
+                    f"[DynamicLifeState] Narrative tick failed: {type(exc).__name__}"
+                )
             await asyncio.sleep(30)
 
     async def _resident_loop(self) -> None:
@@ -171,7 +190,9 @@ class LifeService:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.warning(f"[DynamicsWorld] Resident tick failed: {type(exc).__name__}")
+                logger.warning(
+                    f"[DynamicsWorld] Resident tick failed: {type(exc).__name__}"
+                )
             await asyncio.sleep(30)
 
     async def _outreach_loop(self) -> None:
@@ -183,7 +204,10 @@ class LifeService:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.warning("[DynamicLifeState] Outreach review failed type=%s", type(exc).__name__)
+                logger.warning(
+                    "[DynamicLifeState] Outreach review failed type=%s",
+                    type(exc).__name__,
+                )
             await asyncio.sleep(30)
 
     def _worldbook(self):
@@ -202,9 +226,12 @@ class LifeService:
     async def _scope_for_event(self, event: AstrMessageEvent) -> dict | None:
         """Return a concrete matching character; never inject one persona into another."""
         umo = str(event.unified_msg_origin)
-        scope = {"platform": umo.split(":", 1)[0], "umo": umo,
-                 "persona_id": str(self.config.get("persona_id", "")),
-                 "instance_id": str(self.config.get("persona_id", ""))}
+        scope = {
+            "platform": umo.split(":", 1)[0],
+            "umo": umo,
+            "persona_id": str(self.config.get("persona_id", "")),
+            "instance_id": str(self.config.get("persona_id", "")),
+        }
         character = await self._character(scope, event)
         persona_id = str(character.get("persona_id", ""))
         if character.get("disabled") or not persona_id:
@@ -220,13 +247,18 @@ class LifeService:
         if not self.is_active():
             raise NarrativeProviderUnavailable("World is inactive")
         character = await self._character(request["scope"])
-        if character.get("disabled") or character.get("persona_id") != request["scope"]["persona_id"]:
+        if (
+            character.get("disabled")
+            or character.get("persona_id") != request["scope"]["persona_id"]
+        ):
             raise ValueError("Narrative character binding is unavailable")
         selected_provider_id = str(self.config.get("narrative_provider_id", "")).strip()
         if selected_provider_id:
             lookup = getattr(self.context, "get_provider_by_id", None)
             if not callable(lookup):
-                raise NarrativeProviderUnavailable("Selected narrative provider lookup is unavailable")
+                raise NarrativeProviderUnavailable(
+                    "Selected narrative provider lookup is unavailable"
+                )
             provider = lookup(selected_provider_id)
         else:
             # Preserve older installations until an operator explicitly selects
@@ -236,40 +268,73 @@ class LifeService:
             raise NarrativeProviderUnavailable("Narrative provider is unavailable")
         text_chat = getattr(provider, "text_chat", None)
         if not callable(text_chat):
-            raise NarrativeProviderUnavailable("Selected narrative provider has no text_chat method")
-        if request.get('resident_isolated'):
+            raise NarrativeProviderUnavailable(
+                "Selected narrative provider has no text_chat method"
+            )
+        if request.get("resident_isolated"):
             from ..resident_runtime import build_prompt
+
             prompt = build_prompt(request)
         else:
             prompt = build_narrative_prompt(request, character)
         from .core.narrative_schema import narrative_schema
-        kwargs = {"session_id": "dynamics_world_narrative_" + str(time.time_ns()), "contexts": []}
-        if (getattr(provider, "provider_config", {}).get("type") == "googlegenai_chat_completion"
-                or any(base.__module__.endswith(".gemini_source") for base in type(provider).__mro__)):
-            kwargs["optimizer_operation_id"] = str(request.get("inference_call_id", "")).replace("-", "")
+
+        kwargs = {
+            "session_id": "dynamics_world_narrative_" + str(time.time_ns()),
+            "contexts": [],
+        }
+        if getattr(provider, "provider_config", {}).get(
+            "type"
+        ) == "googlegenai_chat_completion" or any(
+            base.__module__.endswith(".gemini_source")
+            for base in type(provider).__mro__
+        ):
+            kwargs["optimizer_operation_id"] = str(
+                request.get("inference_call_id", "")
+            ).replace("-", "")
         parameters = inspect.signature(text_chat).parameters
-        supports_retry_limit = ("request_max_retries" in parameters or any(
-            p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values()))
+        supports_retry_limit = "request_max_retries" in parameters or any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values()
+        )
         if supports_retry_limit:
             kwargs["request_max_retries"] = 1
         elif selected_provider_id:
-            raise NarrativeProviderUnavailable("Narrative provider cannot enforce the retry limit")
-        if "func_tool" in parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
+            raise NarrativeProviderUnavailable(
+                "Narrative provider cannot enforce the retry limit"
+            )
+        if "func_tool" in parameters or any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values()
+        ):
             kwargs["func_tool"] = None
-        if "response_format" in parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
-            kwargs["response_format"] = {"type": "json_schema", "json_schema": {
-                "name": "narrative_change", "schema": narrative_schema(request)}}
+        if "response_format" in parameters or any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values()
+        ):
+            kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "narrative_change",
+                    "schema": narrative_schema(request),
+                },
+            }
         response = await text_chat(prompt=prompt, **kwargs)
         current = await self._character(request["scope"])
-        if not self.is_active() or current.get("fingerprint") != character.get("fingerprint"):
-            raise NarrativeProviderUnavailable("Character changed during life generation")
+        if not self.is_active() or current.get("fingerprint") != character.get(
+            "fingerprint"
+        ):
+            raise NarrativeProviderUnavailable(
+                "Character changed during life generation"
+            )
         raw_completion = getattr(response, "raw_completion", None)
         prompt_feedback = getattr(raw_completion, "prompt_feedback", None)
-        if _is_explicit_prohibited_content(getattr(prompt_feedback, "block_reason", None)):
+        if _is_explicit_prohibited_content(
+            getattr(prompt_feedback, "block_reason", None)
+        ):
             raise NarrativePolicyRefusal("PROHIBITED_CONTENT")
         candidates = getattr(raw_completion, "candidates", None) or []
-        if any(_is_explicit_prohibited_content(getattr(candidate, "finish_reason", None))
-               for candidate in candidates):
+        if any(
+            _is_explicit_prohibited_content(getattr(candidate, "finish_reason", None))
+            for candidate in candidates
+        ):
             raise NarrativePolicyRefusal("PROHIBITED_CONTENT")
         text = self.generator._extract_completion_text(response)
         return self.generator._extract_json(text)
@@ -294,20 +359,31 @@ class LifeService:
                 return unavailable
             now = self._now()
             state, _ = self._select_current_state(now)
-            match = select_current_slot(state.timeline, minute_of_day(now)) if state else None
+            match = (
+                select_current_slot(state.timeline, minute_of_day(now))
+                if state
+                else None
+            )
             if not match or not any(match.entry is entry for entry in state.timeline):
                 return "当前时段没有日程记录。"
             if focus == "activity":
-                return "此时段的日程安排（实际活动未确认）：" + match.entry.schedule[:220]
+                return (
+                    "此时段的日程安排（实际活动未确认）：" + match.entry.schedule[:220]
+                )
             if focus == "location" and match.entry.extra_fields.get("location"):
-                return "此时段日程记录的位置（实际位置未确认）：" + match.entry.extra_fields["location"][:60]
+                return (
+                    "此时段日程记录的位置（实际位置未确认）："
+                    + match.entry.extra_fields["location"][:60]
+                )
             return "旧版日程没有这类已确认的状态。"
 
         engine = self.narrative
         if not engine._snapshot_allowed(scope):
             return unavailable
         try:
-            result = await engine._snapshot_io.run(self._read_current_world_state, scope, focus)
+            result = await engine._snapshot_io.run(
+                self._read_current_world_state, scope, focus
+            )
         except (WorldIOBusy, WorldIOClosed):
             return "角色世界状态暂不可用。"
         return result if engine._snapshot_allowed(scope) else unavailable
@@ -341,13 +417,20 @@ class LifeService:
             if focus == "project":
                 projects = sorted(
                     scene.get("projects", {}).values(),
-                    key=lambda project: (project["status"] == "active", project["updated_at"]),
+                    key=lambda project: (
+                        project["status"] == "active",
+                        project["updated_at"],
+                    ),
                     reverse=True,
                 )
                 rows = [creative_projects.summary(project) for project in projects[:3]]
                 if rows:
                     stages = {"draft": "初稿阶段", "revision": "修订阶段"}
-                    statuses = {"active": "未定稿", "paused": "已暂停", "abandoned": "已放弃"}
+                    statuses = {
+                        "active": "未定稿",
+                        "paused": "已暂停",
+                        "abandoned": "已放弃",
+                    }
                     return "已记录的项目进展：\n" + "\n".join(
                         f"{row['title'][:60]} · {stages.get(row['stage'], row['stage_label'])}"
                         f"{' · ' + statuses[row['status']] if row['status'] in statuses else ''}"
@@ -376,23 +459,45 @@ class LifeService:
                     for item in live_scene.get("items", []):
                         if not (item.get("visible") or item.get("carried")):
                             continue
-                        fields = ("carried", "page", "pages", "servings", "capacity", "powered", "wet")
+                        fields = (
+                            "carried",
+                            "page",
+                            "pages",
+                            "servings",
+                            "capacity",
+                            "powered",
+                            "wet",
+                        )
                         if item["kind"] == "umbrella":
                             fields += ("open",)
                         details = {
-                            key: item[key] for key in fields if type(item.get(key)) in (int, float, bool)
+                            key: item[key]
+                            for key in fields
+                            if type(item.get(key)) in (int, float, bool)
                         }
-                        visible.append(dict(name=item["name"][:60], kind=item["kind"][:24], **details))
+                        visible.append(
+                            dict(
+                                name=item["name"][:60],
+                                kind=item["kind"][:24],
+                                **details,
+                            )
+                        )
                         if len(visible) == 6:
                             break
                     if visible:
-                        lines.append("眼前或随身物品：" + json.dumps(visible, ensure_ascii=False))
+                        lines.append(
+                            "眼前或随身物品：" + json.dumps(visible, ensure_ascii=False)
+                        )
                 return "\n".join(lines)
 
-            row = db.execute("SELECT state FROM lives WHERE identity=?", (_identity(scope),)).fetchone()
+            row = db.execute(
+                "SELECT state FROM lives WHERE identity=?", (_identity(scope),)
+            ).fetchone()
             state = json.loads(row["state"]) if row else {}
             flow = scene.get("flow")
-            if flow and (scene.get("paused_at") is not None or flow["step_ends_at"] <= now):
+            if flow and (
+                scene.get("paused_at") is not None or flow["step_ends_at"] <= now
+            ):
                 return "当前活动未确认。"
             journey = actor.get("journey")
             if journey and (actor.get("paused") or journey["arrives_at"] <= now):
@@ -401,13 +506,17 @@ class LifeService:
                 return "正在" + flow["label"][:120] + "（仍在进行）。"
             if journey:
                 return "正在前往" + journey["destination_name"][:60] + "（尚未抵达）。"
-            if state.get("valid_from", 0) <= now < state.get("valid_until", 0) and state.get("activity") not in (None, "", "未知"):
+            if state.get("valid_from", 0) <= now < state.get(
+                "valid_until", 0
+            ) and state.get("activity") not in (None, "", "未知"):
                 return "角色世界内的当前活动：" + state["activity"][:220]
             return "当前活动未确认。"
 
     def record_horizon_reading(self, scope: dict, payload: dict, *, owner=None) -> dict:
         """Persist a verified reading bookmark through the public integration API."""
-        return self.narrative.record_horizon_reading(scope, payload, owner=owner or self)
+        return self.narrative.record_horizon_reading(
+            scope, payload, owner=owner or self
+        )
 
     def peek_context_revision(self, scope: dict) -> dict:
         """Publish the RAM-only state epoch for versioned concurrent readers."""
@@ -417,7 +526,9 @@ class LifeService:
         """Queue typed real events and actual delivery receipts."""
         return await self.narrative.ingest_events(events)
 
-    async def advance(self, events: list[dict], expected_revision: int | None = None) -> dict:
+    async def advance(
+        self, events: list[dict], expected_revision: int | None = None
+    ) -> dict:
         """Apply narrative effects only if the captured revision remains current."""
         return await self.narrative.advance(events, expected_revision)
 
@@ -425,11 +536,17 @@ class LifeService:
         """Offer motivations to Chat Dynamics; this plugin never sends them itself."""
         return await self.narrative.list_due_intents(now)
 
-    async def observe_member_activity(self, umo: str, uid: str, message_id: str, occurred_at: float) -> dict:
+    async def observe_member_activity(
+        self, umo: str, uid: str, message_id: str, occurred_at: float
+    ) -> dict:
         """Cancel obsolete waiting without retaining message contents."""
-        return await asyncio.to_thread(self.narrative.observe_member_activity, umo, uid, message_id, occurred_at)
+        return await asyncio.to_thread(
+            self.narrative.observe_member_activity, umo, uid, message_id, occurred_at
+        )
 
-    async def update_intent(self, intent_id: str, status: str, receipt: dict | None = None) -> dict:
+    async def update_intent(
+        self, intent_id: str, status: str, receipt: dict | None = None
+    ) -> dict:
         """Store the coordinator's durable delivery lifecycle result."""
         return await self.narrative.update_intent(intent_id, status, receipt)
 
@@ -449,11 +566,17 @@ class LifeService:
         """Record an administrator correction without overwriting history."""
         return await self.narrative.correct_state(scope, patch)
 
-    async def set_paused(self, paused: bool, scope: dict | None = None, *, proactive_only: bool = False) -> dict:
+    async def set_paused(
+        self, paused: bool, scope: dict | None = None, *, proactive_only: bool = False
+    ) -> dict:
         """Persist narrative or proactive pause settings."""
-        return await self.narrative.set_paused(paused, scope, proactive_only=proactive_only)
+        return await self.narrative.set_paused(
+            paused, scope, proactive_only=proactive_only
+        )
 
-    async def set_outreach_paused(self, paused: bool, scope: dict | None = None) -> dict:
+    async def set_outreach_paused(
+        self, paused: bool, scope: dict | None = None
+    ) -> dict:
         """Pause proactive contacts while allowing life to continue."""
         return await self.narrative.set_outreach_paused(paused, scope)
 
@@ -565,12 +688,24 @@ class LifeService:
     ) -> None:
         """Attach coarse life context to unmanaged chat requests."""
 
-        marker = event.get_extra("_narrative_managed_v1", None) if hasattr(event, "get_extra") else None
-        internal = event.get_extra("_narrative_internal_v1", False) if hasattr(event, "get_extra") else False
+        marker = (
+            event.get_extra("_narrative_managed_v1", None)
+            if hasattr(event, "get_extra")
+            else None
+        )
+        internal = (
+            event.get_extra("_narrative_internal_v1", False)
+            if hasattr(event, "get_extra")
+            else False
+        )
         if marker or internal:
             return
         get_extra = getattr(event, "get_extra", None)
-        blocking_context = get_extra("_autonomous_blocking_context_v1", None) if callable(get_extra) else None
+        blocking_context = (
+            get_extra("_autonomous_blocking_context_v1", None)
+            if callable(get_extra)
+            else None
+        )
         if (
             isinstance(blocking_context, dict)
             and blocking_context.get("schema_version") == 1
@@ -578,7 +713,9 @@ class LifeService:
         ):
             return
         narrative_mode = self.config.get("mode", "legacy") == "narrative"
-        if narrative_mode and self.narrative._private_peer(str(event.unified_msg_origin)):
+        if narrative_mode and self.narrative._private_peer(
+            str(event.unified_msg_origin)
+        ):
             return
         scope = await self._scope_for_event(event)
         if scope is None:
@@ -592,10 +729,14 @@ class LifeService:
             if stale or availability not in AVAILABILITIES:
                 availability = "unknown"
             validity = "待确认" if stale else "有效"
-            req.system_prompt = f"{getattr(req, 'system_prompt', '') or ''}\n{AUTO_LIFE_GUIDANCE}"
-            req.extra_user_content_parts.append(TextPart(
-                text=f"<life_state>可交互状态={availability}；时效={validity}</life_state>"
-            ).mark_as_temp())
+            req.system_prompt = (
+                f"{getattr(req, 'system_prompt', '') or ''}\n{AUTO_LIFE_GUIDANCE}"
+            )
+            req.extra_user_content_parts.append(
+                TextPart(
+                    text=f"<life_state>可交互状态={availability}；时效={validity}</life_state>"
+                ).mark_as_temp()
+            )
             return
 
         # 会话过滤
@@ -624,10 +765,15 @@ class LifeService:
         # 移除上一次的伪注入。
         self._cleanup_previous_injection(req)
 
-        req.system_prompt = f"{getattr(req, 'system_prompt', '') or ''}\n{AUTO_LIFE_GUIDANCE}"
-        validity = "当前时段有记录" if current_match and any(
-            current_match.entry is entry for entry in data.timeline
-        ) else "当前时段无记录"
+        req.system_prompt = (
+            f"{getattr(req, 'system_prompt', '') or ''}\n{AUTO_LIFE_GUIDANCE}"
+        )
+        validity = (
+            "当前时段有记录"
+            if current_match
+            and any(current_match.entry is entry for entry in data.timeline)
+            else "当前时段无记录"
+        )
         inject_text = f"<life_state>日程时效={validity}</life_state>"
         if injection_method == "extra_user_content_parts":
             req.extra_user_content_parts.append(
@@ -909,7 +1055,11 @@ class LifeService:
             return
         if self.config.get("mode", "legacy") == "narrative":
             snapshot = await self.get_snapshot(scope)
-            yield event.plain_result(self._format_narrative_snapshot(snapshot) if snapshot.get("managed") else "当前会话未启用持续叙事生活。")
+            yield event.plain_result(
+                self._format_narrative_snapshot(snapshot)
+                if snapshot.get("managed")
+                else "当前会话未启用持续叙事生活。"
+            )
             return
         time_query = time_query.strip()
 
@@ -1039,9 +1189,23 @@ class LifeService:
                 except ValueError:
                     yield event.plain_result("日期格式错误，请使用 YYYY-MM-DD 格式。")
                     return
-                entries = [row for row in entries if datetime.datetime.fromtimestamp(row["occurred"], CHINA_TIMEZONE).date() == wanted]
-            diary = "\n".join(f"[{row['fact_kind']}] {row['text']}" for row in reversed(entries)) or "暂无已推进的生活记录。"
-            yield event.plain_result(self._format_narrative_snapshot(result["snapshot"]) + "\n\n" + diary)
+                entries = [
+                    row
+                    for row in entries
+                    if datetime.datetime.fromtimestamp(
+                        row["occurred"], CHINA_TIMEZONE
+                    ).date()
+                    == wanted
+                ]
+            diary = (
+                "\n".join(
+                    f"[{row['fact_kind']}] {row['text']}" for row in reversed(entries)
+                )
+                or "暂无已推进的生活记录。"
+            )
+            yield event.plain_result(
+                self._format_narrative_snapshot(result["snapshot"]) + "\n\n" + diary
+            )
             return
         now = self._now()
 
@@ -1094,7 +1258,9 @@ class LifeService:
             生成进度和结果消息。
         """
         if self.config.get("mode", "legacy") == "narrative":
-            yield event.plain_result("持续叙事模式保留已发生的历史。请用管理面板纠正当前状态，或 /群间日常 推进 检查待处理事件。")
+            yield event.plain_result(
+                "持续叙事模式保留已发生的历史。请用管理面板纠正当前状态，或 /群间日常 推进 检查待处理事件。"
+            )
             return
         if self.generator.is_generating:
             yield event.plain_result("已有生成任务在进行中，请稍后再试。")
@@ -1145,17 +1311,22 @@ class LifeService:
         """Resume future bounded life checks."""
         await self.set_paused(False)
         yield event.plain_result("持续叙事已恢复。")
+
     @staticmethod
     def _format_narrative_snapshot(snapshot: dict) -> str:
         """Format only public life state and commitments belonging to this UMO."""
-        lines = ["角色当前处境（生活为角色世界内的虚构经历）：",
-                 "活动：" + str(snapshot.get("activity", "未知")),
-                 "可交互状态：" + str(snapshot.get("availability", "unknown"))]
+        lines = [
+            "角色当前处境（生活为角色世界内的虚构经历）：",
+            "活动：" + str(snapshot.get("activity", "未知")),
+            "可交互状态：" + str(snapshot.get("availability", "unknown")),
+        ]
         if snapshot.get("subjective_state"):
             lines.append("主观状态：" + snapshot["subjective_state"])
         if snapshot.get("summary"):
             lines.append("近期摘要：" + snapshot["summary"])
         for item in snapshot.get("commitments", []):
-            lines.append("当前会话约定（" + item["status"] + "）：" + item["description"])
+            lines.append(
+                "当前会话约定（" + item["status"] + "）：" + item["description"]
+            )
         lines.append("状态修订：" + str(snapshot.get("revision", 0)))
         return "\n".join(lines)

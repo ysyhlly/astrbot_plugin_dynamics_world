@@ -516,8 +516,12 @@ def _read_world_projection(api, services, scope, character, key, can_write):
     world, life_service, engine = services
     spatial = engine.spatial
     avatar_rev = 0
+    scene_key = ""
+    pending_outreach = 0
+    causal = None
     # Snapshot reads settle clock state. Broadcasting their incidental SQL
     # writes would wake every stream, which would then do the same reads again.
+    # Keep disk JSON, Pillow sampling and cross-plugin summaries outside the write lock.
     with engine._db(notify=False) as db:
         db.execute("BEGIN IMMEDIATE")
         if _projection_stopped(api):
@@ -540,13 +544,6 @@ def _read_world_projection(api, services, scope, character, key, can_write):
         scene["visual_profile"] = engine.visuals.profiles.admin(db, scope)
         scene["visual_profile"]["can_write"] = can_write
         scene_key, _, raw_scene_state = engine.scenes.load(db, scope)
-        try:
-            avatar_rev = int(
-                api.avatar_library().catalog(scene_key)["selection"].get("revision")
-                or 0
-            )
-        except Exception:
-            avatar_rev = 0
         if engine.ecology is not None:
             engine.ecology.settle(db, scope, environment, raw_scene_state, now)
         if engine.mailbox is not None:
@@ -687,13 +684,34 @@ def _read_world_projection(api, services, scope, character, key, can_write):
             if engine.keepsakes is not None
             else []
         )
-        companions = api._companion_summary(scope.get("umo", ""), db=db, scope=scope)
+        try:
+            pending_outreach = int(
+                db.execute(
+                    "SELECT COUNT(*) FROM intents WHERE identity=? AND status='pending' AND expires>?",
+                    (key, now),
+                ).fetchone()[0]
+            )
+        except Exception:
+            pending_outreach = 0
         saved_modes = [
             r[0]
             for r in db.execute(
                 "SELECT mode FROM world_mode_saves WHERE identity=?", (key,)
             )
         ]
+        if getattr(engine, "causal", None) is not None:
+            causal = engine.causal.projection(db, scope, now)
+
+    try:
+        avatar_rev = int(
+            api.avatar_library().catalog(scene_key)["selection"].get("revision") or 0
+        )
+    except Exception:
+        avatar_rev = 0
+    companions = api._companion_summary(
+        scope.get("umo", ""),
+        pending_outreach=pending_outreach,
+    )
 
     revisions = compute_domain_revisions(
         doc=doc,
@@ -715,10 +733,7 @@ def _read_world_projection(api, services, scope, character, key, can_write):
         metadata=_short_rev_int((character["name"], saved_modes, can_write)),
     )
 
-    causal = None
-    if getattr(engine, "causal", None) is not None:
-        with engine._db(notify=False) as db:
-            causal = engine.causal.projection(db, scope, now)
+    if causal is not None:
         revisions["causal"] = _short_rev_int(
             {
                 k: v
@@ -956,6 +971,7 @@ async def open_sse_stream(api, umo: str, known_raw: str = ""):
         sub = api.bus.subscribe(identity_key)
         first = True
         retry_delay = 0.0
+        unavailable_streak = 0
         loop = asyncio.get_running_loop()
         next_heartbeat = loop.time() + _HEARTBEAT_SECONDS
         try:
@@ -989,10 +1005,15 @@ async def open_sse_stream(api, umo: str, known_raw: str = ""):
                     heartbeat_due = now >= next_heartbeat or (
                         not first and not retry_delay
                     )
-                    retry_delay = min(
-                        _MAX_PROJECTION_RETRY_SECONDS,
-                        max(_MIN_PROJECTION_RETRY_SECONDS, 2 * retry_delay),
-                    )
+                    unavailable_streak += 1
+                    if unavailable_streak >= 5:
+                        # After saturated backoff rounds, wait for bus/heartbeat instead of spinning.
+                        retry_delay = 0.0
+                    else:
+                        retry_delay = min(
+                            _MAX_PROJECTION_RETRY_SECONDS,
+                            max(_MIN_PROJECTION_RETRY_SECONDS, 2 * retry_delay),
+                        )
                     if heartbeat_due:
                         next_heartbeat = now + _HEARTBEAT_SECONDS
                         yield f": keepalive {int(services[2].clock())}\n\n"
@@ -1011,6 +1032,7 @@ async def open_sse_stream(api, umo: str, known_raw: str = ""):
                         return
                     identity_key = next_key
                 retry_delay = 0.0
+                unavailable_streak = 0
                 next_heartbeat = loop.time() + _HEARTBEAT_SECONDS
                 if first or not payload.get("unchanged"):
                     last_revisions = dict(payload["revisions"])

@@ -738,19 +738,15 @@ class NarrativeEngine(
                 )
 
     def _paused(self, db, scope: dict) -> bool:
-        keys = [
+        keys = (
             "paused",
             "paused:" + _identity(scope),
             "paused:" + _identity(scope) + ":" + scope["umo"],
-        ]
-        return any(
-            db.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
-            and db.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()[
-                0
-            ]
-            == "true"
-            for key in keys
         )
+        rows = db.execute(
+            "SELECT value FROM metadata WHERE key IN (?,?,?)", keys
+        ).fetchall()
+        return any(row[0] == "true" for row in rows)
 
     def _event(self, event: dict, now: float) -> dict:
         if not isinstance(event, dict) or event.get("schema_version", 1) != 1:
@@ -1001,10 +997,10 @@ class NarrativeEngine(
         # rows forever. Historical evidence is retained, never called processed.
         key = "queue_compaction_cursor:" + identity
         saved = db.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
-        cursor = int(saved[0]) if saved else 0
+        prev_cursor = int(saved[0]) if saved else 0
         rows = db.execute(
             "SELECT rowid,event_id,payload FROM events WHERE identity=? AND status='pending' AND rowid>? ORDER BY rowid LIMIT ?",
-            (identity, cursor, limit),
+            (identity, prev_cursor, limit),
         ).fetchall()
         now = self.clock()
         for row in rows:
@@ -1020,10 +1016,11 @@ class NarrativeEngine(
                     (row["event_id"],),
                 )
         cursor = rows[-1]["rowid"] if len(rows) == limit else 0
-        db.execute(
-            "INSERT INTO metadata VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            (key, str(cursor)),
-        )
+        if cursor != prev_cursor or (rows and saved is None):
+            db.execute(
+                "INSERT INTO metadata VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, str(cursor)),
+            )
 
     @staticmethod
     def _obsolete_chatter(event, now):
