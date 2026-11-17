@@ -1,0 +1,449 @@
+{
+  "runtime_enabled": {
+    "type": "bool",
+    "description": "接入聊天与推进生活",
+    "hint": "迁移和编辑可在关闭时进行。启用前停用旧世界书和动态生活插件，避免重复运行。",
+    "default": false
+  },
+  "enabled": {
+    "description": "全局启用世界书注入",
+    "type": "bool",
+    "hint": "关闭后所有会话都不会注入世界书/角色卡。",
+    "default": true
+  },
+  "inject_mode": {
+    "description": "注入位置",
+    "type": "string",
+    "hint": "both=系统提示+额外内容（推荐，角色卡更稳）；extra=仅额外内容；system=仅系统提示。",
+    "default": "both",
+    "options": [
+      "both",
+      "extra",
+      "system"
+    ]
+  },
+  "max_entries": {
+    "description": "单轮最多注入条目数（不含常驻）",
+    "type": "int",
+    "hint": "关键词条目按优先级截断；常驻条目始终注入。",
+    "default": 10
+  },
+  "scan_history_turns": {
+    "description": "扫描历史轮数",
+    "type": "int",
+    "hint": "除本轮消息外，再扫描最近多少轮上下文用于关键词匹配。0 表示只扫本轮。",
+    "default": 4
+  },
+  "auto_scenario": {
+    "description": "自动识别并切换场景",
+    "type": "bool",
+    "hint": "当关键词命中绑定了场景的条目时，自动切换会话场景。",
+    "default": true
+  },
+  "show_debug_in_status": {
+    "description": "状态命令显示注入预览",
+    "type": "bool",
+    "hint": "开启后 /世界书 状态 会显示最近命中条目与注入文本预览。",
+    "default": true
+  },
+  "admin_only_writes": {
+    "description": "写操作仅限管理员",
+    "type": "bool",
+    "hint": "开启后，新建/启用/禁用/删除/导入/加条/删条 以及 角色卡导入/设默认/删除 只有 AstrBot 管理员可用；列表/详情/状态/场景/开/关/绑定 等查看与本会话命令不受影响。若你的平台识别不到管理员（例如自己在 webchat 里被拦），把它设为 false 即可恢复旧行为。",
+    "default": true
+  },
+  "inject_style": {
+    "description": "注入文案样式（改这里就能改发给模型的提示词）",
+    "type": "object",
+    "hint": "所有模板都支持占位符，写错不会崩：无法识别的占位符会原样保留。",
+    "items": {
+      "header": {
+        "description": "注入块标题",
+        "type": "string",
+        "hint": "世界书注入块的第一行。",
+        "default": "【世界书 / World Info】"
+      },
+      "preamble": {
+        "description": "注入块说明",
+        "type": "text",
+        "hint": "紧跟标题的一句总体说明。留空则不输出。",
+        "default": "以下设定在本轮对话中生效。请根据场景与设定调整角色语气、行为与决策，不要生硬复述条目原文。"
+      },
+      "scenario_header": {
+        "description": "当前场景行模板",
+        "type": "string",
+        "hint": "占位符：{scenario}。留空则不输出场景行。",
+        "default": "当前场景：{scenario}"
+      },
+      "entry_title_format": {
+        "description": "条目小标题模板",
+        "type": "string",
+        "hint": "占位符：{index} 序号、{title} 条目名、{book} 世界书名、{uid} 条目 ID。",
+        "default": "### 条目 {index}: {title}"
+      },
+      "scenario_line_format": {
+        "description": "条目「适用场景」行模板",
+        "type": "string",
+        "hint": "占位符：{scenarios}。留空则不输出该行。",
+        "default": "- 适用场景: {scenarios}"
+      },
+      "behavior_line_format": {
+        "description": "条目「行为变化」行模板",
+        "type": "string",
+        "hint": "占位符：{behavior}。留空则不输出该行。",
+        "default": "- 行为变化: {behavior}"
+      },
+      "entry_separator": {
+        "description": "条目之间的分隔文本",
+        "type": "string",
+        "hint": "默认空行。留空即为空行。",
+        "default": ""
+      },
+      "footer_with_scenario": {
+        "description": "有场景时的收尾要求",
+        "type": "text",
+        "hint": "占位符：{scenario}。留空则不输出。",
+        "default": "角色行为要求：在「{scenario}」场景下，优先遵循该场景绑定条目中的行为变化指引，保持人设一致，同时让语气、节奏、动作与决策明显受场景影响。"
+      },
+      "footer_without_scenario": {
+        "description": "无场景时的收尾要求",
+        "type": "text",
+        "hint": "留空则不输出。",
+        "default": "角色行为要求：结合命中的世界书条目调整细节表现；未命中的设定不要强行展开。"
+      },
+      "card_label": {
+        "description": "角色卡标签模板",
+        "type": "string",
+        "hint": "占位符：{name}。",
+        "default": "【角色卡：{name}】"
+      },
+      "card_label_group": {
+        "description": "群聊角色卡标签模板",
+        "type": "string",
+        "hint": "占位符：{name}。群聊会话使用。",
+        "default": "【角色卡：{name}（群聊）】"
+      },
+      "persona_override_notice": {
+        "description": "人设覆盖提示",
+        "type": "text",
+        "hint": "占位符：{name}。当 system prompt 里已存在同名旧人设时，附加在角色卡前面。留空则不输出。",
+        "default": "【人设覆盖】上文若有「{name}」的其它设定，以本角色卡为准。"
+      }
+    }
+  },
+  "matching": {
+    "description": "匹配与去重",
+    "type": "object",
+    "items": {
+      "dedupe_same_content": {
+        "description": "合并内容完全相同的条目",
+        "type": "bool",
+        "hint": "关闭后，正文相同但关键词不同的条目会各注入一次。",
+        "default": true
+      },
+      "scan_roles": {
+        "description": "扫描历史时读取的角色",
+        "type": "string",
+        "hint": "逗号分隔，可选 user / assistant / system。只留 user 可以避免模型自己说过的话反过来触发条目。",
+        "default": "user,assistant,system"
+      },
+      "persona_skip_min_chars": {
+        "description": "判定「人格已注入」的最小长度",
+        "type": "int",
+        "hint": "与 AstrBot 人格里的角色卡提示词做包含比对时的最小字符数。数值越大越不容易误判为已注入。",
+        "default": 80
+      },
+      "scan_include_prompt": {
+        "description": "把本轮渲染后的 prompt 也纳入扫描",
+        "type": "bool",
+        "hint": "关闭后只扫原始消息与历史，不扫 AstrBot 拼装后的 prompt。",
+        "default": true
+      }
+    }
+  },
+  "commands": {
+    "description": "聊天命令文案",
+    "type": "object",
+    "items": {
+      "help_text": {
+        "description": "自定义 /世界书 帮助文案",
+        "type": "text",
+        "hint": "留空则使用插件内置帮助。支持 {plugin_version} 占位符。",
+        "default": ""
+      },
+      "card_help_text": {
+        "description": "自定义角色卡帮助文案",
+        "type": "text",
+        "hint": "留空则使用插件内置帮助。",
+        "default": ""
+      },
+      "expose_panel_hint": {
+        "description": "在帮助里提示插件面板入口",
+        "type": "bool",
+        "hint": "开启后，帮助文案末尾会附上「管理面板 → 插件 → 世界书」的入口提示。",
+        "default": true
+      }
+    }
+  },
+  "seeding": {
+    "description": "可选示例导入",
+    "type": "object",
+    "hint": "仅用于管理员手动导入示例，不会在启动时自动添加角色或修改人格。",
+    "items": {
+      "seed_worldbook_name": {
+        "description": "补种世界书的名称",
+        "type": "string",
+        "hint": "留空则用内置名称「魔法少女的魔女审判 世界书」。",
+        "default": "魔法少女的魔女审判 世界书"
+      },
+      "seed_worldbook_legacy_keywords": {
+        "description": "补种世界书的旧名关键词",
+        "type": "string",
+        "hint": "逗号分隔。库里有名字包含这些关键词的世界书时视为同一个，不会重复补种。",
+        "default": "魔女审判,魔裁"
+      },
+      "default_card_name": {
+        "description": "默认角色卡名称",
+        "type": "string",
+        "hint": "补种时使用的内置角色卡名，也是 /应用安安 缺省指向的角色卡。",
+        "default": "夏目安安"
+      }
+    }
+  },
+  "web_panel": {
+    "description": "管理面板页面",
+    "type": "object",
+    "hint": "在「管理面板 → 插件 → 世界书」里提供的可视化管理页面。",
+    "items": {
+      "enabled": {
+        "description": "启用面板接口",
+        "type": "bool",
+        "hint": "关闭后页面仍在，但所有读写接口返回 403。",
+        "default": true
+      },
+      "allow_write": {
+        "description": "允许面板修改数据",
+        "type": "bool",
+        "hint": "关闭后面板只读：可以浏览世界书、条目、角色卡，但无法保存改动。",
+        "default": true
+      },
+      "page_title": {
+        "description": "页面标题",
+        "type": "string",
+        "hint": "显示在插件页顶部的标题。留空则用「世界书」。",
+        "default": "群间世界"
+      }
+    }
+  },
+  "contextual_care_enabled": {
+    "type": "bool",
+    "description": "启用情境主动关心",
+    "hint": "根据本人定向说过的身体不适、出行或明确约好的报平安检查近期证据。关闭后停用此类候选。",
+    "default": true
+  },
+  "contextual_care_sessions": {
+    "type": "list",
+    "description": "情境主动关心的会话白名单",
+    "hint": "开关开启时，留空允许全部受管理的群聊和私聊；填写时仅匹配完整 UMO。",
+    "items": {
+      "type": "string"
+    },
+    "default": []
+  },
+  "mode": {
+    "type": "string",
+    "description": "生活模式",
+    "hint": "narrative 为持续生活；legacy 保留旧版每日作息兼容。",
+    "options": [
+      "legacy",
+      "narrative"
+    ],
+    "default": "narrative"
+  },
+  "narrative_sessions": {
+    "type": "list",
+    "description": "持续叙事群会话白名单",
+    "hint": "只接受完整群聊 UMO。需同时配置具体 persona_id。私聊由独立开关控制。",
+    "items": {
+      "type": "string"
+    },
+    "default": []
+  },
+  "narrative_all_groups": {
+    "type": "bool",
+    "description": "所有群启用持续叙事",
+    "hint": "启用所有匹配配置人格和世界书会话绑定的群聊。",
+    "default": false
+  },
+  "narrative_private_chat_enabled": {
+    "type": "bool",
+    "description": "启用持续叙事的私聊证据",
+    "hint": "将匹配配置人格和世界书绑定的私聊纳入主动联系检查。私聊发言和实际送达回执保存在各自会话范围。",
+    "default": false
+  },
+  "narrative_timeout_seconds": {
+    "type": "int",
+    "description": "后台叙事调用超时（秒）",
+    "hint": "后台叙事单次调用总上限90秒；显式设置更短时间会保留。重要事件的前置8秒等待由Chat Dynamics控制。失败事件按退避时间保留在队列。",
+    "default": 90,
+    "slider": {
+      "min": 1,
+      "max": 90,
+      "step": 1
+    }
+  },
+  "session_list_mode": {
+    "type": "string",
+    "description": "会话名单模式",
+    "hint": "whitelist=仅列表中的会话启用；blacklist=列表中的会话不启用；none=所有会话启用。",
+    "options": [
+      "whitelist",
+      "blacklist",
+      "none"
+    ],
+    "default": "whitelist"
+  },
+  "session_list": {
+    "type": "list",
+    "description": "会话名单列表",
+    "hint": "需填写完整 UMO（如 default:GroupMessage:123456）。可通过 /sid 获取。",
+    "items": {
+      "type": "string"
+    },
+    "default": []
+  },
+  "history_reference_days": {
+    "type": "int",
+    "description": "历史状态参考天数",
+    "hint": "生成时可参考的最近成功历史状态数量。设为 0 时不参考历史日程。",
+    "slider": {
+      "min": 0,
+      "max": 7,
+      "step": 1
+    },
+    "default": 3
+  },
+  "llm_provider_id": {
+    "type": "string",
+    "description": "LLM 模型 ID",
+    "hint": "用于生成动态生活状态的 LLM Provider。留空则使用当前默认模型。",
+    "_special": "select_provider",
+    "default": ""
+  },
+  "narrative_provider_id": {
+    "type": "string",
+    "description": "生活推进模型",
+    "hint": "可选的专用后台叙事 Provider。留空时沿用旧版 LLM Provider 选择；显式填写后若 Provider 不可用，不会回退到其他模型。",
+    "_special": "select_provider",
+    "default": ""
+  },
+  "persona_id": {
+    "type": "string",
+    "description": "持续生活角色",
+    "hint": "用于生成动态生活状态的人格设定。留空则使用当前默认人设。",
+    "_special": "select_persona",
+    "default": ""
+  },
+  "injection_mode": {
+    "type": "string",
+    "description": "状态注入方式",
+    "hint": "extra_user_content_parts: 使用临时用户附加上下文，推荐；fake_tool_call: 伪造工具调用注入到对话历史",
+    "options": [
+      "extra_user_content_parts",
+      "fake_tool_call"
+    ],
+    "default": "extra_user_content_parts"
+  },
+  "prompt_template": {
+    "type": "text",
+    "description": "提示词模板",
+    "hint": "用于生成动态生活状态的提示词模板。内容为空时使用默认提示词。可使用占位符：{date}、{holiday}、{persona}、{history_states}、{extra_requirements}、{timeline_optional_fields}。",
+    "editor_mode": true,
+    "editor_language": "markdown",
+    "default": "请根据角色设定，生成该角色在指定日期内的动态生活状态。\n\n日期：{date}\n节日：{holiday}\n状态范围：当天 00:00（含）至次日 00:00（不含）。所有时段均按日期 {date} 当天解释。\n\n角色设定：\n{persona}\n\n强制约束：\n\n1. 只输出一个可被 JSON 解析的对象，不要输出 Markdown、解释、注释或多余文本。\n2. 顶层必须包含 date、schedule_summary、style_summary、timeline 四个字段。date 必须严格等于 \"{date}\"。\n3. timeline 至少包含 3 个时间段，每个时间段中必须包含 time、schedule、outfit 三个字段。\n4. timeline 中的每一项可以按需添加以下可选字段：{timeline_optional_fields}。\n5. time 可以使用 \"凌晨\"、\"早上\"、\"上午\"、\"中午\"、\"下午\"、\"傍晚\"、\"晚上\"、\"深夜\" 这类自然时段，也可以使用 \"08:00-09:00\"、\"23:00-01:00\" 这类具体时间区间。\n6. 跨午夜具体区间只保留当前日期内午夜前的部分。例如 \"23:00-01:00\" 在本状态中仅表示 23:00-24:00。\n\n时段参考映射（左闭右开）：\n\n凌晨：00:00-06:00\n早上：06:00-09:00\n上午：09:00-12:00\n中午：12:00-14:00\n下午：14:00-18:00\n傍晚：18:00-20:00\n晚上：20:00-23:00\n深夜：23:00-24:00\n\n生成要求：\n\n1. 内容应符合角色设定，不要与角色身份、性格、生活方式明显冲突；日程和穿搭保持简洁自然，不要过度夸张。\n2. 生成结果总体上应体现当天不同时间段生活状态的流动感，但不要描述变化过程。\n3. schedule 字段描述该时间段正在进行或持续的生活状态，保持简洁自然，无需过渡说明。\n4. outfit 字段应直接用名词短语描述穿搭，无需使用动作词，即使重复/相同也如实描述。\n\n输出格式必须类似下面的 JSON：\n\n{\n\"date\": \"{date}\",\n\"schedule_summary\": \"当天整体日程的简短描述\",\n\"style_summary\": \"当天整体穿搭或氛围的简短描述\",\n\"timeline\": [\n{\n\"time\": \"上午\",\n\"schedule\": \"这个时间段正在做的事情\",\n\"outfit\": \"这个时间段的穿搭\"\n},\n{\n\"time\": \"下午\",\n\"schedule\": \"这个时间段正在做的事情\",\n\"outfit\": \"这个时间段的穿搭\"\n},\n{\n\"time\": \"晚上\",\n\"schedule\": \"这个时间段正在做的事情\",\n\"outfit\": \"这个时间段的穿搭\"\n}\n]\n}\n\n历史状态：\n{history_states}\n\n额外要求：\n{extra_requirements}"
+  },
+  "debug_mode": {
+    "type": "bool",
+    "description": "调试模式",
+    "hint": "输出更多日志，便于排查生成、解析和注入问题。",
+    "default": false
+  },
+  "social_chat_enabled": {
+    "type": "bool",
+    "description": "启用主动聊天",
+    "hint": "依据已有共同话题或有具体生活素材的当前互动提出候选。关闭后停用此类候选。",
+    "default": true
+  },
+  "social_chat_sessions": {
+    "type": "list",
+    "default": [],
+    "items": {
+      "type": "string"
+    },
+    "description": "主动聊天的会话白名单",
+    "hint": "开关开启时，留空允许全部受管理的群聊和私聊；填写时仅匹配完整 UMO。实际发送还须通过 Chat Dynamics 的主动联系检查。"
+  },
+  "visual_style_default": {
+    "type": "string",
+    "description": "新世界的默认画风预设",
+    "options": [
+      "generic",
+      "manosaba"
+    ],
+    "default": "generic",
+    "hint": "现有世界保留各自已保存的画风；可在画风面板按世界切换。"
+  },
+  "group_cabin_commands_enabled": {
+    "type": "bool",
+    "description": "启用群友小屋互动指令与工具",
+    "default": true,
+    "hint": "开启后群友可使用 /小屋实况、/投递、/探访，并在自然对话中触发院门信箱投递与实况拍立得卡。"
+  },
+  "cabin_postcard_cooldown_seconds": {
+    "type": "int",
+    "description": "小屋实况拍立得冷却（秒）",
+    "default": 180,
+    "slider": {
+      "min": 30,
+      "max": 1800,
+      "step": 30
+    },
+    "hint": "防止群聊频繁渲染刷屏，单会话实况明信片最小间隔秒数。"
+  },
+  "cabin_mailbox_cooldown_seconds": {
+    "type": "int",
+    "description": "院门信箱与探访单人冷却（秒）",
+    "default": 300,
+    "slider": {
+      "min": 60,
+      "max": 3600,
+      "step": 60
+    },
+    "hint": "单个群友投递院门信箱或进入花园探访的最小间隔秒数。"
+  },
+  "default_visitor_policy": {
+    "type": "string",
+    "description": "默认访客与信箱策略",
+    "options": [
+      "auto",
+      "pixel_avatar",
+      "critter",
+      "mailbox_only",
+      "off"
+    ],
+    "default": "auto",
+    "hint": "auto 对封闭世界观（如牢屋敷/魔女审判）自动采用信鸽松鼠小动物化身，开放世界采用像素访客小人；可在世界面板按世界单独覆盖。"
+  },
+  "resident_tick_seconds": {
+    "description": "背景居民评估间隔（秒）",
+    "type": "int",
+    "default": 300,
+    "hint": "共享后台模型每次按一名居民的独立私有视角评估；最短60秒，等待与休息也是有效选择。"
+  },
+  "resident_hourly_budget": {
+    "description": "全体居民共享的每小时推演上限",
+    "type": "int",
+    "default": 18,
+    "hint": "全部居民合计；自动推进与管理验证共用，不按居民人数倍增。主角色原有预算保持独立。"
+  }
+}

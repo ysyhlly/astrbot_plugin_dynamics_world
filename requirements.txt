@@ -1,0 +1,13 @@
+apscheduler>=3.11.0,<4
+holidays>=0.101,<1
+
+tzdata>=2025.1; platform_system == "Windows"
+
+playwright>=1.50,<2
+
+aiohttp>=3.9,<4
+
+astral==3.2
+PyJWT[crypto]>=2.8,<3
+
+Pillow>=10.3,<13

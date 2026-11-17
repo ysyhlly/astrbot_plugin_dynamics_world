@@ -1,0 +1,129 @@
+.pixel-cabin{--cabin-ink:#294c3b;--cabin-paper:#edf0e5;--cabin-edge:#bccbb5;position:relative;margin-bottom:8px}
+.cabin-message{margin:0 0 8px;font-size:12.5px}
+.cabin-message:empty{display:none}
+.cabin-layout{position:relative;display:block}
+.cabin-stage{position:relative;border:0;border-radius:22px;background:transparent;overflow:hidden}
+.cabin-stage-head{display:none}
+.cabin-diorama{padding:0;background:radial-gradient(ellipse at 50% 54%,#dde6d0 0,#edf2e4 62%,#eaf0e2 100%);position:relative;isolation:isolate;border-radius:22px}
+.cabin-art{display:block;width:100%;height:auto;max-height:610px;image-rendering:pixelated}
+.cabin-object{cursor:pointer;outline:none}
+.cabin-focus{stroke:transparent;stroke-width:2;stroke-dasharray:3 3;pointer-events:none}
+.cabin-object:hover .cabin-focus,.cabin-object:focus-visible .cabin-focus,.cabin-object.is-opening .cabin-focus{stroke:#f8f0c6}
+.cabin-hit{pointer-events:all}
+.cabin-object>*:not(.cabin-hit){pointer-events:none}
+.cabin-object[aria-disabled=true]{opacity:.55;cursor:not-allowed}
+.cabin-object:hover:not([aria-disabled=true]){filter:drop-shadow(0 -2px 0 #f7efd866)}
+.cabin-cursor,.cabin-spark,.phone-message,.cabin-moon{display:none}
+.cabin-art .notebook-cover,.cabin-art .book-cover,.wardrobe-door-left,.wardrobe-door-right{transform-box:fill-box;transform-origin:left center;transition:transform .38s steps(5)}
+.wardrobe-door-right{transform-origin:right center}
+.notebook.is-opening .notebook-cover{transform:translateX(-8px) scaleX(.12)}
+.notebook.is-opening .cabin-spark{display:block;animation:cabin-spark .5s steps(3)}
+.wardrobe.is-opening .wardrobe-door-left{transform:translateX(-12px) scaleX(.28)}
+.wardrobe.is-opening .wardrobe-door-right{transform:translateX(12px) scaleX(.28)}
+.book.is-opening .book-cover{transform:translateX(-11px) scaleX(.12)}
+.book.is-opening .book-pages{animation:cabin-pages .4s steps(3)}
+.phone.is-opening .phone-screen{fill:#c8e0b3}
+.phone.is-opening .phone-message{display:block;animation:cabin-message .45s steps(4)}
+@keyframes cabin-pages{50%{transform:translateY(-4px)}}
+@keyframes cabin-message{0%{opacity:0;transform:translateY(6px)}100%{opacity:1;transform:translateY(0)}}
+@keyframes cabin-spark{0%{opacity:0;transform:translateY(5px)}100%{opacity:1;transform:translateY(-3px)}}
+
+/* Floating portals mini-dock & live capsule on desktop */
+.cabin-portals{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.cabin-portals-title{display:none}
+.cabin-portal{
+  display:inline-grid;grid-template-columns:28px minmax(0,1fr);align-items:center;gap:8px;
+  padding:7px 11px 7px 8px;border:1px solid var(--dw-glass-border,var(--wb-border));border-radius:999px;
+  background:var(--dw-glass-bg,var(--wb-surface));backdrop-filter:blur(12px);
+  color:var(--wb-text);text-align:left;cursor:pointer;font:12.5px var(--wb-sans);
+  box-shadow:0 4px 16px rgba(18,38,26,.08);transition:border-color .16s,background-color .16s,transform .16s;
+}
+.cabin-portal:hover:not(:disabled),.cabin-portal.is-opening,.cabin-portal.is-highlighted{
+  border-color:var(--wb-accent);background:var(--wb-accent-soft);transform:translateY(-1px);
+}
+.cabin-portal strong{display:block;font-size:12.5px;font-weight:600;line-height:1.2;white-space:nowrap}
+.cabin-portal small{display:block;margin-top:2px;font-size:10.5px;line-height:1.2;color:var(--wb-text-soft);white-space:nowrap;max-width:140px;overflow:hidden;text-overflow:ellipsis}
+.cabin-portal[data-can-open="false"]{opacity:.78}
+.cabin-portal:disabled{opacity:.55;cursor:not-allowed}
+.cabin-portal-mark{
+  display:grid;place-items:center;width:28px;height:28px;border-radius:50%;
+  border:1px solid var(--wb-line-strong);background:var(--wb-surface-2);
+  font:700 10px var(--wb-mono);color:var(--wb-accent);
+}
+.cabin-portal-arrow{display:none}
+
+.cabin-footer{
+  display:flex;align-items:center;gap:6px;padding:6px 10px;
+  border:1px solid var(--dw-glass-border,var(--wb-border));border-radius:999px;
+  background:var(--dw-glass-bg,var(--wb-surface));backdrop-filter:blur(12px);
+  color:var(--wb-text-soft);font-size:11.5px;box-shadow:0 4px 16px rgba(18,38,26,.08);
+}
+.cabin-footer>span{font-size:11.5px;padding:0 6px;white-space:nowrap}
+.cabin-footer button{min-height:30px;border-radius:999px}
+
+.cabin-live{
+  display:inline-grid;grid-template-columns:auto auto;gap:16px;align-items:center;
+  padding:9px 15px;border:1px solid var(--dw-glass-border,var(--wb-border));border-radius:14px;
+  background:var(--dw-glass-bg,var(--wb-surface));backdrop-filter:blur(12px);color:var(--wb-text);
+  box-shadow:0 6px 20px rgba(18,38,26,.08);max-width:min(540px,100%);
+}
+.cabin-live[hidden]{display:none!important}
+.cabin-live>div{min-width:0}
+.cabin-live>div+div{padding-left:14px;border-left:1px solid var(--dw-glass-border,var(--wb-border))}
+.cabin-live strong{display:block;font-size:12.5px;font-weight:600;margin:2px 0;color:var(--wb-text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:260px}
+.cabin-live small{display:block;font-size:10.5px;color:var(--wb-text-soft);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+@media(min-width:961px){
+  .cabin-portals{position:absolute;top:12px;right:12px;z-index:4;justify-content:flex-end;max-width:660px}
+  .cabin-footer{position:absolute;bottom:12px;right:12px;z-index:4}
+  .cabin-footer>span{display:none}
+  .cabin-live{position:absolute;left:12px;bottom:12px;z-index:4;pointer-events:none;max-width:min(540px,calc(100% - 330px))}
+  body[data-stage-mode="cabin-drawer"] .cabin-portals,
+  body[data-stage-mode="cabin-drawer"] .cabin-footer{opacity:.25;pointer-events:none}
+}
+@media(min-width:961px) and (max-width:1440px){
+  .cabin-portals{max-width:416px;gap:6px}
+  .cabin-portal{padding:6px 11px 6px 7px;gap:6px}
+  .cabin-portal small{display:none}
+}
+
+.cabin-archive{margin-top:10px;border:1px solid var(--dw-glass-border,var(--wb-border));border-radius:12px;padding:0 16px;background:var(--dw-glass-bg,var(--wb-surface))}
+.cabin-archive summary{padding:10px 0;min-height:40px;cursor:pointer;font-size:12.5px}
+.cabin-archive pre{white-space:pre-wrap;overflow-wrap:anywhere;font:13.5px/1.85 var(--wb-sans);max-height:45vh;overflow:auto;background:var(--wb-surface-2);padding:14px;border-radius:8px}
+.cabin-archive p{color:var(--wb-text-soft);font-size:12px}
+
+html[data-ui-theme=night] .cabin-diorama{background:radial-gradient(ellipse at center,#354d3f,#1b2e26 80%)}
+html[data-ui-theme=night] .cabin-art{filter:brightness(.84)}
+.cabin-night .cabin-sky{fill:#526d7d}
+.cabin-night .cabin-sun{display:none}
+.cabin-night .cabin-moon{display:block}
+.cabin-night .cabin-diorama:after{content:'';position:absolute;inset:0;background:#12284312;pointer-events:none}
+
+@media(max-width:960px){
+  .cabin-footer{margin-top:8px;border-radius:12px;justify-content:space-between;flex-wrap:wrap}
+  .cabin-footer>span{flex:1 1 100%;padding:2px 2px 4px;white-space:normal}
+  .cabin-portals{margin-top:8px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+  .cabin-portal{width:100%;border-radius:12px;padding:10px;min-height:48px}
+  .cabin-portal small{max-width:none}
+  .cabin-live{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);margin-top:8px;max-width:100%;width:100%}
+  .cabin-live strong{max-width:none;white-space:normal}
+}
+@media(max-width:600px){
+  .cabin-portals{grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
+  .cabin-portal{padding:8px 9px;gap:6px;grid-template-columns:24px minmax(0,1fr)}
+  .cabin-portal-mark{width:24px;height:24px;font-size:9px}
+  .cabin-portal strong{font-size:12px}
+  .cabin-portal small{font-size:10px}
+  .cabin-live{grid-template-columns:minmax(0,1fr);gap:8px;padding:12px}
+  .cabin-live>div+div{padding:8px 0 0;border-left:0;border-top:1px solid var(--wb-border)}
+  .cabin-footer{padding:10px;gap:6px}
+  .cabin-footer button{flex:1 1 auto;min-height:40px}
+}
+.pixel-cabin.is-cozy-cam .cabin-view-bar,
+.pixel-cabin.is-cozy-cam .cabin-portals,
+.pixel-cabin.is-cozy-cam .cabin-footer,
+.pixel-cabin.is-cozy-cam .cabin-live,
+.pixel-cabin.is-cozy-cam .avatar-panel,
+.pixel-cabin.is-cozy-cam .cabin-archive{display:none!important}
+.pixel-cabin.is-cozy-cam .cabin-diorama.cabin3d-stage{height:clamp(460px,calc(100svh - 145px),780px)}
+@media(prefers-reduced-motion:reduce){.cabin-art *{transition:none!important;animation:none!important}}

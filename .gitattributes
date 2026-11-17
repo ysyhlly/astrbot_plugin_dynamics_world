@@ -1,0 +1,8 @@
+/tests export-ignore
+/.github export-ignore
+/requirements-dev.txt export-ignore
+**/__pycache__ export-ignore
+**/.pytest_cache export-ignore
+/data export-ignore
+/release export-ignore
+/dist export-ignore

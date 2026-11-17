@@ -1,0 +1,121 @@
+{
+  "version": "Azgaar 1.156.0",
+  "base_url": "https://raw.githubusercontent.com/Azgaar/Fantasy-Map-Generator/67d555b83f0b2f40ae50b03c9bbfd018175acc6d/public/images/textures/",
+  "files": [
+    {
+      "name": "antique-big.jpg",
+      "bytes": 585818,
+      "sha256": "e018ce4ba3c0a04099c26e4e5010a6a47b3d590e4d706af4031a17c24ecd66d8"
+    },
+    {
+      "name": "antique-small.jpg",
+      "bytes": 144925,
+      "sha256": "18ebde8086bde6805f2cac886187462e1f49ec9bdb7892c71e9abf2353570d62"
+    },
+    {
+      "name": "folded-paper-big.jpg",
+      "bytes": 899322,
+      "sha256": "eb156d1b10db5b50114974e635cd3ac58cb94f7223aee7fc896adf1f8a4cc5c2"
+    },
+    {
+      "name": "folded-paper-small.jpg",
+      "bytes": 58245,
+      "sha256": "d45883301ec1d89e35deb390bb408c96c4f51cf01b6f4e562309f925a3e20971"
+    },
+    {
+      "name": "gray-paper.jpg",
+      "bytes": 532785,
+      "sha256": "79d3e355d38e32bb77ff41cf6ed5b869bad55c2beb987fafb6e8fb9c920b969f"
+    },
+    {
+      "name": "iran-small.jpg",
+      "bytes": 184138,
+      "sha256": "7a2c9c37c3b4a15db4a2138382e99ef6158d38c2a5e79b7c476201b5e25e0c13"
+    },
+    {
+      "name": "marble-big.jpg",
+      "bytes": 548407,
+      "sha256": "264f0ff87e6497aadb43af38c71363cfa7d1058b54e22df9367609a0d5516cc2"
+    },
+    {
+      "name": "marble-blue-big.jpg",
+      "bytes": 455782,
+      "sha256": "850176084d73e7df3e5c118c6cae2a8c7c6ca5ffd7293c428fdad03473be3c17"
+    },
+    {
+      "name": "marble-blue-small.jpg",
+      "bytes": 170317,
+      "sha256": "7aa3717b9032d0e0c7723be2112a56bcfbae069c4a16b77a93083e19f7f1f21c"
+    },
+    {
+      "name": "marble-small.jpg",
+      "bytes": 221847,
+      "sha256": "062aabd9eedb02cb04a237df2228691c85fb3419928d51bc48eef1d5c453f2dd"
+    },
+    {
+      "name": "mars-big.jpg",
+      "bytes": 409360,
+      "sha256": "e835a07bad9fd0a98fc5362cd35d469b21631b31065a6bef5a79ba3c84b871bc"
+    },
+    {
+      "name": "mars-small.jpg",
+      "bytes": 131704,
+      "sha256": "6cefbda71f8b73bb685be58d30412b42abe002806df80d384d37edae8a6f9bbe"
+    },
+    {
+      "name": "mauritania-small.jpg",
+      "bytes": 182856,
+      "sha256": "8886930b178a39be1a42ed6cadce6778bffe186344fd4e1b85ed76a9a708da82"
+    },
+    {
+      "name": "mercury-big.jpg",
+      "bytes": 606242,
+      "sha256": "1603b5c7be434a054d722f842d17ca90403f278a764da49c5f6b196efaee6e74"
+    },
+    {
+      "name": "mercury-small.jpg",
+      "bytes": 154612,
+      "sha256": "334fbff6148b9c9d850abf5542a253ee54af7edc8eb98a0f783ea75f6e821622"
+    },
+    {
+      "name": "ocean.jpg",
+      "bytes": 373457,
+      "sha256": "4fc82bfceb4c9ffab226ce70dd482c6e9de4d28bd1d9d41eb3169daea74835c8"
+    },
+    {
+      "name": "pergamena-small.jpg",
+      "bytes": 61653,
+      "sha256": "eeb50ab45128a144fd38d2ff18ee4510baca946689e0e45e478ea521b4e97202"
+    },
+    {
+      "name": "plaster.jpg",
+      "bytes": 1314891,
+      "sha256": "0094ce95209d26c9b6e9036878d02c8d9e32fbd394df5731e0d49316398fb03d"
+    },
+    {
+      "name": "soiled-paper-vertical.png",
+      "bytes": 3174114,
+      "sha256": "0b33f76defb984b16fbf2f14799a69d59433900e930c06cd59c57d00d203a6a5"
+    },
+    {
+      "name": "soiled-paper.jpg",
+      "bytes": 359169,
+      "sha256": "af3e72baf453903c9d5fa415a8f6701af54cdf8da86ac7882e1a514506bf0412"
+    },
+    {
+      "name": "spain-small.jpg",
+      "bytes": 277439,
+      "sha256": "c7fdf23dec03537dfeda527c27bb8ebdfbd84b26ba6956fbc2b313c4844517e7"
+    },
+    {
+      "name": "timbercut-big.jpg",
+      "bytes": 644309,
+      "sha256": "1f009d0e7e06dca826f6ccb160e644e64b038fd4bf4a3c90110d01f872e2f589"
+    },
+    {
+      "name": "timbercut-small.jpg",
+      "bytes": 154871,
+      "sha256": "93c12f5671552205c8b668e97b3e4c19f0385f3efe4c456b9c55ac9b32e5a033"
+    }
+  ]
+}

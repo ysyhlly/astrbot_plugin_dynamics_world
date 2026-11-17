@@ -1,0 +1,12 @@
+name: astrbot_plugin_dynamics_world
+display_name: 群间世界 · Dynamics World
+desc: Chat Dynamics 原生配套插件，统一角色卡、世界书、场景、日常、故事与约定；支持真 3D 实况拍立得、平滑避障寻路、原生 SSE 实时增量流、共享世界组、院门信箱与 24h 时间轴回放。
+version: v0.23.0-rc.1
+author: ysyhlly
+astrbot_version: ">=4.29.4,<5"
+tags:
+  - chat-dynamics
+  - worldbook
+  - narrative
+
+repo: https://github.com/ysyhlly/astrbot_plugin_dynamics_world

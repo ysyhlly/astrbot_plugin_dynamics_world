@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1" name="viewport"/><script src="./theme.js"></script>
+<meta content="light dark" name="color-scheme"/>
+<title data-series-text="群间世界 · Dynamics World">群间世界 · Dynamics World</title>
+<link rel="stylesheet" href="./avatar.css?v=stage.11"/>
+<link rel="stylesheet" href="./cabin3d.css?v=stage.11"/>
+<link rel="stylesheet" href="./pixel-cabin.css?v=stage.11"/>
+<link href="./style.css" rel="stylesheet"/>
+<link href="./vendor/leaflet/leaflet.css" rel="stylesheet"/>
+<link href="./map.css" rel="stylesheet"/>
+<script src="./vendor/leaflet/leaflet.js"></script>
+<link href="./workbench.css?v=stage.11" rel="stylesheet"/><link href="./visual-editor.css" rel="stylesheet"/><link href="./setup.css" rel="stylesheet"/><link href="./creative-world.css" rel="stylesheet"/><link rel="stylesheet" href="./series-ui.css?v=round2.1"/><script type="module" src="./series-panels.js?v=round2.1"></script><link rel="stylesheet" href="./causal-panel.css?v=mobile.2"/></head>
+<body data-stage-mode="cabin"><a class="dw-skip" href="#worldContent" data-series-text="跳到工作区">跳到工作区</a>
+<div class="wb-app"><div class="dw-navigation"><a class="dw-brand" href="#worldContent"><span aria-hidden="true">DW</span><span class="dw-brand-label" data-series-text="群间世界">群间世界</span></a><nav aria-label="群间世界工作区" class="wb-tabs" id="wbTabs" role="tablist" data-series-aria-label="群间世界工作区">
+<button aria-controls="view-life" aria-selected="false" class="wb-tab" data-cluster="companion" data-view="life" id="tab-life" role="tab" tabindex="-1" type="button" data-series-text="日常">日常</button><button aria-controls="view-stories" aria-selected="false" class="wb-tab" data-cluster="companion" data-view="stories" id="tab-stories" role="tab" tabindex="-1" type="button" data-series-text="故事与约定">故事与约定</button><button aria-controls="view-scenes" aria-selected="false" class="wb-tab" data-cluster="companion" data-view="scenes" id="tab-scenes" role="tab" tabindex="-1" type="button" data-series-text="室内动作">室内动作</button><button aria-controls="view-weather" aria-selected="false" class="wb-tab" data-cluster="companion" data-view="weather" id="tab-weather" role="tab" tabindex="-1" type="button" data-series-text="天气环境">天气环境</button><button aria-controls="view-map" aria-selected="false" class="wb-tab" data-cluster="map" data-view="map" id="tab-map" role="tab" tabindex="-1" type="button" data-series-text="世界地图">世界地图</button><button aria-controls="view-cards" aria-selected="false" class="wb-tab" data-cluster="studio" data-view="cards" id="tab-cards" role="tab" tabindex="-1" type="button" data-series-text="角色卡">角色卡</button><button aria-controls="view-books" aria-selected="false" class="wb-tab" data-cluster="studio" data-view="books" id="tab-books" role="tab" tabindex="-1" type="button" data-series-text="世界书">世界书</button><button aria-controls="view-sessions" aria-selected="false" class="wb-tab" data-cluster="studio" data-view="sessions" id="tab-sessions" role="tab" tabindex="-1" type="button" data-series-text="场景与会话">场景与会话</button><button aria-controls="view-overview" aria-selected="true" class="wb-tab" data-cluster="studio" data-view="overview" id="tab-overview" role="tab" tabindex="0" type="button" data-series-text="总览">总览</button><button aria-controls="view-preview" aria-selected="false" class="wb-tab" data-cluster="ops" data-view="preview" id="tab-preview" role="tab" tabindex="-1" type="button" data-series-text="注入预览">注入预览</button><button aria-controls="view-config" aria-selected="false" class="wb-tab" data-cluster="ops" data-view="config" id="tab-config" role="tab" tabindex="-1" type="button" data-series-text="生效配置">生效配置</button><button aria-controls="view-migration" aria-selected="false" class="wb-tab" data-cluster="ops" data-view="migration" id="tab-migration" role="tab" tabindex="-1" type="button" data-series-text="迁移">迁移</button></nav><div class="dw-nav-tools"><button class="wb-button primary dw-back-cabin" id="wbBackCabin" type="button" data-series-text="回到 3D 小屋">回到 3D 小屋</button><button aria-pressed="false" class="dw-theme" id="dwTheme" type="button"><span class="dw-theme-label" data-series-text="日间模式">日间模式</span><span aria-hidden="true" class="dw-theme-switch"></span></button></div></div>
+<header class="wb-topbar">
+<div>
+<p class="wb-eyebrow">CHAT DYNAMICS / WORLD</p>
+<h1 id="wbTitle" data-series-text="世界总览">世界总览</h1>
+<p class="wb-lede" id="wbLede" data-series-text="查看角色的生活状态，维护共同的世界。">查看角色的生活状态，维护共同的世界。</p>
+</div>
+<div class="wb-topbar-tools">
+
+<div aria-live="polite" class="wb-link-state" role="status">
+<span aria-hidden="true" class="wb-lamp" id="wbLamp"></span>
+<span id="wbLinkLabel" data-series-text="连接中">连接中</span>
+</div>
+<button class="wb-button" id="wbRefresh" type="button" data-series-text="刷新">刷新</button>
+</div>
+<p class="dw-theme-status" id="dwThemeStatus" role="status"></p></header><section id="dynamics-series-panel" aria-label="互通插件状态" data-series-aria-label="互通插件状态"><p class="sp-feedback" role="status" data-series-text="正在读取互通插件…">正在读取互通插件…</p></section>
+<main class="wb-main" id="worldContent" tabindex="-1">
+<p aria-live="polite" class="wb-notice wb-hidden" id="wbNotice" role="status"></p>
+<div class="dw-context">
+<div><span class="wb-tag" id="dwRuntime" data-series-text="读取世界状态…">读取世界状态…</span><p id="dwRuntimeHint"></p></div>
+<label class="wb-field"><span data-series-text="当前会话">当前会话</span><input id="dwScope" list="dwScopes" placeholder="选择或输入会话" type="text" data-series-placeholder="选择或输入会话"/><datalist id="dwScopes"></datalist></label>
+<button class="wb-button" id="dwLoad" data-series-text="加载会话">加载会话</button>
+</div>
+<section aria-labelledby="tab-map" class="wb-view wb-hidden" id="view-map" role="tabpanel">
+<div class="dw-map-heading" id="mapLocation"><div><p class="wb-eyebrow">LIVE WORLD</p><h2 data-series-text="位置与行程">位置与行程</h2><p aria-live="polite" id="mapStatus" role="status" data-series-text="选择会话，查看角色所在的世界。">选择会话，查看角色所在的世界。</p></div><button class="wb-button" id="mapFit" data-series-text="查看全图">查看全图</button></div><nav aria-label="地图页分区" class="dw-section-nav" data-series-aria-label="地图页分区"><a href="#mapLocation" data-series-text="位置与行程">位置与行程</a><a href="#mapEnvironment" data-series-text="天气环境">天气环境</a><a href="#mapScenes" data-series-text="房间与物品">房间与物品</a><a href="#mapSettings" data-series-text="世界设置">世界设置</a></nav>
+<div class="wb-row dw-map-modes dw-toolbar"><label class="wb-field"><span data-series-text="地图模式">地图模式</span><select id="mapMode"><option value="virtual" data-series-text="虚拟世界">虚拟世界</option><option value="real" data-series-text="现实底图">现实底图</option></select></label><button class="wb-button" id="mapSwitch" data-series-text="切换到已保存的地图">切换到已保存的地图</button><span class="dw-meta" id="mapModeHint" data-series-text="两种地图分别保存，切走时冻结行程。">两种地图分别保存，切走时冻结行程。</span></div>
+<div class="dw-map-layout">
+<div class="dw-map-stage"><div aria-label="角色世界地图" id="worldMap" data-series-aria-label="角色世界地图"></div><div aria-hidden="true" id="weatherEffect"></div><div id="mapEmpty" data-series-text="地图尚未生成。展开下方“生成地图”，或配置现实地图。">地图尚未生成。展开下方“生成地图”，或配置现实地图。</div></div>
+<aside class="wb-panel dw-map-sidebar"><header><h2 id="mapCharacter" data-series-text="角色位置">角色位置</h2></header><div class="wb-panel-body">
+<p class="dw-map-where" id="mapWhere" data-series-text="待定位">待定位</p><p id="mapActivity">—</p><p class="dw-meta" id="mapJourney"></p>
+<div class="dw-map-progress"><span id="mapProgress"></span></div>
+<p class="dw-meta" id="mapPlan"></p>
+<label class="wb-field"><span data-series-text="选择地点">选择地点</span><select id="mapDestination"></select></label>
+<div class="wb-row"><button class="wb-button primary" data-map-action="depart" data-series-text="出发">出发</button><button class="wb-button" data-map-action="plan" data-series-text="加入计划">加入计划</button></div>
+<details><summary data-series-text="管理角色位置">管理角色位置</summary><p class="dw-meta" data-series-text="位置纠正会记入世界日志。撤销行程会回到最后确认的地点。">位置纠正会记入世界日志。撤销行程会回到最后确认的地点。</p><div class="wb-row"><button class="wb-button" data-map-action="locate" data-series-text="设为当前位置">设为当前位置</button><button class="wb-button" data-map-action="cancel" data-series-text="撤销行程">撤销行程</button></div></details>
+</div></aside>
+</div>
+<div id="mapWeatherHome"><section class="wb-panel dw-weather-panel" id="mapEnvironment"><div class="wb-panel-body">
+<div class="dw-weather-heading"><div><p class="wb-eyebrow" id="weatherSource" data-series-text="世界环境">世界环境</p><h2 id="weatherNow" data-series-text="等待天气">等待天气</h2><p class="dw-meta" id="weatherDetails"></p></div><div class="dw-meta" id="weatherSun"></div></div>
+<p class="dw-meta" id="weatherProviderInfo"></p><p class="dw-meta"><a id="weatherAttribution" rel="noopener noreferrer" target="_blank"></a> <a id="weatherLicense" rel="noopener noreferrer" target="_blank"></a></p><div class="dw-weather-forecast" id="weatherForecast"></div><p class="dw-meta" id="weatherStatus" role="status"></p>
+
+
+</div></section></div>
+<div id="mapScenesHome"><section class="wb-panel dw-scene-panel" id="mapScenes"><header><h2 data-series-text="地点、房间与行动">地点、房间与行动</h2></header><div class="wb-panel-body">
+<p id="sceneStatus" role="status" data-series-text="选择会话，读取场景状态。">选择会话，读取场景状态。</p>
+<div id="sceneBootstrap"><p data-series-text="从已有地点初始化玄关、房间，以及书、雨伞、水壶、纸质笔记本和电脑。只建立现在的设定，不补写过去经历。">从已有地点初始化玄关、房间，以及书、雨伞、水壶、纸质笔记本和电脑。只建立现在的设定，不补写过去经历。</p><div class="wb-row"><select id="sceneHome"></select><button class="wb-button primary" id="sceneInitialize" data-series-text="初始化住所场景">初始化住所场景</button></div></div>
+<div hidden="" id="sceneContents"><div class="dw-weather-heading"><div><h3 id="sceneWhere"></h3><p class="dw-meta" id="sceneCondition"></p></div><div><p id="sceneAction"></p><progress id="sceneActionProgress" max="1" value="0"></progress></div></div>
+<div class="wb-row"><button class="wb-button" data-scene-preset="read" data-series-text="取书并阅读">取书并阅读</button><button class="wb-button" data-scene-preset="drink" data-series-text="拿水壶喝水">拿水壶喝水</button><button class="wb-button" data-scene-preset="rain_walk" data-series-text="拿伞前往所选地图地点">拿伞前往所选地图地点</button><button class="wb-button" id="sceneCancel" data-series-text="取消剩余步骤">取消剩余步骤</button></div>
+<p class="dw-meta" data-series-text="角色会根据安排自行选择动作，这里也可以手动管理。">角色会根据安排自行选择动作，这里也可以手动管理。</p><p class="dw-meta" data-series-text="物品余量、读书页数和房间位置在动作完成后更新。取消保留已发生的结果；已开始的地图行程继续。">物品余量、读书页数和房间位置在动作完成后更新。取消保留已发生的结果；已开始的地图行程继续。</p>
+<div class="dw-scene-items" id="sceneItems"></div>
+<details><summary data-series-text="画风与固定外观">画风与固定外观</summary><div id="sceneVisual"></div><p class="dw-meta" data-series-text="房间布局和物品外观持续复用；天气、携带位置与使用状态以当前生活为准。新生成的图片不会自动覆盖固定设定。">房间布局和物品外观持续复用；天气、携带位置与使用状态以当前生活为准。新生成的图片不会自动覆盖固定设定。</p></details>
+<details id="sceneWriting"><summary data-series-text="写笔记与使用电脑">写笔记与使用电脑</summary><div class="dw-weather-settings"><label class="wb-field"><span data-series-text="标题">标题</span><input id="sceneDraftTitle" maxlength="60" type="text"/></label><label class="wb-field"><span data-series-text="电脑任务">电脑任务</span><select id="sceneComputerMode"><option value="writing" data-series-text="写草稿">写草稿</option><option value="organize" data-series-text="整理已有文档">整理已有文档</option><option value="gaming" data-series-text="玩游戏 10 分钟">玩游戏 10 分钟</option></select></label></div><label class="wb-field"><span data-series-text="本次写作内容（笔记最多 500 字；电脑草稿最多 1000 字）">本次写作内容（笔记最多 500 字；电脑草稿最多 1000 字）</span><textarea id="sceneDraftText" maxlength="1000" rows="3"></textarea></label><div class="wb-row"><button class="wb-button" data-scene-preset="write_note" data-series-text="拿笔记本并记录">拿笔记本并记录</button><button class="wb-button" data-scene-preset="computer_work" data-series-text="到电脑前执行任务">到电脑前执行任务</button></div><p class="dw-meta" data-series-text="内容在动作完成后保存。这里的电脑是虚拟设施，不操作宿主电脑或真实网络；角色自主写作时自行选择内容。">内容在动作完成后保存。这里的电脑是虚拟设施，不操作宿主电脑或真实网络；角色自主写作时自行选择内容。</p></details>
+<details><summary data-series-text="自定义行动流程">自定义行动流程</summary><div class="wb-row"><select id="sceneStepKind"><option value="enter" data-series-text="进入房间">进入房间</option><option value="leave" data-series-text="到地点入口">到地点入口</option><option value="take" data-series-text="拿取物品">拿取物品</option><option value="put" data-series-text="放下物品">放下物品</option><option value="read" data-series-text="阅读">阅读</option><option value="drink" data-series-text="喝水">喝水</option><option value="refill" data-series-text="补水">补水</option><option value="open_umbrella" data-series-text="撑伞">撑伞</option><option value="fold_umbrella" data-series-text="收伞">收伞</option><option value="rest" data-series-text="休息">休息</option><option value="dry" data-series-text="晾干">晾干</option><option value="travel" data-series-text="前往地图地点">前往地图地点</option><option value="write_note" data-series-text="写笔记">写笔记</option><option value="read_notes" data-series-text="翻阅笔记">翻阅笔记</option><option value="power_on" data-series-text="开机">开机</option><option value="power_off" data-series-text="关机">关机</option><option value="computer_work" data-series-text="使用电脑">使用电脑</option><option value="water_garden" data-series-text="浇灌花圃菜畦">浇灌花圃菜畦</option><option value="harvest_garden" data-series-text="采收花菜">采收花菜</option><option value="prepare_meal" data-series-text="下厨备餐">下厨备餐</option><option value="brew_tea" data-series-text="冲泡花草茶">冲泡花草茶</option><option value="open_mailbox" data-series-text="查收院门信箱">查收院门信箱</option></select><select id="sceneStepTarget"></select><button class="wb-button" id="sceneAddStep" data-series-text="加入步骤">加入步骤</button></div><ol id="sceneSteps"></ol><div class="wb-row"><button class="wb-button primary" id="sceneStart" data-series-text="开始流程">开始流程</button><button class="wb-button" id="sceneClearSteps" data-series-text="清空步骤">清空步骤</button></div></details>
+<details><summary data-series-text="地点与房间管理">地点与房间管理</summary><div class="dw-weather-settings">
+<label class="wb-field"><span data-series-text="地点">地点</span><select id="scenePlace"></select></label><label class="wb-field"><span data-series-text="地点类型">地点类型</span><select id="scenePlaceKind"><option value="unknown" data-series-text="待确定">待确定</option><option value="building" data-series-text="建筑">建筑</option><option value="outdoor" data-series-text="室外区域">室外区域</option></select></label>
+<label class="wb-field"><span data-series-text="入口是否遮雨">入口是否遮雨</span><select id="sceneShelter"><option value="unknown" data-series-text="待确定">待确定</option><option value="yes" data-series-text="有遮蔽">有遮蔽</option><option value="no" data-series-text="露天">露天</option></select></label><label class="wb-field"><span data-series-text="是否开放">是否开放</span><select id="sceneOpen"><option value="yes" data-series-text="开放">开放</option><option value="no" data-series-text="关闭">关闭</option></select></label>
+<label class="wb-field"><span data-series-text="开放开始小时">开放开始小时</span><input id="sceneOpens" max="23" min="0" type="number" value="0"/></label><label class="wb-field"><span data-series-text="开放结束小时">开放结束小时</span><input id="sceneCloses" max="24" min="0" type="number" value="24"/></label></div><button class="wb-button" id="sceneSavePlace" data-series-text="保存地点状态">保存地点状态</button>
+<p class="dw-meta" data-series-text="开放时间使用该世界/参考城市时区；开始和结束相同表示全天。房间连通于地点入口。">开放时间使用该世界/参考城市时区；开始和结束相同表示全天。房间连通于地点入口。</p><div class="dw-weather-settings">
+<label class="wb-field"><span data-series-text="房间（选择后可编辑）">房间（选择后可编辑）</span><select id="sceneRoom"></select></label><label class="wb-field"><span data-series-text="房间名称">房间名称</span><input id="sceneRoomName" maxlength="60" type="text"/></label>
+<label class="wb-field"><span data-series-text="房间遮蔽">房间遮蔽</span><select id="sceneRoomShelter"><option value="yes" data-series-text="室内 / 遮雨">室内 / 遮雨</option><option value="no" data-series-text="露天">露天</option></select></label><label class="wb-field"><span data-series-text="允许进入">允许进入</span><select id="sceneRoomAccess"><option value="yes" data-series-text="是">是</option><option value="no" data-series-text="否">否</option></select></label>
+<label class="wb-field"><span data-series-text="可补水">可补水</span><select id="sceneRoomWater"><option value="no" data-series-text="无水源">无水源</option><option value="yes" data-series-text="有水源">有水源</option></select></label></div><button class="wb-button" id="sceneSaveRoom" data-series-text="保存房间">保存房间</button>
+</details>
+<details><summary data-series-text="增添少量物品">增添少量物品</summary><div class="dw-weather-settings"><label class="wb-field"><span data-series-text="名称">名称</span><input id="sceneItemName" maxlength="60" type="text"/></label><label class="wb-field"><span data-series-text="类型">类型</span><select id="sceneItemKind"><option value="book" data-series-text="书（120 页）">书（120 页）</option><option value="umbrella" data-series-text="雨伞">雨伞</option><option value="water" data-series-text="水壶（3 份）">水壶（3 份）</option><option value="notebook" data-series-text="纸质笔记本">纸质笔记本</option><option value="computer" data-series-text="固定电脑">固定电脑</option></select></label><label class="wb-field"><span data-series-text="存放房间（使用上方选择的地点）">存放房间（使用上方选择的地点）</span><select id="sceneItemRoom"></select></label></div><button class="wb-button" id="sceneAddItem" data-series-text="建立物品">建立物品</button></details>
+<h3 data-series-text="最近行动记录">最近行动记录</h3><div id="sceneReceipts"></div>
+</div>
+</div></section></div>
+<div class="dw-section-heading"><div><p class="wb-eyebrow">WORLD SETTINGS</p><h2 data-series-text="世界设置">世界设置</h2></div><p data-series-text="维护地图、环境与天气来源">维护地图、环境与天气来源</p></div><div class="wb-columns dw-map-editors" id="mapSettings">
+<details class="wb-panel" id="realMapSettings"><summary data-series-text="现实地图 · 城市与坐标">现实地图 · 城市与坐标</summary><div class="wb-panel-body">
+<p data-series-text="把角色放进现实地理背景。角色位置由剧情和管理操作维护，不读取设备定位。移动按直线估算，用于剧情展示。">把角色放进现实地理背景。角色位置由剧情和管理操作维护，不读取设备定位。移动按直线估算，用于剧情展示。</p>
+<div class="wb-row"><label class="wb-field"><span data-series-text="搜索城市">搜索城市</span><input id="realSearch" maxlength="80" placeholder="输入城市名后搜索" type="text" data-series-placeholder="输入城市名后搜索"/></label><button class="wb-button" id="realSearchButton" data-series-text="搜索">搜索</button></div><div class="dw-city-results" id="realResults"></div><p class="dw-meta" id="realSearchStatus" role="status"></p>
+<label class="wb-field"><span data-series-text="地点名称">地点名称</span><input id="realName" maxlength="60" placeholder="城市或场景名称" type="text" data-series-placeholder="城市或场景名称"/></label><div class="dw-weather-settings">
+<label class="wb-field"><span data-series-text="纬度">纬度</span><input id="realLatitude" max="85" min="-85" step="any" type="number"/></label><label class="wb-field"><span data-series-text="经度">经度</span><input id="realLongitude" max="180" min="-180" step="any" type="number"/></label>
+<label class="wb-field"><span data-series-text="地点时区（IANA）">地点时区（IANA）</span><input id="realTimezone" type="text" value="Asia/Shanghai"/></label><label class="wb-field"><span data-series-text="示意步行速度（km/h）">示意步行速度（km/h）</span><input id="realSpeed" max="15" min="1" step="0.5" type="number" value="4.5"/></label></div>
+<button class="wb-button primary" id="realConfigure" data-series-text="保存并使用现实地图">保存并使用现实地图</button><p class="dw-meta" data-series-text="底图 © OpenStreetMap contributors。搜索与现实天气需要联网；也可手动填写经纬度。首次配置后仍需确认角色当前位置。">底图 © OpenStreetMap contributors。搜索与现实天气需要联网；也可手动填写经纬度。首次配置后仍需确认角色当前位置。</p>
+</div></details>
+<details class="wb-panel" id="mapGeneration"><summary data-series-text="生成地图">生成地图</summary><div class="wb-panel-body">
+<p data-series-text="Azgaar 离线生成地形与城镇，地点名称可来自世界书。地图属于当前角色，在其会话间共享。">Azgaar 离线生成地形与城镇，地点名称可来自世界书。地图属于当前角色，在其会话间共享。</p>
+<label class="wb-field"><span data-series-text="地图种子">地图种子</span><input id="mapSeed" maxlength="64" type="text" value="20261111"/></label>
+<label class="wb-field"><span data-series-text="地点名称（每行一个，留空使用世界书或生成的城镇）">地点名称（每行一个，留空使用世界书或生成的城镇）</span><textarea id="mapPlaceNames" placeholder="住所
+学校
+街角咖啡馆
+海边步道" rows="5" data-series-placeholder="住所
+学校
+街角咖啡馆
+海边步道"></textarea></label>
+<label class="wb-field"><span data-series-text="行程比例（每地图单位所需秒数）">行程比例（每地图单位所需秒数）</span><input id="mapSpeed" max="120" min="1" type="number" value="10"/></label>
+<button class="wb-button primary" id="mapGenerate" data-series-text="生成并保存地图">生成并保存地图</button>
+</div></details>
+<details class="wb-panel"><summary data-series-text="地点管理">地点管理</summary><div class="wb-panel-body">
+<p data-series-text="点击地图上的陆地设置坐标；点击已有地点可修改名称。正在移动时不能修改地图。">点击地图上的陆地设置坐标；点击已有地点可修改名称。正在移动时不能修改地图。</p>
+<label class="wb-field"><span data-series-text="地点名称">地点名称</span><input id="mapPlaceName" maxlength="60" type="text"/></label>
+<p class="dw-meta" id="mapCoordinates" data-series-text="尚未选择坐标">尚未选择坐标</p>
+<div class="wb-row"><button class="wb-button" id="mapSavePlace" data-series-text="保存地点">保存地点</button><button class="wb-button" id="mapNewPlace" data-series-text="新建地点">新建地点</button></div>
+</div></details>
+<div class="dw-weather-config-home" id="mapWeatherConfigHome"><details class="wb-panel dw-setting-card" id="weatherSettings"><summary data-series-text="天气与昼夜设置">天气与昼夜设置</summary><div class="wb-panel-body"><div class="dw-weather-settings">
+<label class="wb-field"><span data-series-text="天气来源">天气来源</span><select id="weatherMode"><option value="auto" data-series-text="跟随地图（虚拟模拟 / 现实天气）">跟随地图（虚拟模拟 / 现实天气）</option><option value="simulated" data-series-text="始终使用世界模拟">始终使用世界模拟</option><option value="real" data-series-text="现实天气">现实天气</option><option value="off" data-series-text="关闭天气">关闭天气</option></select></label>
+<label class="wb-field"><span data-series-text="现实天气主源">现实天气主源</span><select id="weatherProvider"><option value="met">MET Norway</option><option value="open_meteo">Open-Meteo</option><option value="qweather" data-series-text="和风天气（需配置凭据）">和风天气（需配置凭据）</option></select></label>
+<label class="wb-field"><span data-series-text="自动备用源">自动备用源</span><select id="weatherFallback"><option value="none" data-series-text="不使用备用">不使用备用</option><option value="met">MET Norway</option><option value="open_meteo">Open-Meteo</option><option value="qweather" data-series-text="和风天气（需配置凭据）">和风天气（需配置凭据）</option></select></label>
+<label class="wb-field"><span data-series-text="模拟气候">模拟气候</span><select id="weatherClimate"><option value="temperate" data-series-text="温带四季">温带四季</option><option value="warm" data-series-text="温暖湿润">温暖湿润</option><option value="cold" data-series-text="寒冷地区">寒冷地区</option><option value="dry" data-series-text="干燥地区">干燥地区</option></select></label>
+<label class="wb-field"><span data-series-text="世界 / 参考城市时区（IANA）">世界 / 参考城市时区（IANA）</span><input id="weatherTimezone" type="text" value="Asia/Shanghai"/></label>
+<label class="wb-field"><span data-series-text="雨雪与夜间效果">雨雪与夜间效果</span><select id="weatherEffects"><option value="on" data-series-text="开启">开启</option><option value="off" data-series-text="关闭">关闭</option></select></label>
+</div><p class="dw-meta" id="weatherReference" data-series-text="现实天气默认跟随角色已确认地点；虚拟地图可选参考城市。">现实天气默认跟随角色已确认地点；虚拟地图可选参考城市。</p><div class="wb-row"><button class="wb-button" id="weatherUseCity" data-series-text="使用下方填写的城市作为天气参考">使用下方填写的城市作为天气参考</button><button class="wb-button" id="weatherClearCity" data-series-text="清除参考城市">清除参考城市</button><button class="wb-button primary" id="weatherSave" data-series-text="保存天气设置">保存天气设置</button></div><p class="dw-meta" data-series-text="Open-Meteo / 和风按 30 分钟缓存；MET 至少间隔 3 小时请求，并遵守服务缓存时间。天气面板随时间读取相应时段；限流、断网时按设置使用备用源，并标明实际来源。模拟天气不会充当现实天气的备用。">Open-Meteo / 和风按 30 分钟缓存；MET 至少间隔 3 小时请求，并遵守服务缓存时间。天气面板随时间读取相应时段；限流、断网时按设置使用备用源，并标明实际来源。模拟天气不会充当现实天气的备用。</p></div></details><details class="wb-panel dw-setting-card" id="qweatherSettings"><summary data-series-text="和风天气凭据（整个插件共享）">和风天气凭据（整个插件共享）</summary><div class="wb-panel-body"><p class="dw-meta" id="qweatherStatus" data-series-text="尚未配置">尚未配置</p><div class="dw-weather-settings">
+<label class="wb-field"><span>API Host</span><input autocomplete="off" id="qweatherHost" placeholder="控制台分配的 xxx.qweatherapi.com" type="text" data-series-placeholder="控制台分配的 xxx.qweatherapi.com"/></label>
+<label class="wb-field"><span data-series-text="开发者 ID">开发者 ID</span><input autocomplete="off" id="qweatherDeveloper" type="text"/></label>
+<label class="wb-field"><span data-series-text="项目 ID">项目 ID</span><input autocomplete="off" id="qweatherProject" type="text"/></label>
+<label class="wb-field"><span data-series-text="凭据 ID">凭据 ID</span><input autocomplete="off" id="qweatherKeyId" type="text"/></label></div>
+<label class="wb-field"><span data-series-text="Ed25519 私钥 PEM（留空保留已保存的私钥）">Ed25519 私钥 PEM（留空保留已保存的私钥）</span><textarea autocomplete="off" id="qweatherPrivateKey" placeholder="仅提交到本机插件后端，保存后不回显" rows="3" spellcheck="false" data-series-placeholder="仅提交到本机插件后端，保存后不回显"></textarea></label>
+<div class="wb-row"><button class="wb-button" id="qweatherSave" data-series-text="保存凭据">保存凭据</button><button class="wb-button" id="qweatherClear" data-series-text="清除凭据">清除凭据</button></div><p class="dw-meta" data-series-text="保存凭据后，在上方选择和风天气作为主源或备用源。凭据不进入聊天或生活提示词。">保存凭据后，在上方选择和风天气作为主源或备用源。凭据不进入聊天或生活提示词。</p>
+</div></details></div></div>
+</section>
+<section aria-labelledby="tab-life" class="wb-view wb-hidden" id="view-life" role="tabpanel">
+<div class="dw-hero" id="dwLifeSummary"><h2 data-series-text="尚未选择会话">尚未选择会话</h2><p data-series-text="选择一个会话，查看角色的当前活动与今天的安排。">选择一个会话，查看角色的当前活动与今天的安排。</p></div>
+<div class="wb-row dw-actions">
+<button class="wb-button" data-life-action="pause" data-series-text="暂停生活">暂停生活</button>
+<button class="wb-button" data-life-action="resume" data-series-text="恢复生活">恢复生活</button>
+<button class="wb-button" data-life-action="pause_outreach" data-series-text="暂停主动联系">暂停主动联系</button>
+<button class="wb-button" data-life-action="resume_outreach" data-series-text="恢复主动联系">恢复主动联系</button>
+</div>
+<div class="wb-columns dw-life-columns">
+<div class="wb-panel"><header><h2 data-series-text="今天的安排">今天的安排</h2><span class="wb-tag" data-series-text="计划">计划</span></header><div class="wb-panel-body" id="dwPlan" data-series-text="尚未读取。">尚未读取。</div></div>
+<div class="wb-panel"><header><h2 data-series-text="纠正当前状态">纠正当前状态</h2></header><div class="wb-panel-body">
+<p data-series-text="纠正会留下记录，不改写过去的经历。">纠正会留下记录，不改写过去的经历。</p>
+<label class="wb-field"><span data-series-text="当前活动">当前活动</span><input id="dwActivity" maxlength="220" placeholder="例如：在家整理书架" type="text" data-series-placeholder="例如：在家整理书架"/></label>
+<label class="wb-field"><span data-series-text="当前状态">当前状态</span><select id="dwAvailability"><option value="available" data-series-text="空闲">空闲</option><option value="busy" data-series-text="忙碌">忙碌</option><option value="asleep" data-series-text="睡眠">睡眠</option><option value="unknown" data-series-text="未知">未知</option></select></label>
+<button class="wb-button primary" id="dwCorrect" data-series-text="记录纠正">记录纠正</button>
+</div></div>
+</div>
+</section>
+<section aria-labelledby="tab-stories" class="wb-view wb-hidden" id="view-stories" role="tabpanel">
+<div class="wb-columns dw-story-columns">
+<div class="wb-panel"><header><h2 data-series-text="生活故事">生活故事</h2></header><div class="wb-panel-body" id="dwDiary" data-series-text="选择会话后显示生活记录。">选择会话后显示生活记录。</div></div>
+<div><div class="wb-panel"><header><h2 data-series-text="未完的约定">未完的约定</h2></header><div class="wb-panel-body" id="dwCommitments" data-series-text="尚未读取。">尚未读取。</div></div>
+<div class="wb-panel"><header><h2 data-series-text="联系动机">联系动机</h2></header><div class="wb-panel-body" id="dwIntents" data-series-text="尚未读取。">尚未读取。</div></div></div>
+</div>
+</section>
+<section aria-labelledby="tab-migration" class="wb-view wb-hidden" id="view-migration" role="tabpanel">
+<div class="wb-panel"><header><h2 data-series-text="把原来的世界带过来">把原来的世界带过来</h2><span class="wb-tag" data-series-text="保留原数据">保留原数据</span></header><div class="wb-panel-body">
+<p data-series-text="读取旧世界书和动态生活的数据，迁入群间世界的独立存储。先预览数量与冲突；正式导入前停用旧插件，避免源数据继续变化。首版只向空目标导入。">读取旧世界书和动态生活的数据，迁入群间世界的独立存储。先预览数量与冲突；正式导入前停用旧插件，避免源数据继续变化。首版只向空目标导入。</p>
+<div class="wb-row"><button class="wb-button" id="dwPreviewMigration" data-series-text="预览迁移">预览迁移</button><button class="wb-button primary" disabled="" id="dwImportMigration" data-series-text="确认导入">确认导入</button><button class="wb-button" disabled="" id="dwApplySettings" data-series-text="应用迁入的配置">应用迁入的配置</button></div>
+<div aria-live="polite" class="dw-migration-report" id="dwMigrationReport" data-series-text="预览不会改动旧插件数据，也不会调用模型。">预览不会改动旧插件数据，也不会调用模型。</div>
+<p data-series-text="导入完成后，应用迁入的配置；停用旧世界书和动态生活，再在本插件配置中开启“接入聊天与推进生活”。Chat Dynamics 需使用支持群间世界的版本并开启所需会话的持续生活。">导入完成后，应用迁入的配置；停用旧世界书和动态生活，再在本插件配置中开启“接入聊天与推进生活”。Chat Dynamics 需使用支持群间世界的版本并开启所需会话的持续生活。</p>
+</div></div>
+</section>
+<section aria-labelledby="tab-overview" class="wb-view" id="view-overview" role="tabpanel">
+<div class="dw-hero" id="dwOverviewLife"><h2 data-series-text="一个角色，一段持续的生活">一个角色，一段持续的生活</h2><p data-series-text="从角色与世界书开始；绑定会话后，在这里看到当下与未完的故事。">从角色与世界书开始；绑定会话后，在这里看到当下与未完的故事。</p></div>
+<div class="wb-stats" id="wbStats"></div>
+<div class="wb-columns">
+<div class="wb-panel">
+<header>
+<h2 data-series-text="全局启用世界书">全局启用世界书</h2>
+<span class="wb-mono" id="wbActiveCount"></span>
+</header>
+<div class="wb-panel-body" id="wbGlobalActive"></div>
+</div>
+<div class="wb-panel">
+<header>
+<h2 data-series-text="最近活跃会话">最近活跃会话</h2>
+<span class="wb-mono" data-series-text="最多 10 条">最多 10 条</span>
+</header>
+<div class="wb-panel-body" id="wbOverviewSessions"></div>
+</div>
+</div>
+</section>
+<section aria-labelledby="tab-books" class="wb-view wb-hidden" id="view-books" role="tabpanel">
+<div class="wb-columns">
+<div class="wb-panel">
+<header>
+<h2 data-series-text="世界书">世界书</h2>
+<div class="wb-row">
+<button class="wb-button tiny" id="wbNewBook" type="button" data-series-text="新建">新建</button>
+<button class="wb-button tiny" id="wbImportBook" type="button" data-series-text="导入 JSON">导入 JSON</button>
+</div>
+</header>
+<ul class="wb-list" id="wbBookList"></ul>
+</div>
+<div class="wb-panel">
+<header>
+<h2 id="wbBookTitle" data-series-text="未选择世界书">未选择世界书</h2>
+<div class="wb-row" id="wbBookActions"></div>
+</header>
+<div class="wb-panel-body" id="wbBookDetail">
+<div class="wb-empty" data-series-text="从左侧选择一本世界书。">从左侧选择一本世界书。</div>
+</div>
+</div>
+</div>
+</section>
+<section aria-labelledby="tab-cards" class="wb-view wb-hidden" id="view-cards" role="tabpanel">
+<div class="wb-columns">
+<div class="wb-panel">
+<header>
+<h2 data-series-text="角色卡">角色卡</h2>
+<div class="wb-row">
+<span class="wb-mono" id="wbDefaultCard"></span>
+<button class="wb-button tiny" id="wbNewCard" type="button" data-series-text="新建">新建</button>
+<button class="wb-button tiny" id="wbImportCard" type="button" data-series-text="导入 JSON">导入 JSON</button>
+</div>
+</header>
+<ul class="wb-list" id="wbCardList"></ul>
+</div>
+<div class="wb-panel">
+<header>
+<h2 id="wbCardTitle" data-series-text="未选择角色卡">未选择角色卡</h2>
+<div class="wb-row" id="wbCardActions"></div>
+</header>
+<div class="wb-panel-body" id="wbCardDetail">
+<div class="wb-empty" data-series-text="从左侧选择一张角色卡。">从左侧选择一张角色卡。</div>
+</div>
+</div>
+</div>
+</section>
+<section aria-labelledby="tab-sessions" class="wb-view wb-hidden" id="view-sessions" role="tabpanel">
+<div class="wb-panel">
+<header>
+<h2 data-series-text="会话状态">会话状态</h2>
+<span class="wb-mono" data-series-text="按最近活动排序">按最近活动排序</span>
+</header>
+<div class="wb-panel-body scroll" id="wbSessionTable"></div>
+</div>
+</section>
+<section aria-labelledby="tab-preview" class="wb-view wb-hidden" id="view-preview" role="tabpanel">
+<div class="wb-panel">
+<header><h2 data-series-text="注入效果预览">注入效果预览</h2></header>
+<div class="wb-panel-body">
+<div class="wb-row">
+<div class="wb-grow">
+<label class="wb-field">
+<span data-series-text="世界书">世界书</span>
+<select id="wbPreviewBook"></select>
+</label>
+</div>
+<div class="wb-grow">
+<label class="wb-field">
+<span data-series-text="场景（可留空）">场景（可留空）</span>
+<input id="wbPreviewScenario" placeholder="例如：战斗" type="text" data-series-placeholder="例如：战斗"/>
+</label>
+</div>
+</div>
+<label class="wb-field">
+<span data-series-text="测试文本（用于关键词匹配）">测试文本（用于关键词匹配）</span>
+<textarea id="wbPreviewText" placeholder="输入一句话，看看会命中哪些条目" rows="3" data-series-placeholder="输入一句话，看看会命中哪些条目"></textarea>
+</label>
+<div class="wb-row end">
+<button class="wb-button primary" id="wbPreviewRun" type="button" data-series-text="生成预览">生成预览</button>
+</div>
+<p class="wb-mono" id="wbPreviewMatched"></p>
+<pre class="wb-pre" id="wbPreviewOut" data-series-text="尚未生成预览。">尚未生成预览。</pre>
+</div>
+</div>
+</section>
+<section aria-labelledby="tab-config" class="wb-view wb-hidden" id="view-config" role="tabpanel">
+<div class="wb-panel">
+<header>
+<h2 data-series-text="当前生效配置">当前生效配置</h2>
+<span class="wb-mono" data-series-text="只读快照">只读快照</span>
+</header>
+<div class="wb-panel-body">
+<p class="wb-notice" data-series-text="修改配置请到本插件的「配置」页签（管理面板 → 插件 → 世界书 → 配置）。 这里是运行时实际读取到的值，用来核对保存是否生效。">
+                修改配置请到本插件的「配置」页签（管理面板 → 插件 → 世界书 → 配置）。
+                这里是运行时实际读取到的值，用来核对保存是否生效。
+              </p>
+<div id="wbConfigBody"></div>
+</div>
+</div>
+</section>
+<section aria-labelledby="tab-scenes" class="wb-view wb-hidden dw-companion-drawer" id="view-scenes" role="tabpanel">
+<div id="drawerScenesHost"></div>
+</section>
+<section aria-labelledby="tab-weather" class="wb-view wb-hidden dw-companion-drawer" id="view-weather" role="tabpanel">
+<div id="drawerWeatherHost"></div>
+<div class="dw-drawer-weather-editors" id="drawerWeatherConfigHost"></div>
+</section>
+</main>
+</div>
+<div id="wbDrawerHost"></div>
+<script src="./boot.js?v=mobile.2" defer></script>
+</body>
+</html>
+
