@@ -293,7 +293,7 @@ class HorizonsSyncService:
             db.execute(
                 """
                 UPDATE world_horizon_bookmarks SET status='archived'
-                WHERE identity = ? AND status='active' 
+                WHERE identity = ? AND status='active'
                   AND log_id NOT IN (
                       SELECT log_id FROM world_horizon_bookmarks
                       WHERE identity = ? AND status='active'

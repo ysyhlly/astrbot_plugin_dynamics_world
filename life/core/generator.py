@@ -11,6 +11,8 @@ from astrbot.api import logger
 from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.star.context import Context
 
+from ...series_panels import get_series_defaults, inherit_provider
+
 from .state import (
     CHINA_TIMEZONE,
     MAX_HISTORY_DAYS,
@@ -374,6 +376,10 @@ class Generator:
             Persona 提示词；不可用时返回空字符串。
         """
         persona_id = str(self.config.get("persona_id", "")).strip()
+        if not persona_id:
+            persona_id = str(
+                get_series_defaults(self.context).get("persona_id", "")
+            ).strip()
         if persona_id:
             try:
                 persona = await self.context.persona_manager.get_persona(persona_id)
@@ -394,7 +400,9 @@ class Generator:
 
     async def _get_provider(self):
         """返回配置的或当前活跃的 LLM provider。"""
-        provider_id = str(self.config.get("llm_provider_id", "")).strip()
+        provider_id = inherit_provider(
+            self.config.get("llm_provider_id", ""), self.context, role="reply"
+        )
         if provider_id:
             return self.context.get_provider_by_id(provider_id)
         return self.context.get_using_provider()
