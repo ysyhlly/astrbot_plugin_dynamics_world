@@ -1,3 +1,5 @@
+import {BED_PLACEMENTS, DESK_PLACEMENTS, furniturePoint} from './cabin-layout.js';
+
 // The cabin illustration provides a position for each room and action pose.
 // Anchors align with the furniture: desk chair, bed edge, dining stool, kitchen
 // counter, washstand, potted plant and the garden bench / vegetable patch, and
@@ -40,20 +42,7 @@ const BASE_FACING = {
   garden: {water: -1.02},
 };
 
-const DESK_SLOT_ANCHORS = {
-  left_wall: {write: [-3.08, 0.38, 0.38], yaw: -Math.PI / 2, attach: 'B'},
-  right_wall: {write: [2.82, 0.38, 0.12], yaw: Math.PI / 2, attach: 'C1'},
-  back_wall: {write: [1.55, 0.38, -1.62], yaw: Math.PI, attach: 'C2'},
-  center: {write: [0.22, 0.38, 1.92], yaw: Math.PI, attach: 'H'},
-  bedside: {write: [-1.72, 0.38, -0.28], yaw: Math.PI, attach: 'B'},
-};
-
-const BED_SLOT_ANCHORS = {
-  right_wall: {rest: [2.68, 0.49, 0.22], sleep: [2.88, 0.90, -0.27], yaw: -Math.PI / 2, sleepYaw: Math.PI, attach: 'C1'},
-  back_wall: {rest: [1.38, 0.49, -1.86], sleep: [1.23, 0.90, -1.78], yaw: 0, sleepYaw: -Math.PI / 2, attach: 'C2'},
-  center: {rest: [0.96, 0.49, 1.15], sleep: [0.72, 0.90, 1.57], yaw: -Math.PI / 2, sleepYaw: 0, attach: 'H'},
-  near_window: {rest: [0.12, 0.49, -1.52], sleep: [-0.27, 0.90, -1.48], yaw: 0, sleepYaw: -Math.PI / 2, attach: 'N'},
-};
+const BED_ATTACH = {right_wall: 'C1', back_wall: 'C2', center: 'H', near_window: 'N'};
 
 const BOOKCASE_SLOT_ANCHORS = {
   left_wall: {read: [-3.28, 0.13, 0.48], yaw: -Math.PI / 2, attach: 'B'},
@@ -67,6 +56,7 @@ export function resolveFurnitureLayout(data) {
   const roomFacing = {...BASE_FACING.room};
   const attachOverrides = {};
   const occupiedSlots = {};
+  let chair = DESK_PLACEMENTS.near_window.chair, bed = BED_PLACEMENTS.left_wall;
 
   const scene = data?.scene;
   const designs = Array.isArray(scene?.room_designs)
@@ -78,23 +68,21 @@ export function resolveFurnitureLayout(data) {
   for (const item of furniture) {
     if (!item || !item.kind || !item.position) continue;
     occupiedSlots[item.position] = item.kind;
-    if (item.kind === 'desk' && item.movable && item.position !== 'near_window' && DESK_SLOT_ANCHORS[item.position]) {
-      const cfg = DESK_SLOT_ANCHORS[item.position];
-      roomAnchors.write = [...cfg.write];
-      roomFacing.write = cfg.yaw;
+    if (item.kind === 'desk' && item.movable && DESK_PLACEMENTS[item.position]) {
+      const cfg = DESK_PLACEMENTS[item.position];
+      chair = cfg.chair;
+      roomAnchors.write = furniturePoint(chair, 0, .38, .04);
+      roomFacing.write = chair[3] > 0 ? chair[3] - Math.PI : chair[3] + Math.PI;
       attachOverrides.write = cfg.attach;
       attachOverrides.desk_tea = cfg.attach;
-    } else if (item.kind === 'bed' && item.movable && item.position !== 'left_wall' && BED_SLOT_ANCHORS[item.position]) {
-      const cfg = BED_SLOT_ANCHORS[item.position];
-      roomAnchors.rest = [...cfg.rest];
-      roomAnchors.game = [...cfg.rest];
-      roomAnchors.sleep = [...cfg.sleep];
-      roomFacing.rest = cfg.yaw;
-      roomFacing.game = cfg.yaw;
-      roomFacing.sleep = cfg.sleepYaw ?? 0;
-      attachOverrides.rest = cfg.attach;
-      attachOverrides.game = cfg.attach;
-      attachOverrides.sleep = cfg.attach;
+    } else if (item.kind === 'bed' && item.movable && BED_ATTACH[item.position]) {
+      bed = BED_PLACEMENTS[item.position];
+      roomAnchors.rest = furniturePoint(bed, 1.12, .49, .75);
+      roomAnchors.game = [...roomAnchors.rest];
+      roomAnchors.sleep = furniturePoint(bed, .47, .90, .42);
+      roomFacing.rest = roomFacing.game = bed[3] + Math.PI / 2;
+      roomFacing.sleep = bed[3];
+      attachOverrides.rest = attachOverrides.game = attachOverrides.sleep = BED_ATTACH[item.position];
     } else if (item.kind === 'bookcase' && item.movable && item.position !== 'back_wall' && BOOKCASE_SLOT_ANCHORS[item.position]) {
       const cfg = BOOKCASE_SLOT_ANCHORS[item.position];
       roomAnchors.read = [...cfg.read];
@@ -111,6 +99,8 @@ export function resolveFurnitureLayout(data) {
     facing: {room: roomFacing, garden: BASE_FACING.garden},
     attachOverrides,
     occupiedSlots,
+    chairApproach: furniturePoint(chair, .63, .13, .04),
+    bedApproach: furniturePoint(bed, 1.48, .13, .75),
   };
 }
 
@@ -274,6 +264,13 @@ export function projectAvatar(data, selection, nowMs = Date.now()) {
   const to = entering ? points.hall : points.threshold;
   const position = walking ? from.map((value, axis) => value + (to[axis] - value) * actionTime.progress) : [...points[pose]];
   const rotationY = walking ? Math.atan2(to[0] - from[0], to[2] - from[2]) : layout.facing[location][pose] || 0;
+  let approach = null;
+  if (seated || pose === 'sleep') {
+    if (location === 'garden') approach = [position[0], -.25, position[2] + .52];
+    else if (pose === 'write') approach = layout.chairApproach;
+    else if (pose === 'eat') approach = [position[0] - .5, .13, position[2]];
+    else approach = layout.bedApproach;
+  }
   const actionPose = source === 'action';
   return {
     ...projection,
@@ -281,6 +278,8 @@ export function projectAvatar(data, selection, nowMs = Date.now()) {
     location,
     pose,
     seated,
+    approach,
+    walkDistance: walking ? Math.hypot(to[0] - from[0], to[2] - from[2]) * actionTime.progress : 0,
     position,
     rotationY,
     source,

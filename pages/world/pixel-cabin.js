@@ -863,7 +863,7 @@ async function ensure3D(){
  setText(loading,msg('正在搭建 3D 小屋…'));
  delete loading.dataset.uiState;
  initializing=(async()=>{try{
-  const {createCabin3D}=await withTimeout(import('./cabin3d.min.js?v=garden.1'));
+  const {createCabin3D}=await withTimeout(import('./cabin3d.min.js?v=cabin.2'));
   room3d=createCabin3D(art,{
    onSelect:(rawKey,opts)=>openPortalPeek(portalKeyFrom3d(rawKey)||rawKey,opts),
    onHover:rawKey=>{

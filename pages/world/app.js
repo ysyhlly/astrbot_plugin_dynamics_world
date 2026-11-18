@@ -3,7 +3,7 @@ import { languagePicker, msg, setText, tr } from "./series-ui.js";
 import "./map.js?v=round2.1";
 import "./setup.js?v=series-audit.1";
 import "./creative-world.js";
-import "./pixel-cabin.js?v=mobile.2";
+import "./pixel-cabin.js?v=cabin.2";
 import { refreshWorld, refreshLife } from "./world.js?v=series-audit.1";
 import { apiGet, escapeHtml, readyBridge } from "./api.js";
 import { createWorkbenchOps } from "./workbench-ops.js?v=stage.11";

@@ -2,6 +2,7 @@
 import {mergeGeometries} from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import {addCabinGarden} from './cabin-garden.js';
 import {createCabinJoinery} from './cabin-joinery.js';
+import {addWindowLandscape} from './cabin-window.js';
 
 export function surfaceCanvas(kind) {
   const c = document.createElement('canvas');
@@ -12,20 +13,27 @@ export function surfaceCanvas(kind) {
   g.fillStyle = '#ffffff';
   g.fillRect(0, 0, 128, 128);
   if (kind === 'wood') {
-    for (let i = 0; i < 30; i++) {
-      const y = rnd() * 128;
-      g.fillStyle = 'rgba(92,72,50,' + (0.03 + rnd() * 0.06) + ')';
-      g.fillRect(0, y, 128, 1 + rnd() * 2);
-    }
-    for (let i = 0; i < 4; i++) {
-      const x = rnd() * 128, y = rnd() * 128;
-      g.fillStyle = 'rgba(80,60,40,0.10)';
+    const knots = [[38, 44], [94, 98]], tau = 2 * Math.PI;
+    g.lineCap = 'round';
+    for (let row = 0; row < 48; row++) {
+      const y = (row + .5) * 128 / 48, phase = row * .34;
+      g.strokeStyle = 'rgba(99,61,33,' + (.07 + (row % 5) * .024) + ')';
+      g.lineWidth = row % 4 === 0 ? 1.35 : .65;
       g.beginPath();
-      g.ellipse(x, y, 2.5 + rnd() * 3, 1.2 + rnd() * 1.4, 0, 0, 7);
-      g.fill();
+      for (let x = 0; x <= 128; x += 2) {
+        let grain = y + 1.5 * Math.sin(x / 128 * tau + phase) + .5 * Math.sin(x / 128 * tau * 3 - phase);
+        for (const [cx, cy] of knots) {
+          const dx = ((x - cx + 192) % 128) - 64, dy = y - cy;
+          grain += Math.sign(dy) * 4.6 * Math.exp(-dx*dx/155 - dy*dy/45);
+        }
+        if (x === 0) g.moveTo(x, grain); else g.lineTo(x, grain);
+      }
+      g.stroke();
     }
-    g.fillStyle = 'rgba(60,50,40,0.10)';
-    for (let x = 0; x < 128; x += 32) g.fillRect(x, 0, 1, 128);
+    for (const [x,y] of knots) {
+      g.fillStyle = 'rgba(98,61,36,.18)';
+      g.beginPath(); g.ellipse(x,y,4.5,.95,0,0,tau); g.fill();
+    }
   } else if (kind === 'quilt') {
     g.fillStyle='#f2f0e3'; g.fillRect(0,0,128,128);
     for(let y=0;y<8;y++)for(let x=0;x<8;x++){
@@ -166,38 +174,16 @@ export function buildCabinWorld(THREE, scene, {getHovered, getNight, particleMes
   const windowGroup = group(.05, 2.25, -3.51);
   box(windowGroup, 2.15, 1.7, .12, 0, 0, 0, 0x79917a);
   const skyMaterial = new THREE.MeshStandardMaterial({color: 0xbddbd3, emissive: 0x739f9c, emissiveIntensity: .3, roughness: 1});
-  box(windowGroup, 1.96, 1.49, .035, 0, 0, .09, 0xbddbd3, {material: skyMaterial, castShadow: false});
-  for (let x = -.86; x < .95; x += .2) {
-    const h = .12 + (.9 + Math.sin(x * 16)) * .14;
-    box(windowGroup, .19, h, .045, x, -.69 + h / 2, .12, 0x7fa88c, {castShadow: false});
-  }
+  box(windowGroup, 1.96, 1.49, .035, 0, 0, .09, 0xbddbd3, {material: skyMaterial, castShadow: false}).receiveShadow = false;
   const daySky = sub(windowGroup), nightSky = sub(windowGroup);
   nightSky.visible = false;
-  const cloudMaterial = material(0xf4f2e8), cloudRows = [];
-  for (const [cx, cy] of [[-.55, .42], [.3, .62]]) cloudRows.push([cx, cy, .34, .09], [cx - .14, cy - .05, .2, .08], [cx + .15, cy - .04, .16, .07]);
-  const cloudGeo = new THREE.BoxGeometry(1, 1, .03);
-  geometries.set('__cloud', cloudGeo);
-  const clouds = new THREE.InstancedMesh(cloudGeo, cloudMaterial, cloudRows.length), cloudMatrix = new THREE.Matrix4(), cloudQuat = new THREE.Quaternion(), cloudScale = new THREE.Vector3();
-  cloudRows.forEach(([x, y, w, h], i) => {cloudMatrix.compose(new THREE.Vector3(x, y, .125), cloudQuat, cloudScale.set(w, h, 1)); clouds.setMatrixAt(i, cloudMatrix);});
-  clouds.castShadow = false;
-  daySky.add(clouds);
-  for (const [tx, ty] of [[-.62, -.52], [.34, -.56]]) {
-    box(daySky, .045, .12, .03, tx, ty, .125, 0x8a7a63, {castShadow: false});
-    box(daySky, .14, .11, .035, tx, ty + .1, .125, 0x6f9270, {castShadow: false});
-    box(daySky, .09, .07, .035, tx, ty + .18, .125, 0x82a67e, {castShadow: false});
-  }
-  const sunDisk = box(daySky, .27, .27, .06, .62, .4, .14, 0xf0d793, {castShadow: false});
-  sunDisk.userData.keepSeparate = true;
-  const moonMaterial = new THREE.MeshStandardMaterial({color: 0xe8e9d0, emissive: 0xe8e9d0, emissiveIntensity: .35, roughness: 1});
-  box(nightSky, .26, .26, .055, .62, .4, .14, 0xe8e9d0, {material: moonMaterial, castShadow: false});
-  box(nightSky, .055, .055, .02, .57, .44, .175, 0xcfd2b8, {castShadow: false});
-  box(nightSky, .04, .04, .02, .68, .35, .175, 0xcfd2b8, {castShadow: false});
+  const sunDisk = addWindowLandscape(THREE, windowGroup, daySky, nightSky, skyMaterial.color);
   const starMaterial = new THREE.MeshStandardMaterial({color: 0xe6eef5, emissive: 0xe6eef5, emissiveIntensity: 2.2, roughness: 1});
   const starPositions = [[-.8, .55], [-.5, .28], [-.2, .62], [.08, .4], [-.85, .1], [.2, .12], [.45, .68], [-.35, .45], [.85, .6], [.75, .15], [-.05, .2]];
-  const starGeo = new THREE.BoxGeometry(.035, .035, .015);
+  const starGeo = new THREE.BoxGeometry(.035, .035, .002);
   geometries.set('__star', starGeo);
   const stars = new THREE.InstancedMesh(starGeo, starMaterial, starPositions.length), starMatrix = new THREE.Matrix4();
-  starPositions.forEach(([x, y], i) => {starMatrix.makeTranslation(x, y, .13); stars.setMatrixAt(i, starMatrix);});
+  starPositions.forEach(([x, y], i) => {starMatrix.makeTranslation(x, y, .112); stars.setMatrixAt(i, starMatrix);});
   stars.castShadow = false;
   nightSky.add(stars);
   const glassMaterial = new THREE.MeshStandardMaterial({color: 0xe8f2ec, transparent: true, opacity: .16, roughness: .08, depthWrite: false});
@@ -647,13 +633,29 @@ export function buildCabinWorld(THREE, scene, {getHovered, getNight, particleMes
   };
   const shadowGeo = new THREE.PlaneGeometry(1, 1);
   geometries.set('__cshadow', shadowGeo);
-  const contactShadows = (() => {
-    const rows = [[-3.25, .145, .05, 3.3, 4.2], [0, .145, -1.48, 4.3, 2.4], [0, .145, -.32, 1.5, 1.5], [3.33, .145, 1.8, 2.6, 1.9], [3.52, .145, -2.38, 2.8, 2], [4.07, .145, 2.65, 1.4, 1.3], [-3.55, 1.062, 1.22, .8, .6], [2.35, .158, 3.3, 1.55, 1], [-4.55, .145, 2.75, 1.3, 2.1], [-4.6, .145, -2.7, 1.1, 1.3], [2.1, .145, 1.85, .8, .8]];
-    const mesh = new THREE.InstancedMesh(shadowGeo, new THREE.MeshBasicMaterial({map: radialShadowTexture(), color: 0x2f3d2f, transparent: true, opacity: .5, depthWrite: false, toneMapped: false}), rows.length);
-    const quat = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0)), pos = new THREE.Vector3(), scale = new THREE.Vector3(), mat = new THREE.Matrix4();
-    rows.forEach(([x, y, z, sx, sz], idx) => {pos.set(x, y, z); scale.set(sx, sz, 1); mat.compose(pos, quat, scale); mesh.setMatrixAt(idx, mat);});
-    mesh.renderOrder = 1; mesh.castShadow = false; mesh.receiveShadow = false; mesh.frustumCulled = false; mesh.userData.keepSeparate = true; scene.add(mesh); return mesh;
-  })();
+  const fixedShadows = [[3.33,.145,1.8,2.6,1.9], [3.52,.145,-2.38,2.8,2], [4.07,.145,2.65,1.4,1.3],
+    [2.35,.158,3.3,1.55,1], [-4.55,.145,2.75,1.3,2.1], [-4.6,.145,-2.7,1.1,1.3], [2.1,.145,1.85,.8,.8]];
+  const movableShadows = [[bed,3.3,4.2], [desk,4.3,2.4], [chair,1.5,1.5]];
+  const contactShadows = new THREE.InstancedMesh(shadowGeo, new THREE.MeshBasicMaterial({
+    map: radialShadowTexture(), color: 0x2f3d2f, transparent: true, opacity: .5, depthWrite: false, toneMapped: false,
+  }), fixedShadows.length + movableShadows.length);
+  function setShadow(index, x, y, z, width, depth, yaw = 0) {
+    const pose = new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(-Math.PI / 2, yaw, 0, 'YXZ'));
+    pose.scale(new THREE.Vector3(width, depth, 1)).setPosition(x, y, z);
+    contactShadows.setMatrixAt(index, pose);
+  }
+  function syncFurnitureShadows() {
+    movableShadows.forEach(([object, width, depth], i) => {
+      setShadow(fixedShadows.length + i, object.position.x, .145, object.position.z, width, depth, object.rotation.y);
+    });
+    contactShadows.instanceMatrix.needsUpdate = true;
+  }
+  fixedShadows.forEach((row, i) => setShadow(i, ...row));
+  syncFurnitureShadows();
+  contactShadows.renderOrder = 1;
+  contactShadows.frustumCulled = false;
+  contactShadows.userData.keepSeparate = true;
+  scene.add(contactShadows);
   const aoGeo = new THREE.PlaneGeometry(1, 1);
   geometries.set('__ao', aoGeo);
   const cornerAO = (() => {
@@ -757,7 +759,7 @@ export function buildCabinWorld(THREE, scene, {getHovered, getNight, particleMes
     phone, screenMaterial, bubble, plant, cat, catBody, earL, earR, tailA, tailB,
     keepsakesGroup, displayNoteGroup, roomSlotsGroup, frontDoorPivot,
     kitchen, cookFx, potSteam, burnerMaterial, washstand, washFx, stream, waterMaterial,
-    mealSet, restingBroom, garden, props, bakedBatches, contactShadows, cornerAO,
+    mealSet, restingBroom, garden, props, bakedBatches, contactShadows, syncFurnitureShadows, cornerAO,
     occluderMaterial, box, sub, materials, geometries, textures,
     getChatCompanionGlow: () => chatCompanionGlow,
     setChatCompanionGlow: v => {chatCompanionGlow = Boolean(v);},

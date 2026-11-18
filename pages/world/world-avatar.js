@@ -8,7 +8,7 @@ import {projectAvatar, projectAmbientMicro, projectJourneyRadar, resolveFurnitur
 export const THRESHOLDS = {room: [1.15, .13, 3.55], garden: [1.05, -.25, 4.35]};
 const DOORWAY_CENTER = [1.12, 3.74];
 const WALK_SPEED = 1.55, STROLL_SPEED = .62;
-const STAND_UP_MS = 150, SIT_DOWN_MS = 150;
+const STAND_UP_MS = 380, SIT_DOWN_MS = 420;
 
 const BASE_NAV = {
   room: {
@@ -68,6 +68,15 @@ const easeInOut = t => t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
 const flat = (a, b) => Math.hypot(a[0] - b[0], a[2] - b[2]);
 const lerp3 = (a, b, k) => [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k];
+
+// Ease over the first and last steps, with a constant pace in between.
+function walkingProgress(elapsed, duration) {
+  const t = Math.max(0, Math.min(1, elapsed / duration));
+  const ramp = Math.min(.22, 320 / duration);
+  if (t < ramp) return t * t / (2 * ramp * (1 - ramp));
+  if (t > 1 - ramp) return 1 - (1 - t) ** 2 / (2 * ramp * (1 - ramp));
+  return (t - ramp / 2) / (1 - ramp);
+}
 
 function shortestYaw(from, to) {
   let delta = (to - from) % (Math.PI * 2);
@@ -150,14 +159,13 @@ function buildRoundedSegments(path, cornerRadius = 0.42) {
   return {segments, total};
 }
 
-export function smoothCornerPathPoint(path, t, ease = true, cornerRadius = 0.42) {
-  const {segments, total} = buildRoundedSegments(path, cornerRadius);
+function sampleRoute({segments, total}, t, ease = true) {
   if (!segments.length || total <= 1e-6) {
-    const pt = path?.[0] || [0, 0, 0];
-    return {point: [...pt], yaw: 0};
+    return {point: [...(segments[0]?.a || [0, 0, 0])], yaw: 0, distance: 0};
   }
   const clamped = Math.max(0, Math.min(1, t));
-  let target = (ease ? easeInOut(clamped) : clamped) * total;
+  const distance = (ease ? easeInOut(clamped) : clamped) * total;
+  let target = distance;
   for (let i = 0; i < segments.length; i++) {
     const seg = segments[i];
     if (target <= seg.len || i === segments.length - 1) {
@@ -174,16 +182,20 @@ export function smoothCornerPathPoint(path, t, ease = true, cornerRadius = 0.42)
         const yaw = (Math.abs(tx) > 1e-5 || Math.abs(tz) > 1e-5)
           ? Math.atan2(tx, tz)
           : Math.atan2(seg.b[0] - seg.a[0], seg.b[2] - seg.a[2]);
-        return {point, yaw};
+        return {point, yaw, distance};
       }
       const point = lerp3(seg.a, seg.b, u);
       const yaw = Math.atan2(seg.b[0] - seg.a[0], seg.b[2] - seg.a[2]);
-      return {point, yaw};
+      return {point, yaw, distance};
     }
     target -= seg.len;
   }
-  const last = path[path.length - 1];
-  return {point: [...last], yaw: 0};
+  return {point: [...segments.at(-1).b], yaw: 0, distance};
+}
+
+export function smoothCornerPathPoint(path, t, ease = true, cornerRadius = 0.42) {
+  const {point, yaw} = sampleRoute(buildRoundedSegments(path, cornerRadius), t, ease);
+  return {point, yaw};
 }
 
 function nearestNode(graph, point) {
@@ -250,17 +262,12 @@ function modelPose(projection, overridePose = null) {
   return p;
 }
 
-function strollPoint(seconds) {
-  const loop = [...STROLL_LOOP, STROLL_LOOP[0]];
-  const length = pathLength(loop);
-  const t = ((seconds * STROLL_SPEED) % length) / length;
-  return smoothCornerPathPoint(loop, t, false, 0.55);
-}
+const strollRoute = buildRoundedSegments([...STROLL_LOOP, STROLL_LOOP[0]], .55);
 
 export function createWorldAvatar(THREE, scene, render, {onDoorSwing = null} = {}) {
   let character = null, modelId = '', textureIndex = 0, data = null, selection = {}, projection = null;
   let active = true, disposed = false, epoch = 0, guestEpoch = 0, frame = 0, lastFrame = 0, onState = () => {}, signature = '';
-  let visual = null, yaw = 0, transit = null, settling = false, lastLocation = null, lastSeated = false, lastSample = 0, lastPath = null, strollFrom = 0;
+  let visual = null, yaw = 0, transit = null, settling = false, lastLocation = null, lastApproach = null, lastSample = 0, lastPath = null, strollFrom = 0;
   let guestAvatar = null, guestKey = '', guestModelData = null, guestModelId = 'builtin', guestTexIdx = 0;
   let guestVisual = null, guestYaw = 0, guestTransit = null, hadHydratedScene = false;
   let doorAngle = 0;
@@ -293,10 +300,12 @@ export function createWorldAvatar(THREE, scene, render, {onDoorSwing = null} = {
     scene.add(guestAvatar.group);
     if (animateWalkIn && !reduced.matches && !data?.isReplay) {
       const gPath = buildGuestPath(spotKey);
-      const len = pathLength(gPath);
+      const end = gPath.at(-1);
+      if (spotCfg.pose === 'sit') gPath[gPath.length - 1] = [end[0], -.25, end[2]+.52];
+      const route = buildRoundedSegments(gPath);
       guestVisual = [...gPath[0]];
       guestYaw = Math.atan2(gPath[1][0] - gPath[0][0], gPath[1][2] - gPath[0][2]);
-      guestTransit = {path: gPath, start: Date.now(), duration: Math.max(900, Math.min(4200, len / WALK_SPEED * 1000)), spotCfg};
+      guestTransit = {route, start: Date.now(), walkMs: Math.max(900, route.total / WALK_SPEED * 1000), spotCfg};
       guestAvatar.group.position.set(guestVisual[0], guestVisual[1], guestVisual[2]);
       guestAvatar.group.rotation.y = guestYaw;
       guestAvatar.setPose('walk', 0);
@@ -392,6 +401,8 @@ export function createWorldAvatar(THREE, scene, render, {onDoorSwing = null} = {
 
   function phaseFor(now) {
     if (reduced.matches) return 0;
+    if (projection.pose === 'walk') return projection.walkDistance / WALK_SPEED;
+    if ((projection.paused || data?.isReplay) && projection.clock === 'wall') return data.server_time || 0;
     if (projection.pose === 'sleep' || projection.clock === 'wall') return now / 1000;
     const action = data?.scene?.action;
     const duration = Math.max(0, (action?.step_ends_at || 0) - (action?.step_started_at || 0));
@@ -400,11 +411,12 @@ export function createWorldAvatar(THREE, scene, render, {onDoorSwing = null} = {
 
   function stroll(now, dt) {
     if (!strollFrom) strollFrom = now;
-    const s = strollPoint((now - strollFrom) / 1000);
+    const distance = (now - strollFrom) / 1000 * STROLL_SPEED;
+    const s = sampleRoute(strollRoute, (distance % strollRoute.total) / strollRoute.total, false);
     visual = s.point;
     yaw += shortestYaw(yaw, s.yaw) * Math.min(1, (dt || .04) * 8);
     place(visual, yaw);
-    character.setPose('walk', (now - strollFrom) / 1000);
+    character.setPose('walk', distance / WALK_SPEED);
   }
 
   function sample(now = Date.now()) {
@@ -423,16 +435,32 @@ export function createWorldAvatar(THREE, scene, render, {onDoorSwing = null} = {
     const dt = lastSample ? Math.min(.1, (now - lastSample) / 1000) : 0.033;
     lastSample = now;
 
+    const still = reduced.matches || projection.paused || data?.isReplay;
+    if (guestAvatar && guestTransit && still) {
+      const {spotCfg} = guestTransit;
+      guestTransit = null;
+      guestVisual = [...spotCfg.pos];
+      guestYaw = spotCfg.yaw;
+      guestAvatar.group.position.set(...guestVisual);
+      guestAvatar.group.rotation.y = guestYaw;
+      guestAvatar.setPose(spotCfg.pose, 0);
+    }
     if (guestAvatar && guestTransit) {
-      const gt = Math.min(1, (now - guestTransit.start) / guestTransit.duration);
-      const gp = smoothCornerPathPoint(guestTransit.path, gt, true);
-      guestVisual = gp.point;
-      guestYaw += shortestYaw(guestYaw, gp.yaw) * Math.min(1, dt * 10);
+      const {route, start, walkMs, spotCfg} = guestTransit;
+      const elapsed = Math.max(0, now - start);
+      const gp = sampleRoute(route, walkingProgress(elapsed, walkMs), false);
+      const arrived = elapsed >= walkMs;
+      const sit = spotCfg.pose === 'sit' && arrived;
+      const weight = sit ? easeInOut(Math.min(1, (elapsed - walkMs) / SIT_DOWN_MS)) : 0;
+      guestVisual = sit ? lerp3(gp.point, spotCfg.pos, weight) : gp.point;
+      guestYaw += shortestYaw(guestYaw, arrived ? spotCfg.yaw : gp.yaw) * Math.min(1, dt * 10);
       guestAvatar.group.position.set(guestVisual[0], guestVisual[1], guestVisual[2]);
       guestAvatar.group.rotation.y = guestYaw;
-      guestAvatar.setPose('walk', (now - guestTransit.start) / 1000);
-      if (gt >= 1) {
-        const spotCfg = guestTransit.spotCfg;
+      if (sit) {
+        guestTransit.sitFrom ??= guestAvatar.capturePose();
+        guestAvatar.setPose('sit', 0, guestTransit.sitFrom, weight);
+      } else guestAvatar.setPose('walk', gp.distance / WALK_SPEED);
+      if (arrived && (!sit || weight === 1)) {
         guestTransit = null;
         guestVisual = [...spotCfg.pos];
         guestYaw = spotCfg.yaw;
@@ -446,72 +474,79 @@ export function createWorldAvatar(THREE, scene, render, {onDoorSwing = null} = {
       character.group.visible = projection.visible;
       const phase = phaseFor(now);
       if (effectivePose !== 'stroll') strollFrom = 0;
+      if (transit && dist(transit.to, targetPos) > .06) {
+        // A fresh snapshot can move the chair or interrupt the activity partway through.
+        lastApproach = transit.sitFrom ? transit.path.at(-1)
+          : now < transit.start + transit.standUpMs ? transit.path[0] : null;
+        transit = null;
+      }
       if (!projection.visible) {
-        visual = null; transit = null; settling = false; lastLocation = null; lastSeated = false;
+        visual = null; transit = null; settling = false; lastLocation = null; lastApproach = null;
         character.setPose('idle', 0);
-      } else if (reduced.matches || effectivePose === 'walk' || projection.paused || !visual || data?.isReplay) {
+      } else if (still || effectivePose === 'walk' || !visual) {
         transit = null; settling = false; visual = [...targetPos]; yaw = targetYaw; place(visual, yaw);
         character.setPose(
-          effectivePose === 'stroll' ? (reduced.matches || projection.paused ? 'idle' : 'walk') : modelPose(projection, effectivePose),
+          effectivePose === 'stroll' ? (still ? 'idle' : 'walk') : modelPose(projection, effectivePose),
           phase,
         );
         lastLocation = projection.location;
-        lastSeated = Boolean(projection.seated || projection.pose === 'sleep');
+        lastApproach = projection.approach;
       } else if (transit) {
         const elapsed = Math.max(0, now - transit.start);
         if (elapsed < transit.standUpMs) {
-          // Stage 1: Stand up smoothly from seat/bed before walking
-          const su = elapsed / Math.max(1, transit.standUpMs);
-          const standPt = [...transit.path[0]];
-          standPt[1] = transit.fromY + (0.13 - transit.fromY) * su;
-          visual = standPt;
+          const weight = easeInOut(elapsed / transit.standUpMs);
+          visual = lerp3(transit.from, transit.path[0], weight);
           place(visual, yaw);
-          character.setPose('idle', elapsed / 1000);
+          character.setPose('idle', 0, transit.standFrom, weight);
         } else if (elapsed < transit.standUpMs + transit.walkMs) {
           // Stage 2: Smooth Bezier corner-rounded walk
           const walkElapsed = elapsed - transit.standUpMs;
-          const wt = Math.min(1, walkElapsed / Math.max(1, transit.walkMs));
-          const samplePoint = smoothCornerPathPoint(transit.path, wt, true);
+          const wt = walkingProgress(walkElapsed, transit.walkMs);
+          const samplePoint = sampleRoute(transit.route, wt, false);
           visual = samplePoint.point;
           yaw += shortestYaw(yaw, samplePoint.yaw) * Math.min(1, dt * 10);
           place(visual, yaw);
-          character.setPose('walk', walkElapsed / 1000);
+          character.setPose('walk', samplePoint.distance / WALK_SPEED);
         } else if (elapsed < transit.totalMs) {
           // Stage 3: Settle & sit down onto target anchor
           const sitElapsed = elapsed - transit.standUpMs - transit.walkMs;
-          const st = Math.min(1, sitElapsed / Math.max(1, transit.sitDownMs));
-          const end = transit.path[transit.path.length - 1];
-          visual = [...end];
-          yaw += shortestYaw(yaw, targetYaw) * Math.min(1, st * 0.6 + dt * 10);
+          const weight = easeInOut(sitElapsed / transit.sitDownMs);
+          transit.sitFrom ??= character.capturePose();
+          transit.arrivalYaw ??= yaw;
+          visual = lerp3(transit.path.at(-1), transit.to, weight);
+          yaw = transit.arrivalYaw + shortestYaw(transit.arrivalYaw, targetYaw) * weight;
           place(visual, yaw);
-          character.setPose(st < 0.5 ? 'idle' : modelPose(projection, effectivePose), phase);
+          character.setPose(modelPose(projection, effectivePose), phase, transit.sitFrom, weight);
         } else {
-          const end = transit.path[transit.path.length - 1];
+          visual = [...transit.to];
+          place(visual, yaw);
+          character.setPose(modelPose(projection, effectivePose), phase);
           transit = null;
-          visual = [...end];
           settling = true;
-          lastSeated = Boolean(projection.seated || projection.pose === 'sleep');
+          lastApproach = projection.approach;
         }
       } else if (effectivePose === 'stroll' && strollFrom) {
         stroll(now, dt);
       } else if (dist(visual, targetPos) > .06) {
         const from = [...visual];
-        const path = buildPath(lastLocation, from, projection.location, [...targetPos], navKey, roomGraph);
+        const walkStart = lastApproach || from, walkEnd = projection.approach || targetPos;
+        const path = buildPath(lastLocation, [...walkStart], projection.location, [...walkEnd], navKey, roomGraph);
         lastPath = path;
-        const length = pathLength(path);
-        const standUpMs = lastSeated ? STAND_UP_MS : 0;
-        const sitDownMs = (projection.seated || projection.pose === 'sleep') ? SIT_DOWN_MS : 0;
-        const walkMs = Math.max(460, Math.min(5200, length / WALK_SPEED * 1000));
+        const route = buildRoundedSegments(path);
+        const standUpMs = lastApproach ? STAND_UP_MS : 0;
+        const sitDownMs = projection.approach ? SIT_DOWN_MS : 0;
+        const walkMs = Math.max(460, route.total / WALK_SPEED * 1000);
         transit = {
-          path,
+          path, route, from, to: [...targetPos],
           start: now,
-          fromY: from[1],
+          standFrom: standUpMs ? character.capturePose() : null,
           standUpMs,
           walkMs,
           sitDownMs,
           totalMs: standUpMs + walkMs + sitDownMs,
         };
-        character.setPose(standUpMs > 0 ? 'idle' : 'walk', 0);
+        lastApproach = null;
+        if (!standUpMs) character.setPose('walk', 0);
       } else if (effectivePose === 'stroll') {
         stroll(now, dt);
       } else {
@@ -519,7 +554,7 @@ export function createWorldAvatar(THREE, scene, render, {onDoorSwing = null} = {
         const delta = shortestYaw(yaw, targetYaw);
         yaw += delta * Math.min(1, dt * 8);
         settling = Math.abs(delta) > .01;
-        lastSeated = Boolean(projection.seated || projection.pose === 'sleep');
+        lastApproach = projection.approach;
         place(visual, yaw);
         character.setPose(modelPose(projection, effectivePose), phase);
       }
@@ -537,7 +572,7 @@ export function createWorldAvatar(THREE, scene, render, {onDoorSwing = null} = {
   }
 
   function needsFrames() {
-    return !reduced.matches && (
+    return !reduced.matches && !projection?.paused && !data?.isReplay && (
       guestTransit ||
       doorAnimating() ||
       (character && projection?.visible && (transit || settling || (projection.animate && (projection.pose === 'walk' || character.diagnostics().mode !== 'static'))))
@@ -579,7 +614,12 @@ export function createWorldAvatar(THREE, scene, render, {onDoorSwing = null} = {
     return any ? {min: box.min.toArray(), max: box.max.toArray(), parts} : null;
   }
 
+  function placement() {
+    return {projection, visual_position: visual, guest_position: guestVisual};
+  }
+
   return {
+    placement,
     async setModel(model, index = 0) {
       const own = ++epoch;
       const next = createAvatar(THREE, model?.format === 'builtin' ? null : model, index, {molang: true});
@@ -590,7 +630,7 @@ export function createWorldAvatar(THREE, scene, render, {onDoorSwing = null} = {
       character = next;
       modelId = model?.id || 'builtin';
       textureIndex = index;
-      visual = null; transit = null; settling = false; lastLocation = null; lastSeated = false;
+      visual = null; transit = null; settling = false; lastLocation = null; lastApproach = null;
       scene.add(next.group);
       signature = '';
       update();
@@ -612,6 +652,7 @@ export function createWorldAvatar(THREE, scene, render, {onDoorSwing = null} = {
       const rot = guestYaw || (PEER_VISIT_SPOTS[activeVisit.spot]?.yaw || 0);
       guestAvatar?.dispose();
       guestAvatar = next;
+      if (guestTransit) guestTransit.sitFrom = null;
       guestAvatar.group.position.set(pos[0], pos[1], pos[2]);
       guestAvatar.group.rotation.y = rot;
       const spotCfg = PEER_VISIT_SPOTS[activeVisit.spot] || PEER_VISIT_SPOTS.garden_bench;
@@ -623,7 +664,7 @@ export function createWorldAvatar(THREE, scene, render, {onDoorSwing = null} = {
     setState(value, chosen) {data = value; selection = chosen || {}; signature = ''; update();},
     setActive(value) {active = value; update();},
     animateIdle(seconds) {
-      if (disposed || !active || reduced.matches) return;
+      if (disposed || !active || reduced.matches || projection?.paused || data?.isReplay) return;
       for (const entry of visitorMeshes.values()) entry.mesh.tick(seconds);
       if (guestAvatar && !guestTransit) {
         const activeVisit = data?.world_space?.active_guest || data?.world_space?.active_visit;
@@ -655,19 +696,17 @@ export function createWorldAvatar(THREE, scene, render, {onDoorSwing = null} = {
       return {
         model_id: modelId,
         texture_index: textureIndex,
-        projection,
+        ...placement(),
         model: character?.diagnostics() || null,
         animating: !!frame,
         active,
         transit: !!transit,
         door_angle: +doorAngle.toFixed(3),
-        visual_position: visual,
         yaw,
         path: transit?.path || lastPath,
         bounds: visibleBounds(),
         guest: guestKey || null,
         guest_model_id: guestModelId,
-        guest_position: guestVisual,
         visitors: visitorMeshes.size,
       };
     },

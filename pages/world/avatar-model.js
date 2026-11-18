@@ -27,12 +27,6 @@ const CLIP_NAMES = {
 const POSE_PROPS = {read: ['book'], sit_read: ['book'], write: ['notebook', 'pen'], sit_write: ['notebook', 'pen'],
   sweep: ['broom'], water: ['can'], sit_eat: ['bowl', 'spoon'], sit_game: ['handheld'], cook: ['ladle'], wash: ['brush']};
 const PROP_NAMES = ['book', 'notebook', 'pen', 'broom', 'can', 'bowl', 'spoon', 'handheld', 'ladle', 'brush'];
-// Builtin forward kinematics (rig units): shoulder height, upper arm and forearm lengths.
-function builtinHand(a, e) {
-  const ey = 1.068 - .188 * Math.cos(a), ez = -.188 * Math.sin(a);
-  return [ey - .19 * Math.cos(a + e), ez - .19 * Math.sin(a + e)];
-}
-
 const BONE_NAMES = {
   body: ['body', 'torso', 'chest', 'upperbody', 'bipedbody'],
   head: ['head', 'bipedhead'],
@@ -220,7 +214,11 @@ function createBuiltin(THREE, rig, geometries, materials) {
     roles[side + 'Knee'] = knee;
   }
 
-  return {bones: new Map(Object.entries(roles)), roles, props: createStudyProps(THREE, rig, box), eyes};
+  const props = createStudyProps(THREE, rig, box);
+  props.hands = [roles.leftElbow, roles.rightElbow].map(bone => ({
+    bone, local: new THREE.Vector3(0, -.18, 0), point: new THREE.Vector3(),
+  }));
+  return {bones: new Map(Object.entries(roles)), roles, props, eyes};
 }
 
 // The world views the model's north side from +Z. X/Y stay in model units.
@@ -396,21 +394,20 @@ function handAnchor(THREE, roles, side) {
   return {bone, local, point: new THREE.Vector3()};
 }
 
-function moveImportedProps(props, motion, pose, seconds) {
+function placeHeldProps(props, pose, seconds) {
   const [left, right] = props.hands;
-  motion.updateWorldMatrix(true, true);
-  for (const {bone, local, point} of props.hands) motion.worldToLocal(point.copy(local).applyMatrix4(bone.matrixWorld));
   const {book, notebook, pen} = props;
-  const grip = right.point, middle = left.point.clone().lerp(right.point, .5);
-  for (const name of ['broom', 'can', 'ladle', 'brush', 'spoon']) if (props[name].visible) props[name].position.copy(grip);
+  const parent = book.parent;
+  for (const {bone, local, point} of props.hands) parent.worldToLocal(bone.localToWorld(point.copy(local)));
+  for (const name of ['broom', 'can', 'ladle', 'brush', 'spoon']) if (props[name].visible) props[name].position.copy(right.point);
   if (props.bowl.visible) props.bowl.position.copy(left.point);
-  if (props.handheld.visible) props.handheld.position.copy(middle);
+  if (props.handheld.visible) props.handheld.position.copy(left.point).lerp(right.point, .5);
   if (pose === 'read' || pose === 'sit_read') {
     book.position.copy(left.point).lerp(right.point, .5);
     book.position.y += .012;
     book.position.z += .025;
     book.scale.setScalar(Math.max(.65, Math.min(1.25, left.point.distanceTo(right.point) / .34)));
-  } else {
+  } else if (notebook.visible) {
     notebook.position.copy(left.point).lerp(right.point, .34);
     notebook.position.z += .025;
     pen.position.copy(right.point).lerp(left.point, .13);
@@ -740,31 +737,13 @@ function applyProcedural(roles, motion, pose, seconds) {
   }
 }
 
-// Builtin props follow the procedural hands (same angles as applyProcedural).
-function animateBuiltinProps(props, pose, seconds) {
-  const {pen, spoon, broom, can, ladle, brush} = props;
-  if (pen.visible) pen.position.x = -.106 + Math.sin(seconds * 9) * .021;
-  if (pose === 'sit_eat') {
-    const lift = (1 - Math.cos(seconds * 1.7)) / 2;
-    const [y, z] = builtinHand(-.5 - lift * .5, -.9 - lift * .9);
-    spoon.position.set(-.12 + lift * .07, y + .03, z + .02);
-    spoon.rotation.x = -lift * .5;
-  } else if (pose === 'sweep') {
-    broom.rotation.z = Math.sin(seconds * 2.4) * .3;
-    broom.rotation.y = Math.sin(seconds * 2.4) * .2;
-  } else if (pose === 'water') {
-    const [y, z] = builtinHand(-.9, -.3);
-    can.position.set(-.2, y - .02, z + .02);
-    can.rotation.x = .3 + Math.sin(seconds * 1.4) * .12;
-  } else if (pose === 'cook') {
-    const stir = Math.sin(seconds * 3.6);
-    const [y, z] = builtinHand(-1.3 + stir * .08, -.3);
-    ladle.position.set(-.13 + Math.cos(seconds * 3.6) * .03, y + .09, z);
-  } else if (pose === 'wash') {
-    brush.position.x = -.06 + Math.sin(seconds * 8) * .025;
-  }
-}
 function animatePropDetails(props, pose, seconds) {
+  if (pose === 'sit_eat') props.spoon.rotation.x = -(1 - Math.cos(seconds * 1.7)) * .25;
+  if (pose === 'sweep') {
+    props.broom.rotation.z = Math.sin(seconds * 2.4) * .3;
+    props.broom.rotation.y = Math.sin(seconds * 2.4) * .2;
+  }
+  if (pose === 'water') props.can.rotation.x = .3 + Math.sin(seconds * 1.4) * .12;
   if (props.drops) {
     props.drops.visible = pose === 'water' && props.can?.visible;
     if (props.drops.visible) props.drops.position.y = -.1 - ((seconds * 1.6) % 1) * .12;
@@ -856,7 +835,13 @@ export function createAvatar(THREE, model = null, textureIndex = 0, options = {}
     setPose(currentPose, currentPhase);
   }
 
-  function setPose(pose, phase = 0) {
+  function capturePose() {
+    return [motion, ...bases.map(({bone}) => bone)].map(node => ({
+      node, position: node.position.clone(), rotation: node.quaternion.clone(), scale: node.scale.clone(),
+    }));
+  }
+
+  function setPose(pose, phase = 0, from = null, weight = 1) {
     if (disposed || pose === 'pause' || pose === 'paused') return;
     currentPose = POSES.includes(pose) ? pose : 'idle';
     currentPhase = Number.isFinite(phase) ? Math.max(0, phase) : 0;
@@ -902,15 +887,23 @@ export function createAvatar(THREE, model = null, textureIndex = 0, options = {}
       motion.rotation.z = breath * .02;
       motion.rotation.y = Math.sin(seconds * .5) * .04;
     }
+    // Interpolate the actual sampled clip, including root motion and imported bone scales.
+    if (from && weight < 1) {
+      const remaining = 1 - Math.max(0, weight);
+      for (const {node, position, rotation, scale} of from) {
+        node.position.lerp(position, remaining);
+        node.quaternion.slerp(rotation, remaining);
+        node.scale.lerp(scale, remaining);
+      }
+    }
     const props = character.props;
     if (props) {
-      const {book, notebook, pen} = props;
+      const {pen} = props;
       const supported = actions[currentPose] !== 'static';
       const shown = supported ? POSE_PROPS[currentPose] || [] : [];
       for (const name of PROP_NAMES) if (props[name]) props[name].visible = shown.includes(name);
       if (shown.length) {
-        if (builtin) animateBuiltinProps(props, currentPose, seconds);
-        else moveImportedProps(props, motion, currentPose, seconds);
+        placeHeldProps(props, currentPose, seconds);
         if (pen.visible) pen.rotation.z = -.57 + Math.sin(seconds * 9) * .14;
       }
       animatePropDetails(props, currentPose, seconds);
@@ -1010,7 +1003,7 @@ export function createAvatar(THREE, model = null, textureIndex = 0, options = {}
     };
   }
 
-  return {group, ready, setPose, dispose, diagnostics};
+  return {group, ready, capturePose, setPose, dispose, diagnostics};
 }
 
 const OUTFIT_SYNONYMS = [

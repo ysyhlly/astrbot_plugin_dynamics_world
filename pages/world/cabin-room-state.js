@@ -1,5 +1,6 @@
 /* Dynamic room_design layout, keepsakes, companion cues & smooth cat locomotion. */
 import {smoothCornerPathPoint, pathLength} from './world-avatar.js';
+import {BED_PLACEMENTS, DESK_PLACEMENTS, furniturePoint} from './cabin-layout.js';
 
 export const SLOT_COORDS = {
   left_wall: [-4.25, .14, .4],
@@ -12,23 +13,6 @@ export const SLOT_COORDS = {
   desk_right: [1.28, 1.46, -1.18],
   bookshelf: [-1.85, 2.54, -3.28],
   entry_rack: [2.25, .14, 3.15],
-};
-
-const DESK_PLACEMENTS = {
-  near_window: {desk: [0, 0, -1.48, 0], chair: [0, 0, .18, 0]},
-  left_wall: {desk: [-3.55, 0, .38, Math.PI / 2], chair: [-2.35, 0, .38, Math.PI / 2]},
-  right_wall: {desk: [3.45, 0, .12, -Math.PI / 2], chair: [2.25, 0, .12, -Math.PI / 2]},
-  back_wall: {desk: [1.55, 0, -2.75, 0], chair: [1.55, 0, -1.35, 0]},
-  center: {desk: [.22, 0, .55, 0], chair: [.22, 0, 1.98, 0]},
-  bedside: {desk: [-1.72, 0, -1.45, 0], chair: [-1.72, 0, -.08, 0]},
-};
-
-const BED_PLACEMENTS = {
-  left_wall: [-3.25, 0, .05, 0],
-  right_wall: [3.35, 0, .15, Math.PI],
-  back_wall: [1.65, 0, -2.25, -Math.PI / 2],
-  center: [.25, 0, 1.15, 0],
-  near_window: [.15, 0, -1.95, -Math.PI / 2],
 };
 
 const SHELF_PLACEMENTS = {
@@ -62,8 +46,7 @@ function clearDynamicChildren(grp) {
   for (const child of [...grp.children]) grp.remove(child);
 }
 
-function buildCatWaypoints(fromPos, fromZone, toSpot) {
-  const cfg = CAT_SPOTS[toSpot] || CAT_SPOTS.bed_nap;
+function buildCatWaypoints(fromPos, fromZone, cfg) {
   const target = [...cfg.pos];
   const pts = [[...fromPos]];
   // Step down to floor if starting elevated (bed / windowsill)
@@ -92,11 +75,13 @@ export function createCabinRoomState({
   let curtainMode = 'open', lampMode = 'warm', lampFactor = 1, curtainDimFactor = 1;
   let roomDesignSig = '', keepsakesSig = '', companionsSig = '';
   let catBaseY = 1.058, catSpotKey = 'bed_nap', catZone = 'room', catHydrated = false, catTransit = null;
+  let bedPlacement = BED_PLACEMENTS.left_wall;
 
-  function syncInspectBox(key, x, y, z) {
+  function syncInspectBox(key, x, y, z, yaw = 0) {
     const proxy = proxyMap.get(key);
     if (proxy) {
       proxy.position.set(x, y, z);
+      proxy.rotation.y = yaw;
       inspectGroup.updateMatrixWorld(true);
     }
   }
@@ -109,23 +94,28 @@ export function createCabinRoomState({
     world.desk.rotation.y = dCfg.desk[3];
     world.chair.position.set(dCfg.chair[0], dCfg.chair[1], dCfg.chair[2]);
     world.chair.rotation.y = dCfg.chair[3];
-    world.warm.position.set(dCfg.desk[0] + Math.cos(dCfg.desk[3]) * 1.13, 1.88, dCfg.desk[2] - Math.sin(dCfg.desk[3]) * 1.13 - .17);
-    inspectPresets.desk.anchor = [dCfg.desk[0] + .45, 1.38, dCfg.desk[2]];
+    world.warm.position.set(...furniturePoint(dCfg.desk, 1.13, 1.88, -.17));
+    inspectPresets.desk.anchor = furniturePoint(dCfg.desk, .45, 1.38, 0);
     inspectPresets.desk.target = [dCfg.desk[0], 1.35, dCfg.desk[2]];
-    portalPresets.memory.anchor = [dCfg.desk[0] - .5, 1.52, dCfg.desk[2] + .1];
-    portalPresets.memory.target = [dCfg.desk[0] - .45, 1.48, dCfg.desk[2] + .1];
-    syncInspectBox('desk', dCfg.desk[0], .92, dCfg.desk[2]);
+    portalPresets.memory.anchor = furniturePoint(dCfg.desk, -.5, 1.52, .1);
+    portalPresets.memory.target = furniturePoint(dCfg.desk, -.45, 1.48, .1);
+    syncInspectBox('desk', dCfg.desk[0], .92, dCfg.desk[2], dCfg.desk[3]);
 
     const bedItem = furniture.find(f => f?.kind === 'bed' && f.movable && BED_PLACEMENTS[f.position]);
     const bedSlot = bedItem ? bedItem.position : 'left_wall';
     const bCfg = BED_PLACEMENTS[bedSlot] || BED_PLACEMENTS.left_wall;
     world.bed.position.set(bCfg[0], bCfg[1], bCfg[2]);
     world.bed.rotation.y = bCfg[3];
-    inspectPresets.bed.anchor = [bCfg[0], .96, bCfg[2] - .6];
+    if (bedPlacement !== bCfg) {
+      bedPlacement = bCfg;
+      if (catSpotKey === 'bed_nap') placeCatImmediate(catSpotKey);
+    }
+    inspectPresets.bed.anchor = furniturePoint(bCfg, 0, .96, -.6);
     inspectPresets.bed.target = [bCfg[0], .92, bCfg[2]];
-    portalPresets.learning.anchor = [bCfg[0] + .15, 1.16, bCfg[2] + .43];
-    portalPresets.learning.target = [bCfg[0] + .15, 1.14, bCfg[2] + .43];
-    syncInspectBox('bed', bCfg[0], .62, bCfg[2]);
+    portalPresets.learning.anchor = furniturePoint(bCfg, .15, 1.16, .43);
+    portalPresets.learning.target = furniturePoint(bCfg, .15, 1.14, .43);
+    syncInspectBox('bed', bCfg[0], .62, bCfg[2], bCfg[3]);
+    world.syncFurnitureShadows();
 
     const shelfItem = furniture.find(f => f?.kind === 'bookcase' && f.movable && SHELF_PLACEMENTS[f.position]);
     const shelfSlot = shelfItem ? shelfItem.position : 'back_wall';
@@ -134,7 +124,7 @@ export function createCabinRoomState({
     world.shelf.rotation.y = sCfg[3];
     inspectPresets.shelf.anchor = [sCfg[0], sCfg[1] + .14, sCfg[2]];
     inspectPresets.shelf.target = [sCfg[0], sCfg[1], sCfg[2]];
-    syncInspectBox('shelf', sCfg[0], sCfg[1] + .14, sCfg[2]);
+    syncInspectBox('shelf', sCfg[0], sCfg[1] + .14, sCfg[2], sCfg[3]);
   }
 
   function applyRoomDesignState(roomDesign = {}, items = [], srvTime = Date.now() / 1000) {
@@ -266,8 +256,15 @@ export function createCabinRoomState({
     }
   }
 
-  function placeCatImmediate(spot) {
+  function catDestination(spot) {
     const cfg = CAT_SPOTS[spot] || CAT_SPOTS.bed_nap;
+    return cfg === CAT_SPOTS.bed_nap
+      ? {...cfg, pos: furniturePoint(bedPlacement, -.30, 1.058, 1.17), ry: cfg.ry + bedPlacement[3]}
+      : cfg;
+  }
+
+  function placeCatImmediate(spot) {
+    const cfg = catDestination(spot);
     catTransit = null;
     catBaseY = cfg.pos[1];
     catZone = cfg.zone;
@@ -290,7 +287,7 @@ export function createCabinRoomState({
     }
     if (spot === catSpotKey) return;
     const fromPos = [world.cat.position.x, world.cat.position.y, world.cat.position.z];
-    const waypoints = buildCatWaypoints(fromPos, catZone, spot);
+    const waypoints = buildCatWaypoints(fromPos, catZone, catDestination(spot));
     const len = pathLength(waypoints);
     catSpotKey = spot;
     if (len < 0.25) {

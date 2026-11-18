@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {pathToFileURL} from 'node:url';
 import {createAvatar} from '../../pages/world/avatar-model.js';
+import {createWorldAvatar} from '../../pages/world/world-avatar.js';
+import {BED_PLACEMENTS, DESK_PLACEMENTS} from '../../pages/world/cabin-layout.js';
+import {projectAvatar} from '../../pages/world/avatar-state.js';
 
 const THREE = await import(process.env.WORLD_THREE_MODULE
   ? pathToFileURL(process.env.WORLD_THREE_MODULE).href : 'three');
@@ -17,6 +20,88 @@ const model = (bones, animations = {}) => ({
 function textureLoader(loadAsync) {
   return {...THREE, TextureLoader: class { loadAsync(url) { return loadAsync(url); } }};
 }
+
+const home = {id: 'cabin', place_id: 'home'}, gardenRoom = {id: 'garden', place_id: 'home'};
+const selection = {home_room_id: home.id, garden_room_id: gardenRoom.id};
+function cabinSnapshot(activity, room = home, furniture = []) {
+  return {activity_code: activity, server_time: 10, received_at_ms: Date.now(), scene: {
+    available: true, phase: 'located', place_id: room.place_id, room_id: room.id,
+    rooms: [home, gardenRoom], room_design: {room_id: room.id, furniture},
+  }};
+}
+
+test('writing, sleeping and standing up use the rendered furniture coordinate frame in every slot', () => {
+  const local = (v, placement) => new THREE.Vector3(...v).sub(new THREE.Vector3(...placement.slice(0, 3)))
+    .applyAxisAngle(new THREE.Vector3(0, 1, 0), -placement[3]);
+  for (const [slot, {chair}] of Object.entries(DESK_PLACEMENTS)) {
+    const p = projectAvatar(cabinSnapshot('writing', home, [{kind:'desk', movable:true, position:slot}]), selection);
+    const seated = local(p.position, chair), floor = local(p.approach, chair);
+    near(seated.x, 0); near(seated.z, .04); near(seated.y, .38);
+    near(Math.cos(p.rotationY - chair[3]), -1);
+    near(floor.y, .13); assert.ok(Math.abs(floor.x) > .425);
+  }
+  for (const [slot, bed] of Object.entries(BED_PLACEMENTS)) {
+    const p = projectAvatar(cabinSnapshot('sleeping', home, [{kind:'bed', movable:true, position:slot}]), selection);
+    const lying = local(p.position, bed), floor = local(p.approach, bed);
+    near(lying.x, .47); near(lying.z, .42); near(lying.y, .90);
+    near(floor.y, .13); assert.ok(floor.x > 1.2);
+  }
+});
+
+test('the cabin blends from the seated rig onto the garden path and back onto the chair', async t => {
+  let actor;
+  t.after(() => actor?.dispose());
+  const media = {matches:false, addEventListener() {}, removeEventListener() {}};
+  for (const [name, value] of Object.entries({
+    matchMedia: () => media, requestAnimationFrame: () => 1, cancelAnimationFrame: () => {},
+  })) {
+    const previous = Object.getOwnPropertyDescriptor(globalThis, name);
+    Object.defineProperty(globalThis, name, {value, configurable:true});
+    t.after(() => previous ? Object.defineProperty(globalThis, name, previous) : delete globalThis[name]);
+  }
+  let now = 20_000;
+  t.mock.method(Date, 'now', () => now);
+  const scene = new THREE.Scene();
+  actor = createWorldAvatar(THREE, scene, () => {});
+  await actor.setModel(null);
+  const bench = cabinSnapshot('reading', gardenRoom), desk = cabinSnapshot('writing');
+  const update = (data, ms) => {now += ms; actor.setState(data, selection); return actor.placement().visual_position;};
+  update(bench, 0);
+  const knee = scene.getObjectByName('leftKnee'), seatedAngle = knee.rotation.x;
+  assert.ok(seatedAngle > 1.0);
+  update(desk, 0);
+  near(knee.rotation.x, seatedAngle);
+  const midway = update(desk, 190);
+  near(midway[1], (.12 - .25) / 2); near(knee.rotation.x, seatedAngle / 2);
+  const before = [...update(desk, 189)], after = update(desk, 2);
+  near(after[1], -.25);
+  assert.ok(new THREE.Vector3(...before).distanceTo(new THREE.Vector3(...after)) < .01);
+  let sawSitting = false, arrived = false;
+  for (let i = 0; i < 250; i++) {
+    const point = update(desk, 40);
+    if (point[1] > .14 && point[1] < .37 && knee.rotation.x > .1 && knee.rotation.x < 1.30) sawSitting = true;
+    if (!actor.diagnostics().transit) {arrived = true; break;}
+  }
+  assert.ok(sawSitting && arrived);
+  assert.deepEqual(actor.placement().visual_position, [0,.38,.22]);
+  const pen = scene.getObjectByName('pen');
+  assert.ok(pen.visible);
+  const grip = scene.getObjectByName('rightElbow').localToWorld(new THREE.Vector3(0,-.18,0));
+  assert.ok(grip.distanceTo(pen.getWorldPosition(new THREE.Vector3())) < .10);
+
+  update(bench, 40);
+  assert.ok(actor.diagnostics().transit);
+  const paused = {...bench, scene:{...bench.scene, paused:true}};
+  update(paused, 40);
+  assert.equal(actor.diagnostics().transit, false);
+  assert.equal(actor.diagnostics().animating, false);
+  assert.deepEqual(update(paused, 8000), [3.4,.12,5.1]);
+  update({...desk, isReplay:true}, 10);
+  assert.equal(actor.diagnostics().animating, false);
+  media.matches = true;
+  assert.deepEqual(update(bench, 10), [3.4,.12,5.1]);
+  assert.equal(actor.diagnostics().transit, false);
+});
 
 test('built-in character has two legs, hinged elbows, and action props', async () => {
   const avatar = createAvatar(THREE);
