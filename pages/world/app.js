@@ -94,8 +94,7 @@ const views = {
 
 let drawerBar = null;
 let drawerOpener = null;
-// Companion panels offer a "return to cabin" button even before the first card is set up.
-let landingView = new URLSearchParams(location.search).has("series_entry") ? "cabin" : null;
+let landingView = null;
 let loaded = false;
 const isVisible = (node) => Boolean(node?.getClientRects().length) && !node.disabled &&
   !node.closest("[inert]") && getComputedStyle(node).visibility !== "hidden";
@@ -339,8 +338,10 @@ export function boot() {
   organizeTabClusters();
   wireTabs();
   wireActions();
-  const requested = new URLSearchParams(location.search).get("view");
-  landingView = views[requested] ? requested : null;
+  const query = new URLSearchParams(location.search);
+  // Companion panels offer "return to cabin" even before the first card is set up.
+  const requested = query.get("view") || (query.has("series_entry") ? "cabin" : "");
+  landingView = Object.hasOwn(views, requested) ? requested : null;
   setView("overview", { remember: false });
   void loadOverview();
 }
