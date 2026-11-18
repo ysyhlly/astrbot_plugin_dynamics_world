@@ -210,7 +210,7 @@ async def test_world_public_reference_and_summary_apis(tmp_path, monkeypatch):
     plugin, _, _ = await make_plugin(tmp_path, monkeypatch, runtime_enabled=True)
     try:
         seed(plugin)
-        assert plugin.get_dynamics_capabilities()["version"] == "v0.23.0-rc.1"
+        assert plugin.get_dynamics_capabilities()["version"] == "v0.23.0-rc.2"
         ref_dir = plugin.get_reference_assets_directory()
         assert Path(ref_dir).resolve() == (plugin.data_dir / "visual-assets").resolve()
         summary = plugin.get_dynamics_summary(UMO)

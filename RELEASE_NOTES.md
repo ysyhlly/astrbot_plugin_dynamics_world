@@ -1,4 +1,6 @@
-# astrbot_plugin_dynamics_world v0.23.0-rc.1
+# astrbot_plugin_dynamics_world v0.23.0-rc.2
+
+系列面板显示安装版本及源码短提交号。
 
 整合角色生活、因果事件、居民互动、3D 小屋和花园、天气与见闻书架；保留会话作用域、主动分享额度与持久化保护。统一发布元数据与构建检查。
 

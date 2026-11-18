@@ -6,7 +6,29 @@ import hashlib
 import io
 import json
 import zipfile
+import subprocess
 from pathlib import Path
+
+
+def release_metadata(root):
+    """Identify clean checkouts and preserve the commit recorded by git archive."""
+    raw = (root / "metadata.yaml").read_bytes()
+    marker = b"$Format:%H$"
+    if marker not in raw or not (root / ".git").exists():
+        return raw
+    try:
+        if subprocess.check_output(
+            ["git", "-C", str(root), "status", "--porcelain"], stderr=subprocess.DEVNULL, timeout=5
+        ).strip():
+            return raw
+        revision = subprocess.check_output(
+            ["git", "-C", str(root), "rev-parse", "--verify", "HEAD"], stderr=subprocess.DEVNULL, timeout=5
+        ).strip()
+    except (OSError, subprocess.SubprocessError):
+        return raw
+    if len(revision) not in (40, 64) or any(c not in b"0123456789abcdef" for c in revision):
+        return raw
+    return raw.replace(marker, revision)
 
 
 def _uses_host_core_logger(tree, relative):
@@ -123,7 +145,11 @@ def build(root, output):
                         raise ValueError(
                             f"{rel}:{node.lineno}: runtime must use astrbot.api.logger"
                         )
-            archive.write(path, rel.as_posix())
+            info = zipfile.ZipInfo(rel.as_posix(), date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.create_system = 3
+            info.external_attr = 0o100644 << 16
+            archive.writestr(info, release_metadata(root) if rel.as_posix() == "metadata.yaml" else path.read_bytes())
             files.append(rel.as_posix())
     data = buffer.getvalue()
     if len(data) > 16_000_000:

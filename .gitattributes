@@ -47,3 +47,4 @@
 /data export-ignore
 /release export-ignore
 /dist export-ignore
+/metadata.yaml export-subst

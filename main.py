@@ -7,7 +7,7 @@ ensure_current(
     __package__,
     __name__,
     __file__,
-    version="v0.23.0-rc.1",
+    version="v0.23.0-rc.2",
     checks=[
         ("life.core.narrative", "NarrativeEngine", "_world_map_v1"),
         ("life.core.narrative", "NarrativeEngine", "_horizons_sync_v1"),
@@ -118,7 +118,7 @@ class Main(Star):
     def get_dynamics_capabilities(self):
         return {
             "schema_version": 1,
-            "version": "v0.23.0-rc.1",
+            "version": "v0.23.0-rc.2",
             "world_integration_version": 2,
             "provider_id": "astrbot_plugin_dynamics_world",
             "display_name": "群间世界",
