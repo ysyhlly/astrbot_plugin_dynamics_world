@@ -213,17 +213,29 @@ async def test_world_tick_independent_of_slow_outreach_and_both_tasks_cancel():
     narrative.close.assert_awaited_once()
 
 
-def test_release_rejects_stdlib_logger_even_when_aliased(tmp_path):
+@pytest.mark.parametrize(
+    ("relative", "source"),
+    [
+        ("main.py", "import logging as log"),
+        ("life/core/narrative.py", 'import logging\nlog = logging.getLogger("astrbot.plugin.astrbot_plugin_dynamics_world")'),
+        ("life/core/narrative_io.py", 'import logging\nlog = logging.getLogger("astrbot.plugin.astrbot_plugin_dynamics_world")'),
+        ("world/service.py", "from logging import getLogger"),
+        ("life/service.py", "import logging.handlers"),
+    ],
+)
+def test_release_rejects_stdlib_logging_in_all_runtime_modules(tmp_path, relative, source):
     spec = importlib.util.spec_from_file_location(
         "world_build_audit", Path(__file__).parents[1] / "build_release.py"
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     root = tmp_path / "plugin"
-    root.mkdir()
-    (root / "main.py").write_text("import logging as log\n", encoding="utf-8")
+    target = root / relative
+    target.parent.mkdir(parents=True)
+    target.write_text(source + "\n", encoding="utf-8")
     with pytest.raises(ValueError, match="astrbot.api.logger"):
         module.build(root, tmp_path / "bad.zip")
+    assert not (tmp_path / "bad.zip").exists()
 
 
 @pytest.mark.asyncio

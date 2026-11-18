@@ -1,4 +1,4 @@
-"""Persistent narrative state and scoped events, independent of AstrBot runtime.
+"""Persistent narrative state and scoped events for Dynamics World.
 
 Only this module writes narrative data. Public methods accept schema-v1 plain
 dictionaries; every SQLite operation closes its connection before returning.
@@ -11,7 +11,6 @@ import copy
 import datetime as dt
 import hashlib
 import json
-import logging
 import re
 import sqlite3
 import threading
@@ -21,6 +20,8 @@ from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+
+from astrbot.api import logger
 
 if __package__:
     from .narrative_ddl import NarrativeSchemaMixin
@@ -83,7 +84,8 @@ else:
     WorldIO = _io_mod.WorldIO
     WorldIOClosed = _io_mod.WorldIOClosed
 
-_logger = logging.getLogger("astrbot.plugin.astrbot_plugin_dynamics_world")
+_DEBUG_LEVEL = 10
+_INFO_LEVEL = 20
 
 
 def _snapshot_scope_hash(scope: dict) -> str:
@@ -719,13 +721,9 @@ class NarrativeEngine(
         finally:
             finished = time.perf_counter()
             begin_ms = ((began or finished) - started) * 1000
-            level = (
-                logging.INFO
-                if begin_ms >= 500 or finished - started >= 1
-                else logging.DEBUG
-            )
-            if _logger.isEnabledFor(level):
-                _logger.log(
+            level = _INFO_LEVEL if begin_ms >= 500 or finished - started >= 1 else _DEBUG_LEVEL
+            if logger.isEnabledFor(level):
+                logger.log(
                     level,
                     "World snapshot scope_hash=%s session_id=%s stage=%s "
                     "begin_ms=%.1f execute_ms=%.1f finish_ms=%.1f",

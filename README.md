@@ -1,6 +1,6 @@
 # 群间世界 · Dynamics World v0.22.0
 
-> 发布候选：`v0.23.0-rc.2`。升级说明与验证边界见 [RELEASE_NOTES.md](RELEASE_NOTES.md)。
+> 发布候选为 `v0.23.0-rc.3`。升级说明与验证边界见 [RELEASE_NOTES.md](RELEASE_NOTES.md)。
 
 持久生活状态、自主日程、后台居民与观察管理界面见 [持续生活说明](CAUSAL_LIFE.md)。
 

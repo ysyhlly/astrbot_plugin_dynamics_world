@@ -31,59 +31,6 @@ def release_metadata(root):
     return raw.replace(marker, revision)
 
 
-def _uses_host_core_logger(tree, relative):
-    if relative not in {"life/core/narrative.py", "life/core/narrative_io.py"}:
-        return False
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith(
-            "logging"
-        ):
-            return False
-        if isinstance(node, ast.Import):
-            if any(
-                n.name.startswith("logging") and (n.name != "logging" or n.asname)
-                for n in node.names
-            ):
-                return False
-        if (
-            isinstance(node, ast.Attribute)
-            and isinstance(node.value, ast.Name)
-            and node.value.id == "logging"
-        ):
-            if node.attr not in {
-                "getLogger",
-                "NOTSET",
-                "DEBUG",
-                "INFO",
-                "WARNING",
-                "WARN",
-                "ERROR",
-                "CRITICAL",
-                "FATAL",
-            }:
-                return False
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-            if (
-                isinstance(node.func.value, ast.Name)
-                and node.func.value.id == "logging"
-            ):
-                if (
-                    node.func.attr != "getLogger"
-                    or len(node.args) != 1
-                    or node.keywords
-                ):
-                    return False
-                if (
-                    not isinstance(node.args[0], ast.Constant)
-                    or node.args[0].value
-                    != "astrbot.plugin.astrbot_plugin_dynamics_world"
-                ):
-                    return False
-            if node.func.attr in {"addHandler", "removeHandler", "setLevel"}:
-                return False
-    return True
-
-
 def build(root, output):
     root = Path(root).resolve()
     output = Path(output).resolve()
@@ -126,7 +73,6 @@ def build(root, output):
                 continue
             if path.suffix == ".py":
                 tree = ast.parse(path.read_text("utf-8-sig"))
-                core_logger = _uses_host_core_logger(tree, rel.as_posix())
                 for node in ast.walk(tree):
                     names = (
                         [n.name for n in node.names]
@@ -135,13 +81,7 @@ def build(root, output):
                         if isinstance(node, ast.ImportFrom)
                         else []
                     )
-                    if (
-                        any(
-                            name == "logging" or name.startswith("logging.")
-                            for name in names
-                        )
-                        and not core_logger
-                    ):
+                    if any(name == "logging" or name.startswith("logging.") for name in names):
                         raise ValueError(
                             f"{rel}:{node.lineno}: runtime must use astrbot.api.logger"
                         )

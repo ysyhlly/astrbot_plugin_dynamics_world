@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import threading
 import time
 from collections import deque
@@ -11,7 +10,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable, Hashable
 
-_logger = logging.getLogger("astrbot.plugin.astrbot_plugin_dynamics_world")
+from astrbot.api import logger
 
 
 class WorldIOBusy(RuntimeError):
@@ -130,13 +129,12 @@ class WorldIO:
             del self._current.job
             queue_ms = (started - job.queued_at) * 1000
             work_ms = (time.perf_counter() - started) * 1000
-            level = (
-                logging.INFO
+            log = (
+                logger.info
                 if queue_ms >= 500 or queue_ms + work_ms >= 1000
-                else logging.DEBUG
+                else logger.debug
             )
-            _logger.log(
-                level,
+            log(
                 "%s scope_hash=%s queue_ms=%.1f work_ms=%.1f",
                 self._name,
                 job.scope_hash or "-",

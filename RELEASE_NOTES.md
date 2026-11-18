@@ -1,4 +1,6 @@
-# astrbot_plugin_dynamics_world v0.23.0-rc.2
+# astrbot_plugin_dynamics_world v0.23.0-rc.3
+
+世界快照与后台 I/O 通过 AstrBot SDK 记录诊断。慢操作继续记为 INFO，常规操作记为 DEBUG。安装包构建会拒绝任何待打包 Python 文件直接导入标准库 `logging` 或其子模块。
 
 系列面板显示安装版本及源码短提交号。
 

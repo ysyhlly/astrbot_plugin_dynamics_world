@@ -210,7 +210,8 @@ async def test_world_public_reference_and_summary_apis(tmp_path, monkeypatch):
     plugin, _, _ = await make_plugin(tmp_path, monkeypatch, runtime_enabled=True)
     try:
         seed(plugin)
-        assert plugin.get_dynamics_capabilities()["version"] == "v0.23.0-rc.2"
+        metadata = (Path(__file__).parents[1] / "metadata.yaml").read_text(encoding="utf-8")
+        assert f'version: {plugin.get_dynamics_capabilities()["version"]}' in metadata.splitlines()
         ref_dir = plugin.get_reference_assets_directory()
         assert Path(ref_dir).resolve() == (plugin.data_dir / "visual-assets").resolve()
         summary = plugin.get_dynamics_summary(UMO)
@@ -221,7 +222,7 @@ async def test_world_public_reference_and_summary_apis(tmp_path, monkeypatch):
         await plugin.terminate()
 
 
-def test_build_release_core_logger_levels_and_pruned_assets(tmp_path):
+def test_build_release_accepts_sdk_logger_and_prunes_assets(tmp_path):
     root = Path(__file__).parents[1]
     spec = importlib.util.spec_from_file_location(
         "world_build_wave1", root / "build_release.py"
@@ -232,9 +233,7 @@ def test_build_release_core_logger_levels_and_pruned_assets(tmp_path):
     pkg = tmp_path / "plugin"
     (pkg / "life/core").mkdir(parents=True)
     (pkg / "life/core/narrative.py").write_text(
-        "import logging\n"
-        'log = logging.getLogger("astrbot.plugin.astrbot_plugin_dynamics_world")\n'
-        "LEVELS = (logging.DEBUG, logging.INFO, logging.WARNING, logging.ERROR)\n",
+        'from astrbot.api import logger\nlogger.debug("snapshot ready")\n',
         encoding="utf-8",
     )
     res = mod.build(pkg, tmp_path / "ok.zip")
