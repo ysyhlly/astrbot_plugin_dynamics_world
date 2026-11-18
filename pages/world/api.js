@@ -6,7 +6,7 @@ export const PLUGIN = "astrbot_plugin_dynamics_world";
 export const REQUEST_TIMEOUT_MS = 12000;
 
 function ensureBridge() {
-  return window.AstrBotPluginPage || window.AstrBotPluginView || null;
+  return (window.DynamicsPanelBridge || window.AstrBotPluginPage || window.AstrBotPluginView) || null;
 }
 
 export function escapeHtml(value) {

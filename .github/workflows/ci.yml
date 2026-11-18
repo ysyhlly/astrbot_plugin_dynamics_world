@@ -36,7 +36,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           repository: ysyhlly/astrbot_plugin_chat_dynamics
-          ref: f66c92e1a3e9647691f038add017b81bced932eb
+          ref: 38c6bf657e87918af5d704aece4845e9b847a9e9
           path: AstrBot/data/plugins/astrbot_plugin_chat_dynamics
           persist-credentials: false
 

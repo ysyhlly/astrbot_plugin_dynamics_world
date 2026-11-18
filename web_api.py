@@ -25,6 +25,8 @@ class WorldAPI(CausalAPIMixin):
         self.bus = WorldEventBus()
 
     def register(self):
+        from .series_workspace import register_panel_api
+
         routes = [
             ("world", self.overview, ["GET"]),
             ("stream", self.stream_get, ["GET"]),
@@ -62,7 +64,7 @@ class WorldAPI(CausalAPIMixin):
             ]
         )
         for endpoint, handler, methods in routes:
-            self.plugin.context.register_web_api(
+            register_panel_api(self.plugin, self.plugin.context.register_web_api,
                 "/astrbot_plugin_dynamics_world/" + endpoint,
                 handler,
                 methods,

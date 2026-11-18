@@ -12,7 +12,7 @@
       ru: ["Ошибка загрузки", "Не удалось загрузить страницу мира. Обновите её и повторите попытку.", "Обновить"],
     };
     let host = {}, stored;
-    try { host = (window.AstrBotPluginPage || window.AstrBotPluginView)?.getContext?.() || {}; } catch {}
+    try { host = ((window.DynamicsPanelBridge || window.AstrBotPluginPage || window.AstrBotPluginView))?.getContext?.() || {}; } catch {}
     try { stored = localStorage.getItem("lmem_lang"); } catch {}
     const options = [new URLSearchParams(location.search).get("lang"), host.localeOverride, host.locale, stored, document.documentElement.lang];
     const locale = options.map(value => String(value || "").toLowerCase().split(/[-_]/)[0]).find(value => Object.hasOwn(messages,value));

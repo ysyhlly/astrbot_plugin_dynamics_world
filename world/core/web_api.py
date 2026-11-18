@@ -260,6 +260,8 @@ class WorldBookWebAPI:
 
     def register(self) -> None:
         """Publish every route on the host Web server (idempotent)."""
+        from ...series_workspace import register_panel_api
+
         context = getattr(self.plugin, "context", None)
         if context is None or not hasattr(context, "register_web_api"):
             logger.warning("%s: host context has no register_web_api", PLUGIN_NAME)
@@ -285,7 +287,7 @@ class WorldBookWebAPI:
                                 return _err("世界已重新加载，请刷新后重试", 409)
                             return await original()
                     handler = serialized
-                context.register_web_api(f"/{PLUGIN_NAME}/{endpoint}", handler, methods, desc)
+                register_panel_api(getattr(self.plugin, "owner", self.plugin), context.register_web_api, f"/{PLUGIN_NAME}/{endpoint}", handler, methods, desc)
             except Exception as e:
                 logger.warning("%s: register %s failed: %s", PLUGIN_NAME, endpoint, e)
         self.registered = True

@@ -32,7 +32,7 @@ export async function refreshWorld() {
     $("dwScopes").innerHTML = data.sessions.map(x=>`<option value="${esc(x)}"></option>`).join("");
     $("dwApplySettings").disabled = !data.settings_import_available || data.runtime_enabled;
     if (!scopeInitialized && !$("dwScope").value) {
-      const bridge = window.AstrBotPluginPage || window.AstrBotPluginView;
+      const bridge = (window.DynamicsPanelBridge || window.AstrBotPluginPage || window.AstrBotPluginView);
       const explicitScope = new URLSearchParams(location.search).has("umo") || bridge?.getContext?.()?.scope === "";
       const shared = getSharedScope();
       const picked = explicitScope || shared ? shared : (data.sessions[0] || "");
