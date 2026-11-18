@@ -20,15 +20,15 @@ from astrbot.core.provider.entities import ProviderRequest
 
 from .. import creative_projects
 from .core.generator import Generator
-from .core.narrative import NarrativeEngine, normalize_scope
-from .core.narrative_io import WorldIOBusy, WorldIOClosed
-from .core.narrative_prompt import build_narrative_prompt
-from .core.narrative_types import AVAILABILITIES, _identity
 from .core.injector import (
     AUTO_LIFE_GUIDANCE,
     build_fake_tool_call,
     remove_fake_tool_call_from_context,
 )
+from .core.narrative import NarrativeEngine, normalize_scope
+from .core.narrative_io import WorldIOBusy, WorldIOClosed
+from .core.narrative_prompt import build_narrative_prompt
+from .core.narrative_types import AVAILABILITIES, _identity
 from .core.state import (
     CHINA_TIMEZONE,
     NATURAL_SLOT_NAMES,

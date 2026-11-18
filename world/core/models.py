@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
-from typing import Any
 import time
 import uuid
+from dataclasses import asdict, dataclass, field
+from typing import Any
 
 
 def new_uid() -> str:
@@ -84,7 +84,7 @@ class WorldEntry:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any] | None) -> "WorldEntry":
+    def from_dict(cls, data: dict[str, Any] | None) -> WorldEntry:
         raw = data if isinstance(data, dict) else {}
         keys = raw.get("keys", raw.get("key", []))
         secondary = raw.get("secondary_keys", raw.get("keysecondary", raw.get("secondary", [])))
@@ -153,7 +153,7 @@ class WorldBook:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any] | None) -> "WorldBook":
+    def from_dict(cls, data: dict[str, Any] | None) -> WorldBook:
         raw = data if isinstance(data, dict) else {}
         entries_raw = raw.get("entries", [])
         entries: list[WorldEntry] = []
@@ -230,7 +230,7 @@ class SessionState:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any] | None) -> "SessionState":
+    def from_dict(cls, data: dict[str, Any] | None) -> SessionState:
         raw = data if isinstance(data, dict) else {}
         return cls(
             scenario=str(raw.get("scenario") or "").strip(),
@@ -270,7 +270,7 @@ class WorldStore:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any] | None) -> "WorldStore":
+    def from_dict(cls, data: dict[str, Any] | None) -> WorldStore:
         raw = data if isinstance(data, dict) else {}
         books: dict[str, WorldBook] = {}
         books_raw = raw.get("books", {})

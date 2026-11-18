@@ -4,9 +4,9 @@ import hashlib
 import json
 import re
 
-from .spatial import encode
 from .room_design import layout_text
-from .style_presets import selected, catalog
+from .spatial import encode
+from .style_presets import catalog, selected
 
 
 class VisualProfiles:
@@ -297,7 +297,7 @@ class VisualProfiles:
             elif room and spec["home_room_id"] == room_id:
                 result["remove_from_layout"].append(item["name"])
         # Items added without an appearance profile still have actual positions.
-        known = {iid for iid in profile["items"]}
+        known = set(profile["items"])
         for iid, item in items.items():
             if iid not in known and item.get("visible") and item.get("placement"):
                 result["items"].append(

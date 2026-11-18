@@ -31,13 +31,13 @@ class CausalAPIMixin:
                 if not isinstance(body, dict) or set(body) - allowed:
                     raise ValueError("未知生活管理字段")
                 scope, _ = await self.scope(body.get("umo", ""))
-                if body.get('action') == 'evaluate_resident':
-                    rid=body.get('request_id')
-                    if not isinstance(rid,str) or not 8<=len(rid)<=100 or not isinstance(body.get('actor_id'),str):
-                        raise ValueError('需要居民标识和幂等请求标识')
-                    if scope['persona_id'] != self.plugin.life.narrative.config.get('persona_id'):
-                        raise ValueError('仅可推进当前运行世界的居民')
-                    result=await self.plugin.life.residents.tick(actor_id=body['actor_id'],request_id=rid,manual=True)
+                if body.get("action") == "evaluate_resident":
+                    rid=body.get("request_id")
+                    if not isinstance(rid,str) or not 8<=len(rid)<=100 or not isinstance(body.get("actor_id"),str):
+                        raise ValueError("需要居民标识和幂等请求标识")
+                    if scope["persona_id"] != self.plugin.life.narrative.config.get("persona_id"):
+                        raise ValueError("仅可推进当前运行世界的居民")
+                    result=await self.plugin.life.residents.tick(actor_id=body["actor_id"],request_id=rid,manual=True)
                     self.bus.notify()
                     return _ok(result)
                 card = self.plugin.world.store.get_card(body.get("card_id")) if body.get("action") == "resident" else None

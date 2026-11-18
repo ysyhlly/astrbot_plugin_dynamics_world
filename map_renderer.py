@@ -4,11 +4,11 @@ import asyncio
 import base64
 import functools
 import json
+import signal
+import sys
+import threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-import sys
-import signal
-import threading
 from urllib.parse import urlencode, urlparse
 
 

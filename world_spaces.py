@@ -289,8 +289,8 @@ class WorldSpaceService:
                 "ends_at": guest_row["ends_at"],
             }
         if active_guest is not None:
-            active_guest['origin'] = 'admin'
-        if active_guest is None and getattr(self.engine, 'causal', None) is not None:
+            active_guest["origin"] = "admin"
+        if active_guest is None and getattr(self.engine, "causal", None) is not None:
             active_guest = self.engine.causal.guest_projection(db, scope, now)
         encounters = [
             {

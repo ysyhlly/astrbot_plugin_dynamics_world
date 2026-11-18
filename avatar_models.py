@@ -2,21 +2,20 @@
 
 import base64
 import binascii
+import json
+import os
+import re
+import stat
 from contextlib import contextmanager
 from copy import deepcopy
 from hashlib import sha256
 from io import BytesIO
-import json
-import os
 from pathlib import Path, PurePosixPath
-import re
-import stat
 from tempfile import NamedTemporaryFile
-from zipfile import BadZipFile, ZipFile, ZIP_DEFLATED, ZIP_STORED
+from zipfile import ZIP_DEFLATED, ZIP_STORED, BadZipFile, ZipFile
 from zlib import error as ZlibError
 
 from PIL import Image
-
 
 MAX_PACKAGE_BYTES = 8 * 1024 * 1024
 MAX_EXPANDED_BYTES = 16 * 1024 * 1024

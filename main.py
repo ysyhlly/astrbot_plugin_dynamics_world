@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .reload_bootstrap import ensure_current
+
 ensure_current(
     __package__,
     __name__,
@@ -22,18 +23,22 @@ from pathlib import Path
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
 from astrbot.core.provider.entities import ProviderRequest
-from astrbot.core.star.star_tools import StarTools
 from astrbot.core.star.filter.command import GreedyStr
+from astrbot.core.star.star_tools import StarTools
 
 from .defaults import defaults
-from .migration import active_directory, activate_generation, prepare_import
-from .world.service import WorldService
 from .life.service import LifeService
-from .web_api import WorldAPI
 from .map_service import MapService
+from .migration import activate_generation, active_directory, prepare_import
 from .onboarding import Onboarding
+from .postcard_renderer import (
+    PostcardRenderer,
+    match_outfit_texture,
+    parse_shot_override,
+)
 from .texture_resources import TextureResources
-from .postcard_renderer import PostcardRenderer, match_outfit_texture, parse_shot_override
+from .web_api import WorldAPI
+from .world.service import WorldService
 
 
 def merge_config(base, incoming):
@@ -60,8 +65,9 @@ class Main(Star):
 
     async def initialize(self):
         from importlib import reload
+
         from . import series_panels
-        reload(series_panels).register_series_panels(self,'astrbot_plugin_dynamics_world')
+        reload(series_panels).register_series_panels(self,"astrbot_plugin_dynamics_world")
         await self._open_services()
         self.web.register()
         self._ready = True
@@ -92,7 +98,7 @@ class Main(Star):
         if getattr(self.life.narrative, "world_spaces", None) is not None:
             self.life.narrative.world_spaces.avatar_resolver = self._resolve_identity_avatar
         self.life.narrative.visuals.profiles.migrate_legacy_style()
-        self.life.narrative.visuals.media_status=lambda:self.onboarding.compatibility()['visual_media']
+        self.life.narrative.visuals.media_status=lambda:self.onboarding.compatibility()["visual_media"]
 
     def conflicts(self):
         getter = getattr(self.context, "get_all_stars", None)
@@ -186,7 +192,7 @@ class Main(Star):
             raise RuntimeError("群间世界尚未接入，或旧世界书/动态生活仍在启用")
 
     async def terminate(self):
-        panel=getattr(self,'_series_panels',None)
+        panel=getattr(self,"_series_panels",None)
         if panel:
             panel.close()
         self._terminating, self._ready = True, False

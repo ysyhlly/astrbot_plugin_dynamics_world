@@ -3,9 +3,12 @@
 import base64
 import json
 import math
-from .spatial import identity
-from .creative_projects import KINDS as PROJECTS, LABELS as PROJECT_LABELS, STAGES
+
+from .creative_projects import KINDS as PROJECTS
+from .creative_projects import LABELS as PROJECT_LABELS
+from .creative_projects import STAGES
 from .room_design import KINDS as ROOM
+from .spatial import identity
 
 SCENE_BASE = "kind IN ('step.completed','action.failed','action.cancelled','scene.initialized','project.paused','project.resumed') OR kind LIKE 'admin.%'"
 

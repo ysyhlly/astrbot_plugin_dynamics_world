@@ -4,8 +4,8 @@ import hashlib
 import json
 
 from .spatial import identity
-from .visual_profiles import VisualProfiles
 from .style_presets import preset, selected
+from .visual_profiles import VisualProfiles
 
 RULES = [
     "想分享眼前景色、刚发生的小事，或对方问起你那边的样子时，图像确有交流价值才选择画一幅；不必等斜杠命令，也不每轮配图。普通寒暄、答题和认真倾诉优先回应内容。",

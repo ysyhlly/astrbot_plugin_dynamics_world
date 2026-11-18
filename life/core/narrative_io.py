@@ -6,9 +6,10 @@ import asyncio
 import threading
 import time
 from collections import deque
+from collections.abc import Callable, Hashable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any, Callable, Hashable
+from typing import Any
 
 from astrbot.api import logger
 

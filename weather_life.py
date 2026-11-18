@@ -5,7 +5,7 @@ import json
 import math
 import uuid
 
-from .spatial import identity, encode
+from .spatial import encode, identity
 
 SETTLE_SECONDS = 120
 COOLDOWN_SECONDS = 1800

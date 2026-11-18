@@ -8,11 +8,11 @@ import io
 import json
 import os
 import signal
-from pathlib import Path
 import sys
+from pathlib import Path
 
-from .style_presets import catalog, preset
 from .spatial import identity, place_id
+from .style_presets import catalog, preset
 from .world.core.character import CharacterCard
 from .world.core.models import WorldBook, WorldEntry
 

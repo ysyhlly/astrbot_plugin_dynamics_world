@@ -7,6 +7,7 @@ import hashlib
 import json
 from pathlib import Path
 
+from .causal_api import CausalAPIMixin
 from .migration import preview
 from .world.core.web_api import _body, _err, _ok, _query
 from .world_stream import (
@@ -16,9 +17,6 @@ from .world_stream import (
     open_sse_stream,
     parse_known_revisions,
 )
-
-
-from .causal_api import CausalAPIMixin
 
 
 class WorldAPI(CausalAPIMixin):
@@ -610,7 +608,7 @@ class WorldAPI(CausalAPIMixin):
         if guard is not None:
             return guard
         try:
-            from .creative_projects import public, detail
+            from .creative_projects import detail, public
 
             scope, _ = await self.scope(_query("umo"))
             engine = self.plugin.life.narrative
@@ -1004,7 +1002,7 @@ class WorldAPI(CausalAPIMixin):
                 if action == "generate":
                     result = await self.plugin.maps.start(scope, body)
                 elif action in {"switch_mode", "configure_real"}:
-                    from .geography import switch_mode, configure_real
+                    from .geography import configure_real, switch_mode
 
                     if self.plugin.maps.task and not self.plugin.maps.task.done():
                         raise ValueError("请等待地图生成完成后切换模式")

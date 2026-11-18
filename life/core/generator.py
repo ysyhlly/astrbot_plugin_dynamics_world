@@ -12,7 +12,6 @@ from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.star.context import Context
 
 from ...series_panels import get_series_defaults, inherit_provider
-
 from .state import (
     CHINA_TIMEZONE,
     MAX_HISTORY_DAYS,

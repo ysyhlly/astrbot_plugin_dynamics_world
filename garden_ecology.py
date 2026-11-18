@@ -242,8 +242,8 @@ class EcologyService:
             prepared.remove(meal)
             if self.engine.keepsakes is not None:
                 key_ks, rev_ks, slots, archive = self.engine.keepsakes.load_keepsakes(db, scope)
-                slots = {k: v for k, v in slots.items() if v.get('id') != meal['id']}
-                archive = [a for a in archive if a.get('id') != meal['id']]
+                slots = {k: v for k, v in slots.items() if v.get("id") != meal["id"]}
+                archive = [a for a in archive if a.get("id") != meal["id"]]
                 self.engine.keepsakes.save_keepsakes(db, key_ks, rev_ks, slots, archive, now)
             eaten = dict(meal, consumed_at=now)
             eco["consumed"] = (eco.get("consumed", []) + [eaten])[-30:]

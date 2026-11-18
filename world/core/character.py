@@ -6,8 +6,8 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from .models import WorldBook, new_uid, _as_int, _as_str_list
 from .importer import import_worldbook
+from .models import WorldBook, _as_int, _as_str_list, new_uid
 
 
 def _s(value: Any, default: str = "") -> str:
@@ -81,7 +81,7 @@ class CharacterCard:
         return data
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any] | None) -> "CharacterCard":
+    def from_dict(cls, data: dict[str, Any] | None) -> CharacterCard:
         raw = data if isinstance(data, dict) else {}
         return cls(
             id=_s(raw.get("id")) or new_uid(),

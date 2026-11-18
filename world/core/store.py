@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
-from copy import deepcopy
-from astrbot.api import logger
 import os
 import threading
 import time
+from copy import deepcopy
 from typing import Any
+
+from astrbot.api import logger
 
 from .character import CharacterCard
 from .models import (
@@ -17,7 +18,6 @@ from .models import (
     WorldStore,
     new_uid,
 )
-
 
 # 调试预览每轮都在变，只保留状态展示需要的一小段（旧实现每个会话存 2000 字，
 # 20 个会话就占了 store 文件的 76%）
@@ -50,7 +50,7 @@ class WorldBookStore:
                 self._dirty = False
                 return
             try:
-                with open(self.data_file, "r", encoding="utf-8") as f:
+                with open(self.data_file, encoding="utf-8") as f:
                     data = json.load(f)
                 if not isinstance(data, dict):
                     raise ValueError("worldbook store must be an object")

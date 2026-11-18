@@ -9,23 +9,32 @@ import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from .spatial import identity, encode
+from . import creative_projects, room_design
+from .garden_ecology import ECOLOGY_DURATIONS, ECOLOGY_KINDS, ECOLOGY_LABELS
+from .life.core.narrative import NarrativeValidationError
+from .mailbox_visitors import MailboxVisitorService
+from .spatial import encode, identity
 from .study_items import (
+    MODES,
     STUDY_KINDS,
     STUDY_LABELS,
-    MODES,
     content,
-    defaults as item_defaults,
-    check as check_study,
+)
+from .study_items import (
     apply as apply_study,
+)
+from .study_items import (
+    check as check_study,
+)
+from .study_items import (
+    defaults as item_defaults,
+)
+from .study_items import (
     present as present_item,
+)
+from .study_items import (
     receipt as item_receipt,
 )
-from .life.core.narrative import NarrativeValidationError
-from . import room_design
-from . import creative_projects
-from .garden_ecology import ECOLOGY_DURATIONS, ECOLOGY_KINDS, ECOLOGY_LABELS
-from .mailbox_visitors import MailboxVisitorService
 
 V20_FREE_KINDS = ECOLOGY_KINDS | MailboxVisitorService.MAILBOX_KINDS
 

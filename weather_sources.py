@@ -122,11 +122,11 @@ class Credentials:
                     or len(value["private_key"]) > 4096
                 ):
                     raise ValueError("无效私钥")
-                from cryptography.hazmat.primitives.serialization import (
-                    load_pem_private_key,
-                )
                 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
                     Ed25519PrivateKey,
+                )
+                from cryptography.hazmat.primitives.serialization import (
+                    load_pem_private_key,
                 )
 
                 try:

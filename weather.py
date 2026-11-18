@@ -15,12 +15,12 @@ from zoneinfo import ZoneInfo
 import aiohttp
 
 from .geography import coordinate, timezone
-from .spatial import identity, encode
+from .spatial import encode, identity
 from .weather_sources import (
     SOURCES,
     Credentials,
-    fetch_source,
     cache_deadline,
+    fetch_source,
     normalize_met,
     normalize_qweather,
     project,

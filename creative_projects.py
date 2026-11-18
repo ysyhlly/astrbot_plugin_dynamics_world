@@ -2,6 +2,7 @@
 
 import copy
 import uuid
+
 from . import study_items
 
 WRITING = {"project_start", "project_write", "project_revise"}

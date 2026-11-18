@@ -5,7 +5,7 @@ from __future__ import annotations
 
 def narrative_schema(request: dict) -> dict:
     """Constrain JSON shape, source IDs, finite labels and program-owned time windows."""
-    if request.get('resident_isolated'):
+    if request.get("resident_isolated"):
         from ...resident_runtime import decision_schema
         return decision_schema(request)
     now = request["now"]
@@ -36,29 +36,29 @@ def narrative_schema(request: dict) -> dict:
                "minItems": 1 if event_ids else 0, "maxItems": 50 if event_ids else 0}
     basic = {"source_ids": sources}
     member = {**basic, "subject_id": text(100)}
-    if request.get('outreach_only'):
-        props = {'no_change': {'type':'boolean'}}
-        common = {**member, 'reason':text(300), 'evidence_quote':text(600),
-                  'not_before':stamp(86400,now+1800), 'expires_at':stamp(86400)}
-        required = ('subject_id','reason','evidence_quote','source_ids','not_before','expires_at')
-        if request.get('care_policy',{}).get('enabled'):
-            props['care_waits'] = rows({**common, 'reason_kind':choice(['health_concern','travel_checkin','agreed_checkin']),
-                'waiting_for':text(300)}, (*required,'reason_kind','waiting_for'), 2)
-        if request.get('social_policy',{}).get('enabled'):
+    if request.get("outreach_only"):
+        props = {"no_change": {"type":"boolean"}}
+        common = {**member, "reason":text(300), "evidence_quote":text(600),
+                  "not_before":stamp(86400,now+1800), "expires_at":stamp(86400)}
+        required = ("subject_id","reason","evidence_quote","source_ids","not_before","expires_at")
+        if request.get("care_policy",{}).get("enabled"):
+            props["care_waits"] = rows({**common, "reason_kind":choice(["health_concern","travel_checkin","agreed_checkin"]),
+                "waiting_for":text(300)}, (*required,"reason_kind","waiting_for"), 2)
+        if request.get("social_policy",{}).get("enabled"):
             social_common = {
                 **common,
                 # Shared-topic openers still need their historical >=30m
                 # quiet break and may expire within 24h; the grounded branch
                 # has tighter limits enforced by _social_chat.
-                'not_before': stamp(86400, now + 60),
-                'expires_at': stamp(86400),
+                "not_before": stamp(86400, now + 60),
+                "expires_at": stamp(86400),
             }
-            props['chat_openers'] = rows({
+            props["chat_openers"] = rows({
                 **social_common,
-                'topic': text(120),
-                'topic_candidate_id': text(100),
-            }, (*required,'topic'), 2)
-        return obj(props, ('no_change',))
+                "topic": text(120),
+                "topic_candidate_id": text(100),
+            }, (*required,"topic"), 2)
+        return obj(props, ("no_change",))
     humanlike = {
         "preferences": rows({**basic, "id": text(100), "text": text(120),
                              "status": choice(["active", "removed"])},
@@ -169,23 +169,23 @@ def narrative_schema(request: dict) -> dict:
     }
     if not scoped:
         properties["state"]["properties"]["activity"] = text(80)
-        scene=request.get('snapshot',{}).get('scene') or {}
-        if scene.get('available'):
-            kinds=['enter','leave','take','put','read','drink','refill','open_umbrella','fold_umbrella','rest','dry','travel','write_note','read_notes','power_on','power_off','computer_work']
-            targets=[r['id'] for r in scene.get('rooms',[])]+[i['id'] for i in scene.get('items',[])]+[p['id'] for p in (request.get('snapshot',{}).get('spatial') or {}).get('places',[])]
-            from ...room_design import KINDS,POSITIONS,LIGHTS,CURTAINS
+        scene=request.get("snapshot",{}).get("scene") or {}
+        if scene.get("available"):
+            kinds=["enter","leave","take","put","read","drink","refill","open_umbrella","fold_umbrella","rest","dry","travel","write_note","read_notes","power_on","power_off","computer_work"]
+            targets=[r["id"] for r in scene.get("rooms",[])]+[i["id"] for i in scene.get("items",[])]+[p["id"] for p in (request.get("snapshot",{}).get("spatial") or {}).get("places",[])]
+            from ...room_design import CURTAINS, KINDS, LIGHTS, POSITIONS
             kinds+=sorted(KINDS)
             from ...creative_projects import KINDS as PROJECT_KINDS
             kinds+=sorted(PROJECT_KINDS)
             from ...garden_ecology import ECOLOGY_KINDS
-            kinds += sorted(ECOLOGY_KINDS) + ['open_mailbox']
-            targets += [f['id'] for d in scene.get('room_designs',[]) for f in d['furniture']]
-            targets += [p['id'] for p in scene.get('projects',[])]
-            properties['world_action']=obj({'operation':choice(['start','cancel','interrupt','resume']),
-                'steps':rows({'kind':choice(kinds),'target_id':choice(targets),'title':text(60),'text':text(1000),
-                              'mode':choice(['writing','organize','gaming']+list(LIGHTS)+list(CURTAINS)),
-                              'position':choice(list(POSITIONS)), 'record_id':text(160),'project_id':text(100),
-                              'parts':{'type':'integer','minimum':1,'maximum':8},'section':{'type':'integer','minimum':1,'maximum':8}},('kind',),6)},('operation',))
+            kinds += sorted(ECOLOGY_KINDS) + ["open_mailbox"]
+            targets += [f["id"] for d in scene.get("room_designs",[]) for f in d["furniture"]]
+            targets += [p["id"] for p in scene.get("projects",[])]
+            properties["world_action"]=obj({"operation":choice(["start","cancel","interrupt","resume"]),
+                "steps":rows({"kind":choice(kinds),"target_id":choice(targets),"title":text(60),"text":text(1000),
+                              "mode":choice(["writing","organize","gaming"]+list(LIGHTS)+list(CURTAINS)),
+                              "position":choice(list(POSITIONS)), "record_id":text(160),"project_id":text(100),
+                              "parts":{"type":"integer","minimum":1,"maximum":8},"section":{"type":"integer","minimum":1,"maximum":8}},("kind",),6)},("operation",))
         spatial = request.get("snapshot", {}).get("spatial") or {}
         if spatial.get("available"):
             properties["movement"] = obj({"kind": choice(["locate", "plan", "depart"]),

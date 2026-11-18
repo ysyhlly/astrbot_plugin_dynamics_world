@@ -48,7 +48,7 @@ def real_route(document, start, end):
 
 
 def switch_mode(spatial, scope, mode, expected_revision, document=None):
-    from .spatial import identity, encode
+    from .spatial import encode, identity
 
     if mode not in {"virtual", "real"}:
         raise ValueError("未知地图模式")
@@ -150,7 +150,7 @@ def switch_mode(spatial, scope, mode, expected_revision, document=None):
 
 
 def configure_real(spatial, scope, body):
-    from .spatial import place_id, identity
+    from .spatial import identity, place_id
 
     lat = coordinate(body.get("latitude"), 85, "纬度")
     lon = coordinate(body.get("longitude"), 180, "经度")

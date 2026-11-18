@@ -6,11 +6,11 @@ import asyncio
 import hashlib
 import json
 import math
-from pathlib import Path
 import re
 import sys
 import tempfile
 import time
+from pathlib import Path
 
 from .spatial import identity, place_id, route
 
@@ -96,7 +96,7 @@ def convert(raw, seed, names, seconds_per_unit=10):
             {"cell": i, "name": "地点"} for i in ordered if i not in occupied
         ]
     coastal = {i for i in mainland if any(heights[j] < 20 for j in neighbors[i])}
-    coast_distance = {i: 0 for i in coastal}
+    coast_distance = dict.fromkeys(coastal, 0)
     frontier = list(coastal)
     for cell in frontier:
         for target in neighbors[cell]:

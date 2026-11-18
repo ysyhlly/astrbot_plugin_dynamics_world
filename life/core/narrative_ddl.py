@@ -184,19 +184,19 @@ class NarrativeSchemaMixin:
                 state["next_check"] = now
                 state.pop("activity_started_at", None)
                 event_id = "clock.migration.v2:" + row["identity"]
-                event = dict(
-                    schema_version=1,
-                    event_id=event_id,
-                    type="clock.migration",
-                    scope=json.loads(row["scope"]),
-                    occurred_at=now,
-                    received_at=now,
-                    actor_id="system",
-                    text="旧版时钟有效期作废，等待重新检查；历史记录保留。",
-                    source_ids=[event_id],
-                    fact_kind="receipt",
-                    data={"effect_confirmed": True},
-                )
+                event = {
+                    "schema_version": 1,
+                    "event_id": event_id,
+                    "type": "clock.migration",
+                    "scope": json.loads(row["scope"]),
+                    "occurred_at": now,
+                    "received_at": now,
+                    "actor_id": "system",
+                    "text": "旧版时钟有效期作废，等待重新检查；历史记录保留。",
+                    "source_ids": [event_id],
+                    "fact_kind": "receipt",
+                    "data": {"effect_confirmed": True},
+                }
                 db.execute(
                     "INSERT OR IGNORE INTO events(event_id,identity,umo,occurred,received,payload,status,created) VALUES(?,?,'',?,?,?,'observed_only',?)",
                     (event_id, row["identity"], now, now, _json(event), now),

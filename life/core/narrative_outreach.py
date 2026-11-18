@@ -100,22 +100,22 @@ class NarrativeOutreachMixin:
         Quoted instructions, third-person reports and ordinary subsequent chat
         cannot clear a refusal. Store the event ID, not another copy of text.
         """
-        if (event.get('type') not in {'message.received','chat.message'}
-                or event.get('actor_id') in {'',None,'bot','system'}
-                or event.get('data',{}).get('directed_to_bot') is not True):
+        if (event.get("type") not in {"message.received","chat.message"}
+                or event.get("actor_id") in {"",None,"bot","system"}
+                or event.get("data",{}).get("directed_to_bot") is not True):
             return None
-        text = re.sub(r'\s+', '', event.get('text','')).strip('，,。.!！~～')
-        target = r'(?:来)?(?:找我(?:聊天|说话)?|联系我|给我发(?:消息|信息)|跟我(?:聊天|说话)|关心我)'
-        prefix = r'(?:请|麻烦你|你)?(?:以后|今后|从现在起|现在)?(?:请)?'
-        if re.fullmatch(prefix+r'(?:不要|别|不用|停止)(?:再)?主动'+target+r'(?:了)?', text):
+        text = re.sub(r"\s+", "", event.get("text","")).strip("，,。.!！~～")
+        target = r"(?:来)?(?:找我(?:聊天|说话)?|联系我|给我发(?:消息|信息)|跟我(?:聊天|说话)|关心我)"
+        prefix = r"(?:请|麻烦你|你)?(?:以后|今后|从现在起|现在)?(?:请)?"
+        if re.fullmatch(prefix+r"(?:不要|别|不用|停止)(?:再)?主动"+target+r"(?:了)?", text):
             return False
-        if re.fullmatch(prefix+r'(?:可以|允许|恢复|重新允许)(?:你)?(?:再)?主动'+target+r'(?:了)?', text):
+        if re.fullmatch(prefix+r"(?:可以|允许|恢复|重新允许)(?:你)?(?:再)?主动"+target+r"(?:了)?", text):
             return True
         return None
 
     def _contact_allowed(self, db, scope, uid):
-        row = db.execute('SELECT allowed FROM outreach_preferences WHERE identity=? AND umo=? AND user_id=?',
-                         (_identity(scope),scope['umo'],str(uid))).fetchone()
+        row = db.execute("SELECT allowed FROM outreach_preferences WHERE identity=? AND umo=? AND user_id=?",
+                         (_identity(scope),scope["umo"],str(uid))).fetchone()
         return row is None or bool(row[0])
 
     @staticmethod
@@ -223,15 +223,15 @@ class NarrativeOutreachMixin:
         allowed = self._explicit_outreach_preference(event)
         if allowed is None:
             return
-        scope, uid = event['scope'], event['actor_id']
-        changed = db.execute('INSERT INTO outreach_preferences VALUES(?,?,?,?,?,?) '
-            'ON CONFLICT(identity,umo,user_id) DO UPDATE SET allowed=excluded.allowed,occurred=excluded.occurred,event_id=excluded.event_id '
-            'WHERE excluded.occurred>=outreach_preferences.occurred',
-            (_identity(scope),scope['umo'],uid,int(allowed),event['occurred_at'],event['event_id'])).rowcount
+        scope, uid = event["scope"], event["actor_id"]
+        changed = db.execute("INSERT INTO outreach_preferences VALUES(?,?,?,?,?,?) "
+            "ON CONFLICT(identity,umo,user_id) DO UPDATE SET allowed=excluded.allowed,occurred=excluded.occurred,event_id=excluded.event_id "
+            "WHERE excluded.occurred>=outreach_preferences.occurred",
+            (_identity(scope),scope["umo"],uid,int(allowed),event["occurred_at"],event["event_id"])).rowcount
         if changed and not allowed:
             db.execute("UPDATE intents SET status='cancelled',updated=? WHERE identity=? AND umo=? "
                 "AND status IN ('pending','claimed') AND json_extract(payload,'$.recipient_user_id')=?",
-                (self.clock(),_identity(scope),scope['umo'],uid))
+                (self.clock(),_identity(scope),scope["umo"],uid))
 
     def _migrate_outreach_preferences(self, db):
         if db.execute("SELECT 1 FROM metadata WHERE key='outreach_preferences_v1'").fetchone():
@@ -242,7 +242,7 @@ class NarrativeOutreachMixin:
                               "ORDER BY occurred,received,event_id"):
             event = json.loads(row[0])
             if self._explicit_outreach_preference(event) is not None:
-                latest[(_identity(event['scope']),event['scope']['umo'],event['actor_id'])] = event
+                latest[(_identity(event["scope"]),event["scope"]["umo"],event["actor_id"])] = event
         for event in latest.values():
             self._observe_outreach_preference(db,event)
         db.execute("INSERT INTO metadata VALUES('outreach_preferences_v1','1')")
@@ -253,95 +253,95 @@ class NarrativeOutreachMixin:
             raise NarrativeValidationError("contextual_care_disabled_for_this_conversation", "Contextual care disabled for this conversation")
         if not isinstance(raw, dict):
             raise NarrativeValidationError("invalid_care_wait", "Invalid care wait")
-        uid = _text(raw.get('subject_id', ''), 300, 'subject_id')
+        uid = _text(raw.get("subject_id", ""), 300, "subject_id")
         with self._db() as db:
             if not self._contact_allowed(db, scope, uid):
-                raise NarrativeValidationError('outreach_member_opted_out', 'Member declined proactive contact')
+                raise NarrativeValidationError("outreach_member_opted_out", "Member declined proactive contact")
         peer = self._private_peer(scope["umo"])
-        if not uid or uid in {'bot', 'system'} or (peer and uid != peer):
+        if not uid or uid in {"bot", "system"} or (peer and uid != peer):
             raise NarrativeValidationError("care_needs_a_concrete_member", "Care needs a concrete member")
-        ids = self._sources(raw.get('source_ids'), sources)
-        quote = _text(raw.get('evidence_quote', ''), 600, 'evidence_quote')
-        evidence = [sources[s] for s in ids if sources[s]['type'] in {'message.received', 'chat.message'}
-                    and sources[s]['actor_id'] == uid and quote and quote in sources[s]['text']
-                    and sources[s].get('data', {}).get('directed_to_bot') is True]
+        ids = self._sources(raw.get("source_ids"), sources)
+        quote = _text(raw.get("evidence_quote", ""), 600, "evidence_quote")
+        evidence = [sources[s] for s in ids if sources[s]["type"] in {"message.received", "chat.message"}
+                    and sources[s]["actor_id"] == uid and quote and quote in sources[s]["text"]
+                    and sources[s].get("data", {}).get("directed_to_bot") is True]
         if not evidence:
             raise NarrativeValidationError("care_needs_an_exact_self_authored_addressed_source_quote", "Care needs an exact, self-authored, addressed source quote")
-        source = max(evidence, key=lambda e: (e['occurred_at'], e['received_at']))
-        if source['occurred_at'] < now - 86400:
+        source = max(evidence, key=lambda e: (e["occurred_at"], e["received_at"]))
+        if source["occurred_at"] < now - 86400:
             raise NarrativeValidationError("old_queued_evidence_cannot_start_a_new_care_wait", "Old queued evidence cannot start a new care wait")
-        reason_kind = raw.get('reason_kind')
-        if reason_kind not in {'health_concern', 'travel_checkin', 'agreed_checkin'}:
+        reason_kind = raw.get("reason_kind")
+        if reason_kind not in {"health_concern", "travel_checkin", "agreed_checkin"}:
             raise NarrativeValidationError("ordinary_silence_is_not_a_care_reason", "Ordinary silence is not a care reason")
         item = self._intent(raw, scope, sources, now)
-        if item['not_before'] < now + 1800:
+        if item["not_before"] < now + 1800:
             raise NarrativeValidationError("care_must_allow_at_least_thirty_minutes", "Care must allow at least thirty minutes")
-        anchor = _json([_identity(scope), scope['umo'], uid, source['event_id']])
-        item.update(intent_id='care:' + hashlib.sha256(anchor.encode()).hexdigest()[:32],
-                    kind='care_wait', recipient_user_id=uid, reason_kind=reason_kind,
-                    evidence_quote=quote, source_event_id=source['event_id'],
-                    source_occurred_at=source['occurred_at'],
-                    source_message_id=str(source.get('data', {}).get('care_activity_id') or source['source_ids'][0]),
-                    waiting_for=_text(raw.get('waiting_for', ''), 300, 'waiting_for'))
+        anchor = _json([_identity(scope), scope["umo"], uid, source["event_id"]])
+        item.update(intent_id="care:" + hashlib.sha256(anchor.encode()).hexdigest()[:32],
+                    kind="care_wait", recipient_user_id=uid, reason_kind=reason_kind,
+                    evidence_quote=quote, source_event_id=source["event_id"],
+                    source_occurred_at=source["occurred_at"],
+                    source_message_id=str(source.get("data", {}).get("care_activity_id") or source["source_ids"][0]),
+                    waiting_for=_text(raw.get("waiting_for", ""), 300, "waiting_for"))
         return item
 
     def _cancel_care_on_input(self, db, event, now):
-        if event['type'] not in {'message.received', 'chat.message'} or event['actor_id'] in {'', 'bot', 'system'}:
+        if event["type"] not in {"message.received", "chat.message"} or event["actor_id"] in {"", "bot", "system"}:
             return
-        scope = event['scope']
+        scope = event["scope"]
         changed = False
         rows = db.execute("SELECT intent_id,payload FROM intents WHERE identity=? AND umo=? AND status IN ('pending','claimed')",
-                          (_identity(scope), scope['umo'])).fetchall()
+                          (_identity(scope), scope["umo"])).fetchall()
         for row in rows:
-            item = json.loads(row['payload'])
-            if (item.get('kind') not in {'care_wait','social_chat'} or item.get('recipient_user_id') != event['actor_id']
-                    or event['event_id'] in item['source_ids']
-                    or event['occurred_at'] < item.get('source_occurred_at', 0)):
+            item = json.loads(row["payload"])
+            if (item.get("kind") not in {"care_wait","social_chat"} or item.get("recipient_user_id") != event["actor_id"]
+                    or event["event_id"] in item["source_ids"]
+                    or event["occurred_at"] < item.get("source_occurred_at", 0)):
                 continue
-            item.update(status='cancelled', resolution='member_returned', resolved_by=event['event_id'])
+            item.update(status="cancelled", resolution="member_returned", resolved_by=event["event_id"])
             db.execute("UPDATE intents SET status='cancelled',payload=?,updated=? WHERE intent_id=?",
-                       (_json(item), now, row['intent_id']))
+                       (_json(item), now, row["intent_id"]))
             changed = True
         if changed:
-            db.execute('UPDATE lives SET revision=revision+1 WHERE identity=?', (_identity(scope),))
-            db.execute('UPDATE scopes SET revision=revision+1 WHERE identity=? AND umo=?', (_identity(scope), scope['umo']))
+            db.execute("UPDATE lives SET revision=revision+1 WHERE identity=?", (_identity(scope),))
+            db.execute("UPDATE scopes SET revision=revision+1 WHERE identity=? AND umo=?", (_identity(scope), scope["umo"]))
 
     def _care_current(self, db, item):
         kind = item.get("kind")
         if kind not in self._outreach_settings:
             return True
-        scope = item['scope']
+        scope = item["scope"]
         if not self._outreach_enabled(kind, scope):
             return False
         peer = self._private_peer(scope["umo"])
         if peer and item["recipient_user_id"] != peer:
             return False
-        if kind == 'social_chat' and item.get('topic_candidate_id'):
+        if kind == "social_chat" and item.get("topic_candidate_id"):
             candidate = self._current_topic_candidate(db, scope, self.clock(), item)
             if candidate is None:
                 return False
-        if not self._contact_allowed(db, scope, item['recipient_user_id']):
+        if not self._contact_allowed(db, scope, item["recipient_user_id"]):
             return False
-        presence = db.execute('SELECT value FROM metadata WHERE key=?',
-                              ('care_presence:' + _json([scope['umo'], item['recipient_user_id']]),)).fetchone()
+        presence = db.execute("SELECT value FROM metadata WHERE key=?",
+                              ("care_presence:" + _json([scope["umo"], item["recipient_user_id"]]),)).fetchone()
         if presence:
             value = json.loads(presence[0])
-            if (value['occurred_at'] >= item['source_occurred_at']
-                    and value['message_id'] != item.get('source_message_id')):
+            if (value["occurred_at"] >= item["source_occurred_at"]
+                    and value["message_id"] != item.get("source_message_id")):
                 return False
         anchor = db.execute(
-            'SELECT rowid FROM events WHERE event_id=? AND identity=? AND umo=?',
-            (item['source_event_id'], _identity(scope), scope['umo']),
+            "SELECT rowid FROM events WHERE event_id=? AND identity=? AND umo=?",
+            (item["source_event_id"], _identity(scope), scope["umo"]),
         ).fetchone()
         if not anchor:
             return False
-        for row in db.execute('SELECT payload FROM events WHERE identity=? AND umo=? AND rowid>?',
-                              (_identity(scope), scope['umo'], anchor[0])):
+        for row in db.execute("SELECT payload FROM events WHERE identity=? AND umo=? AND rowid>?",
+                              (_identity(scope), scope["umo"], anchor[0])):
             event = json.loads(row[0])
-            if (event['type'] in {'message.received', 'chat.message'}
-                    and event['actor_id'] == item['recipient_user_id']
-                    and event['event_id'] not in item['source_ids']
-                    and event['occurred_at'] >= item['source_occurred_at']):
+            if (event["type"] in {"message.received", "chat.message"}
+                    and event["actor_id"] == item["recipient_user_id"]
+                    and event["event_id"] not in item["source_ids"]
+                    and event["occurred_at"] >= item["source_occurred_at"]):
                 return False
         return True
 
@@ -354,7 +354,7 @@ class NarrativeOutreachMixin:
         uid = _text(raw.get("subject_id", ""), 100)
         with self._db() as db:
             if not self._contact_allowed(db, scope, uid):
-                raise NarrativeValidationError('outreach_member_opted_out', 'Member declined proactive contact')
+                raise NarrativeValidationError("outreach_member_opted_out", "Member declined proactive contact")
         candidate_id = _text(raw.get("topic_candidate_id", ""), 100)
         topic = _text(raw.get("topic", ""), 120)
         quote = _text(raw.get("evidence_quote", ""), 600)
@@ -542,7 +542,7 @@ class NarrativeOutreachMixin:
                 policy_key = hashlib.sha256(_json([
                     care_enabled,
                     social_enabled,
-                    self.config.get('narrative_provider_id',''),
+                    self.config.get("narrative_provider_id",""),
                     dt.datetime.fromtimestamp(now,CHINA).hour >= 8,
                 ]).encode()).hexdigest()
                 with self._db() as db:
@@ -552,7 +552,7 @@ class NarrativeOutreachMixin:
                         "SELECT value FROM metadata WHERE key=?", (key,)
                     ).fetchone()
                     marker = json.loads(saved[0]) if saved else {}
-                    if marker.get("next_at", 0) > now and marker.get('policy_key') == policy_key:
+                    if marker.get("next_at", 0) > now and marker.get("policy_key") == policy_key:
                         continue
                     rows = db.execute(
                         "SELECT payload FROM events WHERE identity=? AND umo=? AND occurred>=? AND occurred<=? "
@@ -565,8 +565,8 @@ class NarrativeOutreachMixin:
                     events, size = [], 0
                     for row in rows:
                         e = json.loads(row[0])
-                        target = (e.get('data',{}).get('recipient_user_id') if e['type']=='delivery.success'
-                                  else e.get('actor_id'))
+                        target = (e.get("data",{}).get("recipient_user_id") if e["type"]=="delivery.success"
+                                  else e.get("actor_id"))
                         if peer and target != peer:
                             continue
                         if target and not self._contact_allowed(db,scope,target):
@@ -604,21 +604,21 @@ class NarrativeOutreachMixin:
                         and now - 900 <= e.get("occurred_at", 0) <= now
                         and self._contact_allowed(db, scope, e["actor_id"])
                     })
-                    evidence_key = hashlib.sha256(_json([e['event_id'] for e in events]).encode()).hexdigest()
-                    if marker.get('status') == 'policy_refusal' and marker.get('evidence_key') == evidence_key:
+                    evidence_key = hashlib.sha256(_json([e["event_id"] for e in events]).encode()).hexdigest()
+                    if marker.get("status") == "policy_refusal" and marker.get("evidence_key") == evidence_key:
                         continue
                     fingerprint = hashlib.sha256(_json([
-                        [e['event_id'] for e in events], quiet, policy_key,
+                        [e["event_id"] for e in events], quiet, policy_key,
                         opportunity_members, [
                             [c["topic_candidate_id"], c["source_fingerprint"]]
                             for c in topic_candidates
                         ],
-                        snapshot.get('availability'), snapshot.get('scope_revision'),
+                        snapshot.get("availability"), snapshot.get("scope_revision"),
                     ]).encode()).hexdigest()
                     if (
                         marker.get("fingerprint") == fingerprint
                         and marker.get("status") == "ok"
-                        and now - marker.get('last_at',0) < 1800
+                        and now - marker.get("last_at",0) < 1800
                     ):
                         continue
                     recent_intents = [
@@ -709,21 +709,21 @@ class NarrativeOutreachMixin:
                     ):
                         values = raw.get(field, [])
                         if not isinstance(values, list) or len(values) > 2:
-                            rejected.append('outreach_candidate_limit')
+                            rejected.append("outreach_candidate_limit")
                             continue
                         for value in values:
                             try:
                                 if not isinstance(value,dict):
-                                    raise NarrativeValidationError('outreach_candidate_shape','Candidate must be an object')
+                                    raise NarrativeValidationError("outreach_candidate_shape","Candidate must be an object")
                                 intents.append(validator(value, scope, sources, now))
                             except (ValueError,TypeError,AttributeError) as exc:
-                                rejected.append(getattr(exc,'code',type(exc).__name__))
+                                rejected.append(getattr(exc,"code",type(exc).__name__))
                     if raw.get("no_change") is True and intents:
                         raise NarrativeValidationError(
                             "outreach_no_change_conflict", "no_change cannot create intents"
                         )
                     if rejected:
-                        status = 'partial' if intents else 'invalid'
+                        status = "partial" if intents else "invalid"
                     with self._db() as db:
                         db.execute("BEGIN IMMEDIATE")
                         if (
@@ -733,8 +733,8 @@ class NarrativeOutreachMixin:
                         ):
                             continue
                         for code in rejected:
-                            db.execute('INSERT INTO validation_failures VALUES(?,?,?,?)',
-                                (str(uuid.uuid4()),_json(list(sources)),'outreach.'+str(code)[:80],now))
+                            db.execute("INSERT INTO validation_failures VALUES(?,?,?,?)",
+                                (str(uuid.uuid4()),_json(list(sources)),"outreach."+str(code)[:80],now))
                         for item in intents:
                             if not self._care_current(db, item):
                                 continue
@@ -804,10 +804,10 @@ class NarrativeOutreachMixin:
                             _json(
                                 {
                                     "last_at": now,
-                                    "next_at": now + (300 if status in {'ok','partial'} else 900),
+                                    "next_at": now + (300 if status in {"ok","partial"} else 900),
                                     "fingerprint": fingerprint,
                                     "status": "ok"
-                                    if status == 'partial'
+                                    if status == "partial"
                                     else status,
                                     "candidates": added,
                                     "rejected": len(rejected),

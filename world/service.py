@@ -2,14 +2,13 @@
 # Refresh owned dependencies before importing them during a scoped hot reload.
 from __future__ import annotations
 
-
 import hashlib
 import json
-from astrbot.api import logger
 import os
 import re
 from typing import Any
 
+from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 
 try:
@@ -40,7 +39,6 @@ from .core.models import SESSION_CARD_NONE, WorldBook, WorldEntry, new_uid
 from .core.settings import Settings, render_template
 from .core.store import WorldBookStore
 from .core.web_api import WorldBookWebAPI
-
 
 PLUGIN_NAME = "astrbot_plugin_dynamics_world"
 PLUGIN_VERSION = "v1.5.0"
@@ -180,7 +178,7 @@ class WorldService:
         if existing is not None and existing.entries:
             return
         try:
-            with open(mocai_path, "r", encoding="utf-8") as f:
+            with open(mocai_path, encoding="utf-8") as f:
                 book = import_worldbook(f.read(), default_name=target_name)
             if existing is not None:
                 book.id = existing.id
@@ -207,7 +205,7 @@ class WorldService:
         try:
             existing = self.store.find_card_by_name(card_name)
             if existing is None or not (existing.description or existing.system_prompt):
-                with open(path, "r", encoding="utf-8") as f:
+                with open(path, encoding="utf-8") as f:
                     card = import_character_card(f.read(), default_name=card_name)
                 if existing is not None:
                     card.id = existing.id
@@ -632,7 +630,7 @@ class WorldService:
         if not sample_path:
             return "示例文件不存在"
         try:
-            with open(sample_path, "r", encoding="utf-8") as f:
+            with open(sample_path, encoding="utf-8") as f:
                 raw = f.read()
             book = import_worldbook(raw, default_name=default_name)
             existing = self.store.find_book_by_name(book.name)
@@ -966,7 +964,7 @@ class WorldService:
         if not os.path.exists(path):
             return "内置角色卡文件不存在"
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, encoding="utf-8") as f:
                 card = import_character_card(f.read(), default_name=card_name)
             existing = self.store.find_card_by_name(card_name)
             if existing:

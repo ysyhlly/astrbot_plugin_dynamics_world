@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import importlib.util as _ilu
 import math
-from pathlib import Path
 import re
 import sys as _sys
+from pathlib import Path
 from typing import Any
 
 if __package__:

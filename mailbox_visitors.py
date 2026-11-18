@@ -220,7 +220,7 @@ class MailboxVisitorService:
                     "departs_at": now + ttl,
                 }
 
-            seed_hex = hashlib.sha256(f"{key}:{uid}:{clean_name}".encode("utf-8")).hexdigest()[:16]
+            seed_hex = hashlib.sha256(f"{key}:{uid}:{clean_name}".encode()).hexdigest()[:16]
             if mode == "critter":
                 form = CRITTER_FORMS[int(seed_hex[:2], 16) % len(CRITTER_FORMS)]
             else:
