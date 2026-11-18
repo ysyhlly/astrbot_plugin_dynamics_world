@@ -1,4 +1,6 @@
-# astrbot_plugin_dynamics_world v0.23.0-rc.3
+# astrbot_plugin_dynamics_world v0.23.0-rc.4
+
+沿用 RC 3 的 SDK 日志修复，CI 固定对话主控提交，覆盖房间状态投影和注册表联动。
 
 世界快照与后台 I/O 通过 AstrBot SDK 记录诊断。慢操作继续记为 INFO，常规操作记为 DEBUG。安装包构建会拒绝任何待打包 Python 文件直接导入标准库 `logging` 或其子模块。
 

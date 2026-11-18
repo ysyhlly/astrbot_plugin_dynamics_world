@@ -32,6 +32,14 @@ jobs:
         with:
           path: AstrBot/data/plugins/${{ github.event.repository.name }}
 
+      - name: Check out the Chat Dynamics integration dependency
+        uses: actions/checkout@v5
+        with:
+          repository: ysyhlly/astrbot_plugin_chat_dynamics
+          ref: 6aef7e03e9156592b2c06c645a3893f33977de3b
+          path: AstrBot/data/plugins/astrbot_plugin_chat_dynamics
+          persist-credentials: false
+
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
