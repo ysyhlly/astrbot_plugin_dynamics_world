@@ -94,7 +94,8 @@ const views = {
 
 let drawerBar = null;
 let drawerOpener = null;
-let landingView = null;
+// Companion panels offer a "return to cabin" button even before the first card is set up.
+let landingView = new URLSearchParams(location.search).has("series_entry") ? "cabin" : null;
 let loaded = false;
 const isVisible = (node) => Boolean(node?.getClientRects().length) && !node.disabled &&
   !node.closest("[inert]") && getComputedStyle(node).visibility !== "hidden";
