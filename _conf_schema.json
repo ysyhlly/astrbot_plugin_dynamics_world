@@ -14,11 +14,11 @@
   "inject_mode": {
     "description": "注入位置",
     "type": "string",
-    "hint": "both=系统提示+额外内容（推荐，角色卡更稳）；extra=仅额外内容；system=仅系统提示。",
-    "default": "both",
+    "hint": "extra=仅额外临时内容（默认，保护系统提示缓存）；both=角色卡放系统提示+世界书放额外临时内容（不重复注入）；system=仅系统提示。",
+    "default": "extra",
     "options": [
-      "both",
       "extra",
+      "both",
       "system"
     ]
   },
@@ -443,7 +443,7 @@
   "resident_hourly_budget": {
     "description": "全体居民共享的每小时推演上限",
     "type": "int",
-    "default": 18,
+    "default": 6,
     "hint": "全部居民合计；自动推进与管理验证共用，不按居民人数倍增。主角色原有预算保持独立。"
   }
 }

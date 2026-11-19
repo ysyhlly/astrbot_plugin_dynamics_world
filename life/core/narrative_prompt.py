@@ -122,8 +122,8 @@ valid_until、next_check为now之后24小时内的epoch时间。
 """
 
 
-def build_narrative_prompt(request: dict, character: dict) -> str:
-    """Render typed evidence and the authoritative worldbook character context."""
+def build_narrative_prompt_parts(request: dict, character: dict) -> tuple[str, str]:
+    """Split static narrative rules/character prefix from volatile state & events."""
     allowed = {key: character.get(key) for key in ("persona_id", "fingerprint", "core_prompt", "group_rules", "world_items")}
     projected = copy.deepcopy(request)
     # Background life can create experiences, not invoke image tools or sends.
@@ -216,4 +216,18 @@ social_policy.enabled时，chat_openers有两条彼此独立的路径，必须�
 对方明确说别主动联系、停止/不想聊、正在忙/休息，或已有pending/claimed联系、冲突时，不新建聊天候选。群聊中也避开带有私聊迹象的话题。邀请必须简短、可不回复，不追问为什么没回；互动次数不代表亲密程度。
 新的兴趣/近期经历开场使用短窗口：not_before至少now+60秒且不晚于now+1800秒，expires_at>not_before且<=now+7200秒。旧共同话题开场保持至少30分钟等待且最多24小时有效。每个会话至多一个待发/已认领开场，至少两小时冷却，同一生活候选24小时不重复。care_waits原有规则不变。
 只返回JSON：{no_change:布尔,care_waits:[{subject_id,reason_kind,reason,waiting_for,evidence_quote,source_ids,not_before,expires_at}],chat_openers:[{subject_id,topic,topic_candidate_id,reason,evidence_quote,source_ids,not_before,expires_at}]}。禁用的字段省略。最多各2个。"""
-    return rules + "\n角色资料：\n" + json.dumps(allowed, ensure_ascii=False, separators=(",", ":")) + "\n有类型与来源的状态和事件：\n" + json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
+    system_prompt = (
+        rules
+        + "\n角色资料：\n"
+        + json.dumps(allowed, ensure_ascii=False, separators=(",", ":"))
+    )
+    user_prompt = "有类型与来源的状态和事件：\n" + json.dumps(
+        projected, ensure_ascii=False, separators=(",", ":")
+    )
+    return system_prompt, user_prompt
+
+
+def build_narrative_prompt(request: dict, character: dict) -> str:
+    """Render typed evidence and the authoritative worldbook character context."""
+    system_prompt, user_prompt = build_narrative_prompt_parts(request, character)
+    return f"{system_prompt}\n{user_prompt}"

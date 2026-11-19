@@ -15,7 +15,7 @@ from astrbot_plugin_dynamics_world.world.core.settings import (
 def test_defaults_apply_when_config_is_empty():
     cfg = Settings({})
     assert cfg.enabled is True
-    assert cfg.inject_mode == "both"
+    assert cfg.inject_mode == "extra"
     assert cfg.max_entries == 10
     assert cfg.scan_history_turns == 4
     assert cfg.inject_header == DEFAULT_INJECT_HEADER
@@ -61,7 +61,7 @@ def test_bool_parsing_tolerates_panel_strings(raw, expected):
 
 
 def test_invalid_choice_falls_back():
-    assert Settings({"inject_mode": "sideways"}).inject_mode == "both"
+    assert Settings({"inject_mode": "sideways"}).inject_mode == "extra"
 
 
 def test_int_floor_applies():

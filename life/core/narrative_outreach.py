@@ -885,4 +885,6 @@ class NarrativeOutreachMixin:
                     cancelled = updated.rowcount > 0 or cancelled
         if cancelled:
             self._notify_db_write()
+        if hasattr(self, "note_activity"):
+            self.note_activity(stamp)
         return {"accepted": True}

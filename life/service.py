@@ -27,7 +27,7 @@ from .core.injector import (
 )
 from .core.narrative import NarrativeEngine, normalize_scope
 from .core.narrative_io import WorldIOBusy, WorldIOClosed
-from .core.narrative_prompt import build_narrative_prompt
+from .core.narrative_prompt import build_narrative_prompt_parts
 from .core.narrative_types import AVAILABILITIES, _identity
 from .core.state import (
     CHINA_TIMEZONE,
@@ -92,6 +92,7 @@ class LifeService:
         self.context, self.config, self.data_dir = context, config, data_dir
         self.world, self.is_active = world, is_active
         self.state_file = data_dir / "life_state.json"
+        self._loop_events: dict[str, asyncio.Event] = {}
 
     async def initialize(self) -> None:
         """初始化存储、生成器和午夜定时调度。"""
@@ -145,6 +146,11 @@ class LifeService:
             )
         from ..resident_runtime import ResidentRunner
 
+        self._loop_events = {
+            "narrative": asyncio.Event(),
+            "resident": asyncio.Event(),
+        }
+        self.narrative.on_activity = self._wake_on_activity
         self.residents = ResidentRunner(self)
         self.narrative.resident_runner = self.residents
         self._resident_task = asyncio.create_task(self._resident_loop())
@@ -152,6 +158,29 @@ class LifeService:
         self._outreach_task = asyncio.create_task(self._outreach_loop())
         if self.config.get("mode", "narrative") == "legacy":
             self._start_scheduler()
+
+    def _wake_on_activity(self) -> None:
+        for ev in getattr(self, "_loop_events", {}).values():
+            ev.set()
+
+    def note_activity(self, now: float | None = None) -> None:
+        """Reset quiet-period backoff on chat or member interaction."""
+        narrative = getattr(self, "narrative", None)
+        if narrative is not None and hasattr(narrative, "note_activity"):
+            narrative.note_activity(now)
+        else:
+            self._wake_on_activity()
+
+    async def _sleep_loop(self, kind: str, seconds: float) -> None:
+        ev = getattr(self, "_loop_events", {}).get(kind)
+        if ev is None:
+            await asyncio.sleep(seconds)
+            return
+        ev.clear()
+        try:
+            await asyncio.wait_for(ev.wait(), timeout=seconds)
+        except TimeoutError:
+            pass
 
     async def terminate(self) -> None:
         """停止午夜定时调度。"""
@@ -181,7 +210,11 @@ class LifeService:
                 logger.warning(
                     f"[DynamicLifeState] Narrative tick failed: {type(exc).__name__}"
                 )
-            await asyncio.sleep(30)
+            sleep = getattr(self, "_sleep_loop", None)
+            if callable(sleep):
+                await sleep("narrative", 30)
+            else:
+                await asyncio.sleep(30)
 
     async def _resident_loop(self) -> None:
         while True:
@@ -193,7 +226,11 @@ class LifeService:
                 logger.warning(
                     f"[DynamicsWorld] Resident tick failed: {type(exc).__name__}"
                 )
-            await asyncio.sleep(30)
+            sleep = getattr(self, "_sleep_loop", None)
+            if callable(sleep):
+                await sleep("resident", 30)
+            else:
+                await asyncio.sleep(30)
 
     async def _outreach_loop(self) -> None:
         """Slow contact inference must not hold up the world's clock."""
@@ -272,11 +309,11 @@ class LifeService:
                 "Selected narrative provider has no text_chat method"
             )
         if request.get("resident_isolated"):
-            from ..resident_runtime import build_prompt
+            from ..resident_runtime import build_prompt_parts
 
-            prompt = build_prompt(request)
+            system_prompt, prompt = build_prompt_parts(request)
         else:
-            prompt = build_narrative_prompt(request, character)
+            system_prompt, prompt = build_narrative_prompt_parts(request, character)
         from .core.narrative_schema import narrative_schema
 
         kwargs = {
@@ -293,22 +330,23 @@ class LifeService:
                 request.get("inference_call_id", "")
             ).replace("-", "")
         parameters = inspect.signature(text_chat).parameters
-        supports_retry_limit = "request_max_retries" in parameters or any(
+        accepts_kwargs = any(
             p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values()
         )
+        if "system_prompt" in parameters or accepts_kwargs:
+            kwargs["system_prompt"] = system_prompt
+        else:
+            prompt = f"{system_prompt}\n{prompt}"
+        supports_retry_limit = "request_max_retries" in parameters or accepts_kwargs
         if supports_retry_limit:
             kwargs["request_max_retries"] = 1
         elif selected_provider_id:
             raise NarrativeProviderUnavailable(
                 "Narrative provider cannot enforce the retry limit"
             )
-        if "func_tool" in parameters or any(
-            p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values()
-        ):
+        if "func_tool" in parameters or accepts_kwargs:
             kwargs["func_tool"] = None
-        if "response_format" in parameters or any(
-            p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values()
-        ):
+        if "response_format" in parameters or accepts_kwargs:
             kwargs["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {
@@ -687,6 +725,7 @@ class LifeService:
         req: ProviderRequest,
     ) -> None:
         """Attach coarse life context to unmanaged chat requests."""
+        self.note_activity()
 
         marker = (
             event.get_extra("_narrative_managed_v1", None)

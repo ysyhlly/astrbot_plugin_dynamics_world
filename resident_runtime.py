@@ -6,6 +6,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import math
 import time
 import uuid
 from datetime import datetime
@@ -14,6 +15,17 @@ from zoneinfo import ZoneInfo
 from .spatial import encode, identity
 
 OPERATIONS = ["wait", "rest", "observe", "travel", "invite", "respond", "speak"]
+DEFAULT_RESIDENT_HOURLY_BUDGET = 6
+RESIDENT_CARD_FIELD_LIMIT = 1800
+RESIDENT_CARD_TOTAL_LIMIT = 6000
+RESIDENT_CARD_FIELDS = (
+    "name",
+    "description",
+    "personality",
+    "scenario",
+    "system_prompt",
+    "post_history_instructions",
+)
 RULES = """你是群间世界的后台生活模拟器，本次只决定 acting_actor_id 这一名居民的下一步。
 你不是主角色，不要继承主角色的睡眠、性格或想法。private_character 是本人的完整人设；own_knowledge 是实际收到的见闻。public_peers 只是当前可见或已联系的人，不包含他们的私有经历。匿名标签不等于姓名；不要用作品知识猜别人的身份、秘密、心理、异地行为或未来剧情。
 依据本人性格、兴趣、当前时间、忙碌状态和实际信息自主选择：休息、观察、出行、邀请、回应邀请、向实际在场者说话，或合理等待。不要强制社交、制造进度、补写过去；但“主角色睡觉”不是其他居民一律不行动的理由。
@@ -28,15 +40,28 @@ def fingerprint(card):
     return hashlib.sha256(repr(card).encode()).hexdigest()
 
 
-def decision_schema(request):
-    context = request["resident_context"]
-    props = {
-        "actor_id": {"type": "string", "enum": [context["acting_actor_id"]]},
-        "operation": {"type": "string", "enum": OPERATIONS},
+def _truncate_resident_card(card: dict) -> dict[str, str]:
+    """Enforce per-field and total character caps on resident card context."""
+    private: dict[str, str] = {}
+    remaining = RESIDENT_CARD_TOTAL_LIMIT
+    for key in RESIDENT_CARD_FIELDS:
+        raw = str(card.get(key, "") or "")
+        limit = min(RESIDENT_CARD_FIELD_LIMIT, max(0, remaining))
+        value = raw[:limit]
+        private[key] = value
+        remaining -= len(value)
+    return private
+
+
+_STATIC_DECISION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "actor_id": {"type": "string", "minLength": 1, "maxLength": 100},
+        "operation": {"type": "string", "enum": list(OPERATIONS)},
         "reason": {"type": "string", "minLength": 1, "maxLength": 240},
         "source_ids": {
             "type": "array",
-            "items": {"type": "string", "enum": context["available_source_ids"]},
+            "items": {"type": "string", "maxLength": 160},
             "minItems": 1,
             "maxItems": 8,
         },
@@ -44,32 +69,53 @@ def decision_schema(request):
         "text": {"type": "string", "maxLength": 240},
         "invitation_id": {"type": "string", "maxLength": 80},
         "response": {"type": "string", "enum": ["accepted", "declined", "reschedule"]},
-        "when": {
-            "type": "number",
-            "minimum": request["now"],
-            "maximum": request["now"] + 7 * 86400,
-        },
-    }
-    return {
-        "type": "object",
-        "properties": props,
-        "required": ["actor_id", "operation", "reason", "source_ids"],
-        "additionalProperties": False,
-    }
+        "when": {"type": "number", "minimum": 0},
+    },
+    "required": ["actor_id", "operation", "reason", "source_ids"],
+    "additionalProperties": False,
+}
+
+
+def decision_schema(request=None):
+    """Return a static JSON schema; actor_id, source_ids and when are validated in Python."""
+    return copy.deepcopy(_STATIC_DECISION_SCHEMA)
+
+
+def build_prompt_parts(request) -> tuple[str, str]:
+    """Split static resident rules/character from volatile per-tick context."""
+    # Deliberate allowlist: no main persona, snapshot, diary, other profiles or conversations.
+    resident_context = request.get("resident_context")
+    system_prompt = RULES
+    if isinstance(resident_context, dict) and "private_character" in resident_context:
+        system_prompt = (
+            RULES
+            + "\nprivate_character：\n"
+            + json.dumps(
+                resident_context["private_character"],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
+        volatile_context = {
+            k: v for k, v in resident_context.items() if k != "private_character"
+        }
+    else:
+        volatile_context = resident_context
+    payload = {}
+    for k in ("now", "local_datetime"):
+        if k in request:
+            payload[k] = request[k]
+    if "resident_context" in request:
+        payload["resident_context"] = volatile_context
+    user_prompt = "当前个人视角：\n" + json.dumps(
+        payload, ensure_ascii=False, separators=(",", ":")
+    )
+    return system_prompt, user_prompt
 
 
 def build_prompt(request):
-    # Deliberate allowlist: no main persona, snapshot, diary, other profiles or conversations.
-    payload = {
-        k: request[k]
-        for k in ("now", "local_datetime", "resident_context")
-        if k in request
-    }
-    return (
-        RULES
-        + "\n当前个人视角：\n"
-        + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    )
+    system_prompt, user_prompt = build_prompt_parts(request)
+    return f"{system_prompt}\n{user_prompt}"
 
 
 class ResidentRunner:
@@ -173,17 +219,7 @@ class ResidentRunner:
                 }
             )
         places = [{"id": p["id"], "name": p["name"]} for p in world.get("places", [])]
-        private = {
-            k: str(card.get(k, "") or "")[:10000]
-            for k in (
-                "name",
-                "description",
-                "personality",
-                "scenario",
-                "system_prompt",
-                "post_history_instructions",
-            )
-        }
+        private = _truncate_resident_card(card)
         sources = [k["id"] for k in known] + [
             "observation:" + actor_id,
             "profile:" + actor_id,
@@ -254,11 +290,16 @@ class ResidentRunner:
             scope = engine._global_scope()
             now = engine.clock()
             cid = request_id or "resident:" + uuid.uuid4().hex
+            base_interval = max(60, int(engine.config.get("resident_tick_seconds", 300)))
+            interval = (
+                engine.effective_tick_interval(base_interval, kind="resident", now=now)
+                if hasattr(engine, "effective_tick_interval")
+                else float(base_interval)
+            )
             if not manual and request_id is None:
                 with engine._db(notify=False) as db:
                     if engine._paused(db, scope):
                         return {"status": "paused"}
-                    interval = max(60, int(engine.config.get("resident_tick_seconds", 300)))
                     last = db.execute(
                         "SELECT last FROM maintenance WHERE identity=? AND kind='resident_tick'",
                         (identity(scope),),
@@ -284,7 +325,6 @@ class ResidentRunner:
                     }
                 if engine._paused(db, scope):
                     return {"status": "paused"}
-                interval = max(60, int(engine.config.get("resident_tick_seconds", 300)))
                 last = db.execute(
                     "SELECT last FROM maintenance WHERE identity=? AND kind='resident_tick'",
                     (identity(scope),),
@@ -324,7 +364,15 @@ class ResidentRunner:
                 hour = int(now // 3600)
                 budget = "resident_global"
                 maximum = max(
-                    1, min(60, int(engine.config.get("resident_hourly_budget", 18)))
+                    1,
+                    min(
+                        60,
+                        int(
+                            engine.config.get(
+                                "resident_hourly_budget", DEFAULT_RESIDENT_HOURLY_BUDGET
+                            )
+                        ),
+                    ),
                 )
                 used = db.execute(
                     "SELECT used FROM budgets WHERE identity=? AND hour=? AND kind=?",
@@ -340,6 +388,8 @@ class ResidentRunner:
                     "INSERT INTO maintenance VALUES(?,'resident_tick',?) ON CONFLICT(identity,kind) DO UPDATE SET last=excluded.last",
                     (identity(scope), now),
                 )
+                if not manual and hasattr(engine, "record_background_tick"):
+                    engine.record_background_tick(kind="resident", now=now)
                 public, context = self.context(db, scope, actor_id, now)
                 request = {
                     "scope": scope,
@@ -395,6 +445,14 @@ class ResidentRunner:
                     )
                 ):
                     raise ValueError("引用了未感知来源")
+                if "when" in raw:
+                    when_val = raw["when"]
+                    if (
+                        type(when_val) not in (int, float)
+                        or not math.isfinite(when_val)
+                        or not now <= when_val <= now + 7 * 86400
+                    ):
+                        raise ValueError("预约时间超出允许范围")
                 operation = raw["operation"]
                 proposal = {k: v for k, v in raw.items() if k != "reason"}
                 if operation in {"rest", "observe", "travel"}:

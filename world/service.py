@@ -1610,7 +1610,7 @@ class WorldService:
                 part
                 for part in (
                     card_block if mode in {"system", "both"} else "",
-                    wb_block if mode in {"system", "both"} else "",
+                    wb_block if mode == "system" else "",
                 )
                 if part
             )
@@ -1618,7 +1618,7 @@ class WorldService:
                 req.system_prompt = current_system + f"\n\n{system_add}\n"
 
             if mode in {"extra", "both"}:
-                # both 模式下角色卡已经在 system_prompt 里了，extra 只补世界书，避免重复
+                # both 模式下仅静态角色卡进 system_prompt，动态命中的世界书只进临时 extra，避免重复注入和缓存抖动
                 extra_text = (
                     wb_block
                     if mode == "both"

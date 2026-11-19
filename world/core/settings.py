@@ -166,7 +166,7 @@ class Settings:
 
     @property
     def inject_mode(self) -> str:
-        return self.choice("inject_mode", "both", {"extra", "system", "both"})
+        return self.choice("inject_mode", "extra", {"extra", "system", "both"})
 
     @property
     def max_entries(self) -> int:

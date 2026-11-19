@@ -189,6 +189,13 @@ class NarrativeEngine(
         self.horizons = None
         self._context_generation = 0
         self.on_db_write: Callable[[], None] | None = None
+        self.on_activity: Callable[[], None] | None = None
+        self._last_activity_at: float | None = None
+        self._quiet_ticks: dict[str, int] = {"narrative": 0, "resident": 0}
+        self._last_tick_activity_seen: dict[str, float | None] = {
+            "narrative": None,
+            "resident": None,
+        }
         self._generation_lock = threading.Lock()
         self._backup_before_retry_extension()
         self._backup_before_v20_extension()
@@ -241,6 +248,61 @@ class NarrativeEngine(
                 cb()
             except Exception:
                 pass
+
+    def note_activity(self, now: float | None = None) -> float:
+        """Record real chat or member interaction and reset quiet tick backoff."""
+        ts = self.clock() if now is None else float(now)
+        if self._last_activity_at is None or ts >= self._last_activity_at:
+            self._last_activity_at = ts
+        for kind in self._quiet_ticks:
+            self._quiet_ticks[kind] = 0
+        cb = self.on_activity
+        if callable(cb):
+            try:
+                cb()
+            except Exception:
+                pass
+        return self._last_activity_at
+
+    def effective_tick_interval(
+        self,
+        base_seconds: float = 300.0,
+        *,
+        kind: str = "narrative",
+        now: float | None = None,
+    ) -> float:
+        """Step up background tick interval (e.g. 5m -> 15m -> 30m) during quiet periods."""
+        base = max(60.0, float(base_seconds))
+        steps = (base, base * 3.0, base * 6.0)
+        ts = self.clock() if now is None else float(now)
+        streak = max(0, int(self._quiet_ticks.get(kind, 0)))
+        time_stage = 0
+        if self._last_activity_at is not None:
+            idle = max(0.0, ts - self._last_activity_at)
+            if idle >= base * 9.0:
+                time_stage = 2
+            elif idle >= base * 3.0:
+                time_stage = 1
+        stage = min(len(steps) - 1, max(streak, time_stage))
+        return steps[stage]
+
+    def record_background_tick(
+        self,
+        *,
+        kind: str = "narrative",
+        now: float | None = None,
+    ) -> float:
+        """Advance quiet streak when no new member activity occurred since last tick."""
+        had_new_activity = (
+            self._last_activity_at is not None
+            and self._last_activity_at != self._last_tick_activity_seen.get(kind)
+        )
+        if had_new_activity:
+            self._quiet_ticks[kind] = 0
+            self._last_tick_activity_seen[kind] = self._last_activity_at
+        else:
+            self._quiet_ticks[kind] = min(2, int(self._quiet_ticks.get(kind, 0)) + 1)
+        return self.effective_tick_interval(300.0, kind=kind, now=now)
 
     def peek_context_revision(self, scope):
         """Return an in-memory epoch before/after writes without touching SQLite."""
@@ -796,6 +858,7 @@ class NarrativeEngine(
         now = self.clock()
         validated = [self._event(event, now) for event in events]
         accepted, duplicate, ignored = [], [], []
+        saw_activity = False
         with self._db() as db:
             for event in validated:
                 scope, event_id = event["scope"], event["event_id"]
@@ -835,6 +898,12 @@ class NarrativeEngine(
                     ),
                 )
                 accepted.append(event_id)
+                if scope["umo"] and event["type"] in {
+                    "message.received",
+                    "chat.message",
+                    "delivery.success",
+                }:
+                    saw_activity = True
                 self._observe_outreach_preference(db, event)
                 self._cancel_care_on_input(db, event, now)
                 # Explicit self-address objections take effect on ingestion,
@@ -916,6 +985,8 @@ class NarrativeEngine(
                         "UPDATE events SET status='observed_only' WHERE event_id=?",
                         (event_id,),
                     )
+        if saw_activity:
+            self.note_activity(now)
         return {
             "schema_version": 1,
             "accepted": accepted,
@@ -2377,13 +2448,17 @@ class NarrativeEngine(
                 "SELECT last FROM maintenance WHERE identity=? AND kind='background'",
                 (identity,),
             ).fetchone()
-            batch_due = not background or now - background[0] >= 300
+            batch_interval = self.effective_tick_interval(
+                300.0, kind="narrative", now=now
+            )
+            batch_due = not background or now - background[0] >= batch_interval
             scopes = []
             if batch_due:
                 db.execute(
                     "INSERT INTO maintenance VALUES(?,'background',?) ON CONFLICT(identity,kind) DO UPDATE SET last=excluded.last",
                     (identity, now),
                 )
+                self.record_background_tick(kind="narrative", now=now)
                 for row in db.execute(
                     "SELECT e.payload FROM events e WHERE e.identity=? AND e.umo<>'' AND e.status='pending' "
                     "AND e.occurred<=? AND e.received<=? AND e.event_id=(SELECT h.event_id FROM events h "

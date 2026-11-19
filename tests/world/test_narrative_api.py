@@ -221,8 +221,10 @@ def test_unmanaged_hook_remains_enabled(make_plugin):
     event = FakeEvent(UMO, "游戏")
     req = ProviderRequest(system_prompt="platform")
     run(plugin.on_llm_request(event, req))
-    assert "游戏条目" in req.system_prompt
-    assert "群聊规则" in req.system_prompt
+    assert req.system_prompt == "platform"
+    extra = "\n".join(part.text for part in req.extra_user_content_parts)
+    assert "游戏条目" in extra
+    assert "群聊规则" in extra
 
 
 def test_global_tick_reads_only_matching_persona_and_its_linked_world(make_plugin):
