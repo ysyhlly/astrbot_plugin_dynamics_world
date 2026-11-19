@@ -818,3 +818,310 @@ async def test_dw3_resident_backoff_budget_and_post_parse_validation(
         assert (await plugin.life.residents.tick(manual=True))["status"] == "no_change"
     finally:
         await plugin.terminate()
+
+
+# --------------------------------------------------------------------------- Phase 2 prefix ordering
+
+
+def _common_prefix_len(a: bytes, b: bytes) -> int:
+    limit = min(len(a), len(b))
+    idx = 0
+    while idx < limit and a[idx] == b[idx]:
+        idx += 1
+    return idx
+
+
+def test_phase2_narrative_prompt_slow_to_fast_key_ordering_and_prefix_ratio():
+    character = {
+        "persona_id": "p",
+        "fingerprint": "f" * 64,
+        "core_prompt": "角色核心人设。" * 80,
+        "group_rules": "群聊边界与节奏规范。" * 40,
+        "world_items": [
+            {"source_id": "wb:1", "title": "海边小镇", "text": "小镇常驻设定。" * 40}
+        ],
+    }
+
+    def make_req(now_ts: float, rev: int, trigger: str, event_id: str, extra: dict | None = None):
+        req = {
+            "now": now_ts,
+            "trigger": trigger,
+            "local_datetime": f"2026-11-20T02:{int((now_ts % 3600) // 60):02d}:00+08:00",
+            "events": [
+                {
+                    "event_id": event_id,
+                    "type": "life.tick",
+                    "occurred_at": now_ts,
+                    "received_at": now_ts,
+                    "text": f"tick {event_id}",
+                    "data": {"trigger": trigger},
+                }
+            ],
+            "plan_window": {"start": now_ts, "end": 1_800_057_600.0},
+            "schema_version": 1,
+            "scope": GLOBAL,
+            "timezone": "Asia/Shanghai",
+            "local_date": "2026-11-20",
+            "day_end": 1_800_057_600.0,
+            "needs_daily_plan": False,
+            "offline_catchup": False,
+            "causal_revision": 7,
+            "plan": [
+                {"start": 1_800_000_000.0 + i * 3600, "end": 1_800_003_600.0 + i * 3600, "activity": f"日常安排片段 {i}：阅读并记录灵感笔记"}
+                for i in range(6)
+            ],
+            "background_world": {
+                "revision": 3,
+                "map_revision": 1,
+                "map_world_id": "w1",
+                "places": [{"id": "home", "name": "住所"}, {"id": "cafe", "name": "海边咖啡馆"}],
+                "actors": [
+                    {
+                        "last_served": now_ts - 600,
+                        "place_id": "cafe",
+                        "id": "emma",
+                        "name": "艾玛",
+                        "card_id": "card_emma",
+                        "card_fingerprint": "a" * 64,
+                        "enabled": True,
+                        "profile": {"description": "温柔细心的邻居。" * 30},
+                    }
+                ],
+                "invitations": [],
+            },
+            "recent_diary": [
+                {"occurred": 1_799_996_400.0, "text": "午后整理了书桌。", "fact_kind": "fiction", "source_ids": ["prev"]}
+            ],
+            "snapshot": {
+                "energy": {"energy": 0.72 - (rev * 0.01), "settled_at": now_ts, "basis": "confirmed_activity_interval"},
+                "narrated_until": now_ts - 300,
+                "revision": rev,
+                "scope_revision": rev,
+                "state": {"activity_code": "reading", "availability": "available"},
+                "activity": "在书房翻看小说",
+                "availability": "available",
+                "mailbox": {"unopened_count": 0, "parcels": []},
+                "spatial": {
+                    "progress": 0.0,
+                    "place_id": "home",
+                    "place_name": "住所",
+                    "phase": "located",
+                    "available": True,
+                    "map_type": "virtual",
+                    "map_revision": 1,
+                    "places": [{"id": "home", "name": "住所"}, {"id": "cafe", "name": "海边咖啡馆"}],
+                },
+                "causal_life": {
+                    "server_time": now_ts,
+                    "last_settled_at": now_ts,
+                    "body": {"energy": 0.72 - (rev * 0.01), "settled_at": now_ts},
+                    "events": [{"id": "ce1", "kind": "step.completed", "summary": "倒了一杯茶", "occurred_at": 1_799_995_000.0, "source_ids": ["s1"]}],
+                    "agenda": [
+                        {"id": f"plan_{i}", "activity": f"阅读章节 {i}", "status": "planned", "start": 1_800_000_000.0 + i * 3600, "end": 1_800_003_600.0 + i * 3600}
+                        for i in range(6)
+                    ],
+                    "viewer": "actor",
+                    "actor_id": "self",
+                    "baseline": "已确认活动与完成回执",
+                    "paused": False,
+                    "growth": {"reading": {"sessions": 5}},
+                    "revision": 7,
+                },
+                "environment": {
+                    "current": {"temperature": 21.5, "label": "晴", "effect": "clear"},
+                    "forecast": [{"hour": h, "temp": 20 + (h % 4), "label": "晴"} for h in range(24)],
+                    "sunset": "17:42",
+                    "sunrise": "06:18",
+                    "stale": False,
+                    "available": True,
+                    "timezone": "Asia/Shanghai",
+                    "location": "海边小镇",
+                    "status": "ready",
+                    "fact_kind": "fiction",
+                    "source": "world_sim",
+                    "mode": "fiction",
+                },
+                "ecology": {
+                    "vitality": {"body": 0.8},
+                    "veg_patch": {"stage": "growing"},
+                    "flowerbed": {"stage": "blooming"},
+                    "pantry": {"tea": 3, "berries": 4},
+                    "season": {"solar_term": "小雪"},
+                    "recent_meals": [{"name": "热汤"}],
+                },
+                "scene": {
+                    "action": None,
+                    "available_actions": [{"kind": "read", "target_id": "book_1"}],
+                    "receipts": [{"event_id": "r1", "kind": "step.completed", "occurred_at": 1_799_994_000.0}],
+                    "rooms": [{"id": "study", "name": "书房", "place_id": "home"}],
+                    "places": {"home": {"kind": "home", "sheltered": True, "open": True, "opens": 0, "closes": 24}},
+                    "room_designs": [{"room_id": "study", "furniture": [{"id": "desk_1", "kind": "desk", "position": "near_window"}]}],
+                    "items": [{"id": "book_1", "name": "旧笔记", "kind": "book", "page": 12, "pages": 120, "carried": False}],
+                    "projects": [{"id": "proj_1", "title": "海边随笔", "stage": "draft", "outline_excerpt": "大纲内容。" * 40}],
+                    "available": True,
+                    "fact_kind": "fiction",
+                },
+                "commitments": [{"commitment_id": "c1", "description": "整理书架", "status": "proposed"}],
+                "humanlike": {
+                    "moods": [],
+                    "goals": [{"id": "g1", "text": "读完第二章", "status": "planned"}],
+                    "interests": [{"id": "i1", "topic": "推理小说", "text": "关注结局伏笔", "status": "active"}],
+                    "preferences": [{"id": "p1", "text": "喜欢靠窗的安静角落", "status": "active"}],
+                },
+                "world_space": {"shared": True, "active_guest": None, "recent_encounters": []},
+                "scope": GLOBAL,
+                "managed": True,
+                "schema_version": 1,
+            },
+        }
+        if extra:
+            req.update(extra)
+        return req
+
+    t0 = 1_800_000_000.0
+    req1 = make_req(t0, rev=10, trigger="scheduled_tick", event_id="tick:1")
+    req2 = make_req(
+        t0 + 300.0,
+        rev=11,
+        trigger="interval_tick",
+        event_id="tick:2",
+        extra={"previous_validation_failure": {"reason_code": "validation.test", "attempt": 1}},
+    )
+    sys1, usr1 = build_narrative_prompt_parts(req1, character)
+    sys2, usr2 = build_narrative_prompt_parts(req2, character)
+
+    # Caller inputs must not be mutated.
+    assert req1["snapshot"]["spatial"]["places"]
+    assert req1["snapshot"]["scene"]["rooms"]
+
+    # System prompt is 100% byte-identical and includes hoisted static world metadata.
+    assert sys1 == sys2
+    assert "静态世界基础信息：" in sys1
+    assert "海边咖啡馆" in sys1
+    assert "书房" in sys1
+
+    # Verify strict slow-to-fast key order in projected JSON.
+    raw_json = usr2.split("有类型与来源的状态和事件：\n", 1)[1]
+    parsed = json.loads(raw_json)
+    top_keys = list(parsed.keys())
+    assert top_keys[0] == "citation_rule"
+    assert top_keys.index("scope") < top_keys.index("snapshot")
+    assert top_keys.index("snapshot") < top_keys.index("trigger")
+    assert top_keys.index("trigger") < top_keys.index("now")
+    assert top_keys.index("now") < top_keys.index("events")
+    assert top_keys[-1] == "previous_validation_failure"
+
+    snap_keys = list(parsed["snapshot"].keys())
+    for slow_k in ("world_space", "commitments", "humanlike", "ecology", "environment", "scene"):
+        assert snap_keys.index(slow_k) < snap_keys.index("narrated_until")
+        assert snap_keys.index(slow_k) < snap_keys.index("mailbox")
+        assert snap_keys.index(slow_k) < snap_keys.index("spatial")
+    assert snap_keys.index("narrated_until") < snap_keys.index("causal_life")
+    assert snap_keys.index("causal_life") < snap_keys.index("energy")
+
+    env_keys = list(parsed["snapshot"]["environment"].keys())
+    assert env_keys.index("forecast") < env_keys.index("current")
+    assert env_keys[-1] == "current"
+
+    eco_keys = list(parsed["snapshot"]["ecology"].keys())
+    assert eco_keys.index("season") < eco_keys.index("vitality")
+    assert eco_keys[-1] == "vitality"
+
+    causal_keys = list(parsed["snapshot"]["causal_life"].keys())
+    assert causal_keys.index("agenda") < causal_keys.index("events")
+    assert causal_keys.index("events") < causal_keys.index("body")
+    assert causal_keys[-1] == "server_time"
+
+    # Common byte-identical prefix across system_prompt + user_prompt MUST be >= 60%.
+    full1 = (sys1 + "\n" + usr1).encode("utf-8")
+    full2 = (sys2 + "\n" + usr2).encode("utf-8")
+    full_ratio = _common_prefix_len(full1, full2) / max(len(full1), len(full2))
+    assert full_ratio >= 0.60, f"Expected >=60% shared prefix, got {full_ratio:.1%}"
+
+    # User prompt alone should also preserve a high shared prefix across consecutive 5m ticks.
+    u1, u2 = usr1.encode("utf-8"), usr2.encode("utf-8")
+    user_ratio = _common_prefix_len(u1, u2) / max(len(u1), len(u2))
+    assert user_ratio >= 0.60, f"Expected >=60% shared user_prompt prefix, got {user_ratio:.1%}"
+
+
+def test_phase2_resident_and_outreach_prompts_maximize_common_prefix():
+    base_resident_ctx = {
+        "acting_actor_id": "emma",
+        "observation_rule": "无指定房间的背景居民位于已登记地点的公共入口；其他房间内人物不可见。",
+        "places": [
+            {"id": "home", "name": "住所"},
+            {"id": "cafe", "name": "海边咖啡馆"},
+            {"id": "library", "name": "旧图书馆"},
+        ],
+        "private_character": {
+            "name": "艾玛",
+            "description": "喜欢在海边散步和烘焙的温柔居民。" * 30,
+            "personality": "细致、温和、守信。" * 20,
+            "scenario": "海边小镇日常。" * 10,
+            "system_prompt": "",
+            "post_history_instructions": "",
+        },
+        "own_knowledge": [
+            {"id": f"k{i}", "text": f"记住了第 {i} 条小镇见闻与约定。"} for i in range(8)
+        ],
+        "available_source_ids": [f"k{i}" for i in range(8)] + ["observation:emma", "profile:emma"],
+        "invitations": [],
+        "public_peers": [{"id": "self", "label": "当前世界的主人", "visible": True, "contactable": True, "place_id": "home"}],
+        "own_state": {"id": "emma", "place_id": "home", "activity": "休息"},
+    }
+    r1 = {
+        "now": 1_800_000_000.0,
+        "local_datetime": "2026-11-20T02:00:00+08:00",
+        "resident_context": {
+            **base_resident_ctx,
+            "own_recent_decisions": [{"at": 1_799_999_700.0, "status": "no_change", "operation": "wait", "reason": "安静看海"}],
+        },
+    }
+    r2 = {
+        "now": 1_800_000_300.0,
+        "local_datetime": "2026-11-20T02:05:00+08:00",
+        "resident_context": {
+            **base_resident_ctx,
+            "own_recent_decisions": [
+                {"at": 1_800_000_000.0, "status": "no_change", "operation": "wait", "reason": "整理笔记"},
+                {"at": 1_799_999_700.0, "status": "no_change", "operation": "wait", "reason": "安静看海"},
+            ],
+        },
+    }
+    rsys1, rusr1 = build_prompt_parts(r1)
+    rsys2, rusr2 = build_prompt_parts(r2)
+    assert rsys1 == rsys2
+    assert "海边咖啡馆" in rsys1 and "无指定房间的背景居民" in rsys1
+
+    rparsed = json.loads(rusr2.split("当前个人视角：\n", 1)[1])
+    assert list(rparsed.keys()) == ["resident_context", "local_datetime", "now"]
+    rc_keys = list(rparsed["resident_context"].keys())
+    assert rc_keys[0] == "acting_actor_id"
+    assert rc_keys[-1] == "own_recent_decisions"
+
+    rf1 = (rsys1 + "\n" + rusr1).encode("utf-8")
+    rf2 = (rsys2 + "\n" + rusr2).encode("utf-8")
+    assert _common_prefix_len(rf1, rf2) / max(len(rf1), len(rf2)) >= 0.80
+
+    # Outreach prompt also places volatile local_datetime / now / events at the tail.
+    o1 = {
+        "schema_version": 1,
+        "scope": SCOPE,
+        "now": 1_800_000_000.0,
+        "outreach_only": True,
+        "local_datetime": "2026-11-20T02:00:00+08:00",
+        "care_policy": {"enabled": True, "min_wait_seconds": 1800},
+        "social_policy": {"enabled": True, "topic_candidates": [], "quiet_members": ["u1"], "opportunity_members": []},
+        "snapshot": {"humanlike": {"interests": []}, "availability": "available"},
+        "recent_intents": [],
+        "events": [{"event_id": "m1", "type": "message.received", "text": "晚安"}],
+    }
+    o2 = {**o1, "now": 1_800_000_300.0, "local_datetime": "2026-11-20T02:05:00+08:00", "events": o1["events"] + [{"event_id": "m2", "type": "message.received", "text": "明天见"}]}
+    osys1, ousr1 = build_narrative_prompt_parts(o1, {"persona_id": "p", "core_prompt": "人设"})
+    osys2, ousr2 = build_narrative_prompt_parts(o2, {"persona_id": "p", "core_prompt": "人设"})
+    assert osys1 == osys2
+    oparsed = json.loads(ousr2.split("有类型与来源的状态和事件：\n", 1)[1])
+    okeys = list(oparsed.keys())
+    assert okeys[0] == "citation_rule"
+    assert okeys[-3:] == ["local_datetime", "now", "events"]
+

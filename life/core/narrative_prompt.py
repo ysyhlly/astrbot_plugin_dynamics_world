@@ -122,23 +122,299 @@ valid_until、next_check为now之后24小时内的epoch时间。
 """
 
 
+def _order_dict(
+    mapping: dict,
+    preferred: tuple[str, ...],
+    tail: tuple[str, ...] = (),
+) -> dict:
+    """Return a dict ordered slowest-changing -> middle -> fastest-changing."""
+    ordered: dict = {}
+    tail_set = set(tail)
+    for key in preferred:
+        if key in mapping:
+            ordered[key] = mapping[key]
+    for key, value in mapping.items():
+        if key not in ordered and key not in tail_set:
+            ordered[key] = value
+    for key in tail:
+        if key in mapping and key not in ordered:
+            ordered[key] = mapping[key]
+    return ordered
+
+
+def _order_snapshot_for_cache(snapshot: dict) -> dict:
+    """Order snapshot fields strictly from static/daily to hourly to per-tick volatile."""
+    snap = dict(snapshot)
+    if isinstance(snap.get("world_space"), dict):
+        snap["world_space"] = _order_dict(
+            snap["world_space"],
+            ("shared", "recent_encounters"),
+            ("active_guest",),
+        )
+    if isinstance(snap.get("ecology"), dict):
+        snap["ecology"] = _order_dict(
+            snap["ecology"],
+            ("season", "pantry", "flower_stage", "veg_stage", "recent_meals"),
+            ("vitality",),
+        )
+    if isinstance(snap.get("environment"), dict):
+        snap["environment"] = _order_dict(
+            snap["environment"],
+            (
+                "mode",
+                "source",
+                "fact_kind",
+                "status",
+                "location",
+                "timezone",
+                "available",
+                "stale",
+                "sunrise",
+                "sunset",
+                "sun_times_estimated",
+                "forecast",
+            ),
+            ("current",),
+        )
+    if isinstance(snap.get("humanlike"), dict):
+        snap["humanlike"] = _order_dict(
+            snap["humanlike"],
+            ("preferences", "nicknames", "corrections", "interests", "goals"),
+            ("moods",),
+        )
+    if isinstance(snap.get("scene"), dict):
+        snap["scene"] = _order_dict(
+            snap["scene"],
+            (
+                "available",
+                "fact_kind",
+                "map_revision",
+                "rooms",
+                "places",
+                "room_designs",
+                "removed_items",
+                "archived_items",
+                "projects",
+                "items",
+                "paused",
+                "revision",
+                "position_revision",
+                "place_id",
+                "place_name",
+                "phase",
+                "room_id",
+                "room_name",
+                "destination",
+                "sheltered",
+                "wetness",
+                "available_actions",
+                "last_action",
+                "receipts",
+            ),
+            ("action",),
+        )
+    if isinstance(snap.get("spatial"), dict):
+        snap["spatial"] = _order_dict(
+            snap["spatial"],
+            (
+                "available",
+                "map_type",
+                "fact_kind",
+                "map_revision",
+                "places",
+                "paused",
+                "revision",
+                "place_id",
+                "place_name",
+                "phase",
+                "plan",
+            ),
+            ("journey", "progress"),
+        )
+    if isinstance(snap.get("causal_life"), dict):
+        snap["causal_life"] = _order_dict(
+            snap["causal_life"],
+            (
+                "viewer",
+                "actor_id",
+                "baseline",
+                "paused",
+                "growth",
+                "agenda",
+                "invitations",
+                "events",
+                "revision",
+            ),
+            ("body", "last_settled_at", "server_time"),
+        )
+    return _order_dict(
+        snap,
+        (
+            # Tier 1: static / daily
+            "schema_version",
+            "managed",
+            "scope",
+            "paused",
+            "outreach_paused",
+            "world_space",
+            "commitments",
+            "goals",
+            "interests",
+            "relationships",
+            "humanlike",
+            "horizons_desk",
+            "ecology",
+            "environment",
+            "scene",
+            # Tier 2: hourly / medium
+            "state",
+            "activity",
+            "availability",
+            "subjective_state",
+            "summary",
+            "global_presentation",
+            "scoped_presentation",
+            "scoped_presentation_stale",
+            "source_ids",
+            "valid_from",
+            "valid_until",
+            "activity_started_at",
+            "narrated_until",
+            "stale",
+            "revision",
+            "scope_revision",
+            "mailbox",
+            "care_waits",
+            "spatial",
+        ),
+        (
+            # Tier 3: settles per tick (contains server_time / body / confirmed_activity_seconds)
+            "causal_life",
+            "energy",
+        ),
+    )
+
+
+def _order_background_world_for_cache(bg: dict) -> dict:
+    """Place static world/actor lore ahead of dynamic resident state."""
+    ordered = dict(bg)
+    if isinstance(ordered.get("actors"), list):
+        ordered["actors"] = [
+            _order_dict(
+                actor,
+                ("id", "name", "card_id", "card_fingerprint", "enabled", "profile"),
+                ("place_id", "asleep", "activity", "busy_until", "journey", "last_served", "revision"),
+            )
+            if isinstance(actor, dict)
+            else actor
+            for actor in ordered["actors"]
+        ]
+    return _order_dict(
+        ordered,
+        ("map_world_id", "map_revision", "places", "actors"),
+        ("invitations", "revision"),
+    )
+
+
+def _order_projected_for_cache(projected: dict) -> dict:
+    """Order top-level projected payload strictly slowest-changing -> fastest-changing."""
+    data = dict(projected)
+    if isinstance(data.get("social_policy"), dict):
+        data["social_policy"] = _order_dict(
+            data["social_policy"],
+            ("enabled", "topic_candidates"),
+            ("quiet_members", "opportunity_members"),
+        )
+    if isinstance(data.get("background_world"), dict):
+        data["background_world"] = _order_background_world_for_cache(
+            data["background_world"]
+        )
+    if isinstance(data.get("snapshot"), dict):
+        data["snapshot"] = _order_snapshot_for_cache(data["snapshot"])
+    return _order_dict(
+        data,
+        (
+            # Tier 1: static / daily
+            "citation_rule",
+            "schema_version",
+            "scope",
+            "timezone",
+            "local_date",
+            "day_end",
+            "outreach_only",
+            "background_only",
+            "needs_daily_plan",
+            "offline_catchup",
+            "care_policy",
+            "social_policy",
+            "plan",
+            # Tier 1 -> 2 -> 3 structured snapshot
+            "snapshot",
+            # Tier 2: hourly / medium (includes dynamic actor busy_until / last_served)
+            "background_world",
+            "recent_diary",
+            "recent_intents",
+            "causal_revision",
+            "weather_reassessment",
+        ),
+        (
+            # Tier 3: per-tick volatile
+            "plan_window",
+            "trigger",
+            "local_datetime",
+            "now",
+            "events",
+            "previous_validation_failure",
+        ),
+    )
+
+
 def build_narrative_prompt_parts(request: dict, character: dict) -> tuple[str, str]:
-    """Split static narrative rules/character prefix from volatile state & events."""
+    """Split static narrative rules/character prefix from slow-to-fast volatile state & events."""
     allowed = {key: character.get(key) for key in ("persona_id", "fingerprint", "core_prompt", "group_rules", "world_items")}
     projected = copy.deepcopy(request)
     # Background life can create experiences, not invoke image tools or sends.
     snap_proj = projected.get("snapshot", {})
-    snap_proj.pop("visual_sharing", None)
-    snap_proj.pop("keepsakes", None)
+    if isinstance(snap_proj, dict):
+        snap_proj.pop("visual_sharing", None)
+        snap_proj.pop("keepsakes", None)
+    static_world: dict = {}
+    if isinstance(snap_proj, dict) and not request.get("outreach_only"):
+        spatial_ref = snap_proj.get("spatial")
+        if isinstance(spatial_ref, dict) and spatial_ref.get("places"):
+            static_world["spatial_places"] = spatial_ref.pop("places")
+        scene_ref = snap_proj.get("scene")
+        if isinstance(scene_ref, dict):
+            if scene_ref.get("rooms"):
+                static_world["scene_rooms"] = scene_ref.pop("rooms")
+            if scene_ref.get("places"):
+                static_world["scene_places"] = scene_ref.pop("places")
+    bg_ref = projected.get("background_world")
+    if isinstance(bg_ref, dict) and not request.get("outreach_only"):
+        if bg_ref.get("places") and "spatial_places" not in static_world:
+            static_world["world_places"] = bg_ref.pop("places")
+        if isinstance(bg_ref.get("actors"), list):
+            actor_profiles = []
+            for actor in bg_ref["actors"]:
+                if isinstance(actor, dict) and actor.get("profile"):
+                    actor_profiles.append(
+                        {
+                            "id": actor.get("id"),
+                            "name": actor.get("name"),
+                            "profile": actor.pop("profile"),
+                        }
+                    )
+            if actor_profiles:
+                static_world["background_actor_profiles"] = actor_profiles
     if isinstance(snap_proj.get("ecology"), dict):
         eco = snap_proj["ecology"]
         snap_proj["ecology"] = {
-            "vitality": {k: v for k, v in (eco.get("vitality") or {}).items() if k not in {"inspiration", "mood_warmth"}},
             "season": (eco.get("season") or {}).get("solar_term"),
+            "pantry": eco.get("pantry"),
             "flower_stage": (eco.get("flowerbed") or {}).get("stage"),
             "veg_stage": (eco.get("veg_patch") or {}).get("stage"),
-            "pantry": eco.get("pantry"),
             "recent_meals": (eco.get("recent_meals") or [])[-2:],
+            "vitality": {k: v for k, v in (eco.get("vitality") or {}).items() if k not in {"inspiration", "mood_warmth"}},
         }
     if isinstance(snap_proj.get("mailbox"), dict):
         mb = snap_proj["mailbox"]
@@ -158,8 +434,8 @@ def build_narrative_prompt_parts(request: dict, character: dict) -> tuple[str, s
         ws = snap_proj["world_space"]
         snap_proj["world_space"] = {
             "shared": ws.get("shared", False),
-            "active_guest": ws.get("active_guest"),
             "recent_encounters": (ws.get("recent_encounters") or [])[:2],
+            "active_guest": ws.get("active_guest"),
         }
     causal=snap_proj.get("causal_life")
     if isinstance(causal,dict):
@@ -193,6 +469,7 @@ def build_narrative_prompt_parts(request: dict, character: dict) -> tuple[str, s
         if isinstance(event.get("data"), dict):
             event["data"] = {k:v for k,v in event["data"].items() if k in keys}
     projected["citation_rule"] = "本批每条event_id是唯一可用于输出source_ids的标识；历史状态的来源不得复制为本次新效果。"
+    projected = _order_projected_for_cache(projected)
     rules = NARRATIVE_RULES
     if request.get("causal_revision") is not None:
         rules += """
@@ -219,10 +496,14 @@ social_policy.enabled时，chat_openers有两条彼此独立的路径，必须�
     system_prompt = (
         rules
         + "\n角色资料：\n"
-        + json.dumps(allowed, ensure_ascii=False, separators=(",", ":"))
+        + json.dumps(allowed, ensure_ascii=False, separators=(",", ":"), sort_keys=False)
     )
+    if static_world:
+        system_prompt += "\n静态世界基础信息：\n" + json.dumps(
+            static_world, ensure_ascii=False, separators=(",", ":"), sort_keys=False
+        )
     user_prompt = "有类型与来源的状态和事件：\n" + json.dumps(
-        projected, ensure_ascii=False, separators=(",", ":")
+        projected, ensure_ascii=False, separators=(",", ":"), sort_keys=False
     )
     return system_prompt, user_prompt
 

@@ -81,34 +81,80 @@ def decision_schema(request=None):
     return copy.deepcopy(_STATIC_DECISION_SCHEMA)
 
 
+def _order_resident_context(context: dict) -> dict:
+    """Order resident context strictly slowest-changing -> fastest-changing."""
+    preferred = (
+        "acting_actor_id",
+        "own_knowledge",
+        "available_source_ids",
+        "invitations",
+        "public_peers",
+        "own_state",
+    )
+    tail = ("own_recent_decisions",)
+    ordered = {}
+    tail_set = set(tail)
+    for key in preferred:
+        if key in context:
+            ordered[key] = context[key]
+    for key, value in context.items():
+        if key not in ordered and key not in tail_set:
+            ordered[key] = value
+    for key in tail:
+        if key in context and key not in ordered:
+            ordered[key] = context[key]
+    return ordered
+
+
 def build_prompt_parts(request) -> tuple[str, str]:
-    """Split static resident rules/character from volatile per-tick context."""
+    """Split static resident rules/world/character from slow-to-fast per-tick context."""
     # Deliberate allowlist: no main persona, snapshot, diary, other profiles or conversations.
     resident_context = request.get("resident_context")
-    system_prompt = RULES
-    if isinstance(resident_context, dict) and "private_character" in resident_context:
-        system_prompt = (
-            RULES
-            + "\nprivate_character：\n"
-            + json.dumps(
-                resident_context["private_character"],
-                ensure_ascii=False,
-                separators=(",", ":"),
+    system_parts = [RULES]
+    if isinstance(resident_context, dict):
+        world_static = {}
+        if "observation_rule" in resident_context:
+            world_static["observation_rule"] = resident_context["observation_rule"]
+        if "places" in resident_context:
+            world_static["places"] = resident_context["places"]
+        if world_static:
+            system_parts.append(
+                "世界基础信息：\n"
+                + json.dumps(
+                    world_static,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=False,
+                )
             )
+        if "private_character" in resident_context:
+            system_parts.append(
+                "private_character：\n"
+                + json.dumps(
+                    resident_context["private_character"],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=False,
+                )
+            )
+        volatile_context = _order_resident_context(
+            {
+                k: v
+                for k, v in resident_context.items()
+                if k not in {"observation_rule", "places", "private_character"}
+            }
         )
-        volatile_context = {
-            k: v for k, v in resident_context.items() if k != "private_character"
-        }
     else:
         volatile_context = resident_context
     payload = {}
-    for k in ("now", "local_datetime"):
-        if k in request:
-            payload[k] = request[k]
     if "resident_context" in request:
         payload["resident_context"] = volatile_context
+    for k in ("local_datetime", "now"):
+        if k in request:
+            payload[k] = request[k]
+    system_prompt = "\n".join(system_parts)
     user_prompt = "当前个人视角：\n" + json.dumps(
-        payload, ensure_ascii=False, separators=(",", ":")
+        payload, ensure_ascii=False, separators=(",", ":"), sort_keys=False
     )
     return system_prompt, user_prompt
 
