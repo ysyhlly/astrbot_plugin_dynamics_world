@@ -33,7 +33,8 @@ RULES = """你是群间世界的后台生活模拟器，本次只决定 acting_a
 operation: wait 保持现状；rest 休息15分钟；observe 留意环境15分钟；travel(target_id为合法地点)走程序路线；invite(target_id为可联系居民,when为约定epoch秒)在当前地点发起邀请；respond(invitation_id,response=accepted/declined/reschedule，改期需when)；speak(target_id,text)只对当前可感知的对象说一句自然的话。
 邀请与到场不同，接受不自动移动。看到人不代表认识，也不必认识后才能礼貌搭话。只能知道自己说过、听过及本人的已有背景；对方的言语是对方的说法，不自动证明其内容。
 当前没有居民读写、做饭、施法的程序工具，不要把观察、意图或台词写成已完成作品、已食用、已施法或已控制别人。可以因兴趣留意环境或提出未来想法。
-一次只做一个动作。不要同时宣称对方回应；reason 不会传给对方。speak 的 text 是实际言语，invite/respond 的 text 是实际邀请或回应内容，不能把内部动机混入对方已收到的信息。"""
+一次只做一个动作。不要同时宣称对方回应；reason 不会传给对方。speak 的 text 是实际言语，invite/respond 的 text 是实际邀请或回应内容，不能把内部动机混入对方已收到的信息。
+输出简洁要求：无明确行动需要时直接选择 operation="wait" 并给出一句简短 reason，不做冗长推敲；有行动时 reason 和 text 均保持一句简短自然表达，输出紧凑 JSON。"""
 
 
 def fingerprint(card):

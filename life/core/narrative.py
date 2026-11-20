@@ -271,15 +271,19 @@ class NarrativeEngine(
         kind: str = "narrative",
         now: float | None = None,
     ) -> float:
-        """Step up background tick interval (e.g. 5m -> 15m -> 30m) during quiet periods."""
+        """Step up background tick interval (5m -> 15m -> 30m -> 2h -> 4h) during quiet periods."""
         base = max(60.0, float(base_seconds))
-        steps = (base, base * 3.0, base * 6.0)
+        steps = (base, base * 3.0, base * 6.0, base * 24.0, base * 48.0)
         ts = self.clock() if now is None else float(now)
         streak = max(0, int(self._quiet_ticks.get(kind, 0)))
         time_stage = 0
         if self._last_activity_at is not None:
             idle = max(0.0, ts - self._last_activity_at)
-            if idle >= base * 9.0:
+            if idle >= base * 48.0:
+                time_stage = 4
+            elif idle >= base * 24.0:
+                time_stage = 3
+            elif idle >= base * 9.0:
                 time_stage = 2
             elif idle >= base * 3.0:
                 time_stage = 1
@@ -301,7 +305,7 @@ class NarrativeEngine(
             self._quiet_ticks[kind] = 0
             self._last_tick_activity_seen[kind] = self._last_activity_at
         else:
-            self._quiet_ticks[kind] = min(2, int(self._quiet_ticks.get(kind, 0)) + 1)
+            self._quiet_ticks[kind] = min(4, int(self._quiet_ticks.get(kind, 0)) + 1)
         return self.effective_tick_interval(300.0, kind=kind, now=now)
 
     def peek_context_revision(self, scope):
@@ -2433,7 +2437,16 @@ class NarrativeEngine(
             if boundaries:
                 deadline = min(deadline, min(boundaries))
             due = not last or int(last[0] // 3600) < int(now // 3600) or deadline <= now
-            asleep = life["availability"] == "asleep" and deadline > now
+            sleep_deadline = deadline
+            if life["availability"] == "asleep" and not any(b <= now for b in boundaries):
+                active_plan_ends = [
+                    float(p["end"])
+                    for p in life.get("plan", [])
+                    if float(p["start"]) <= now < float(p["end"])
+                ]
+                if active_plan_ends:
+                    sleep_deadline = max(sleep_deadline, min(active_plan_ends))
+            asleep = life["availability"] == "asleep" and sleep_deadline > now
             weather_event = (
                 self.environment.life_observer.poll(db, scope, now, suspended=asleep)
                 if self.environment is not None

@@ -391,6 +391,7 @@ class LifeService:
         Returns:
             Bounded recorded facts, or an explicit unavailable/unknown result.
         """
+        self.note_activity()
         unavailable = "当前会话尚未启用持续生活。"
         if self.config.get("mode", "legacy") != "narrative":
             if not self._is_session_enabled(scope["umo"]):

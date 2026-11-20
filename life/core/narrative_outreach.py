@@ -607,18 +607,41 @@ class NarrativeOutreachMixin:
                     evidence_key = hashlib.sha256(_json([e["event_id"] for e in events]).encode()).hexdigest()
                     if marker.get("status") == "policy_refusal" and marker.get("evidence_key") == evidence_key:
                         continue
-                    fingerprint = hashlib.sha256(_json([
-                        [e["event_id"] for e in events], quiet, policy_key,
-                        opportunity_members, [
+                    is_asleep = snapshot.get("availability") == "asleep"
+                    if (
+                        is_asleep
+                        and not opportunity_members
+                        and marker.get("status") == "ok"
+                        and marker.get("evidence_key") == evidence_key
+                    ):
+                        continue
+                    active_topic_candidates = (
+                        [
                             [c["topic_candidate_id"], c["source_fingerprint"]]
                             for c in topic_candidates
-                        ],
-                        snapshot.get("availability"), snapshot.get("scope_revision"),
+                        ]
+                        if opportunity_members
+                        else []
+                    )
+                    fingerprint = hashlib.sha256(_json([
+                        [e["event_id"] for e in events], quiet, policy_key,
+                        opportunity_members, active_topic_candidates,
+                        is_asleep, snapshot.get("scope_revision"),
                     ]).encode()).hexdigest()
+                    no_change_streak = int(marker.get("no_change_streak", 0))
+                    # Progressive quiet backoff on identical no_change evidence:
+                    # 30m (first re-check) -> 2h -> 4h; resets immediately on any new input/change.
+                    cache_ttl = (
+                        1800
+                        if no_change_streak <= 1
+                        else 7200
+                        if no_change_streak == 2
+                        else 14400
+                    )
                     if (
                         marker.get("fingerprint") == fingerprint
                         and marker.get("status") == "ok"
-                        and now - marker.get("last_at",0) < 1800
+                        and now - marker.get("last_at", 0) < cache_ttl
                     ):
                         continue
                     recent_intents = [
@@ -796,6 +819,16 @@ class NarrativeOutreachMixin:
                                 now,
                             ),
                         )
+                next_no_change_streak = (
+                    (
+                        int(marker.get("no_change_streak", 0)) + 1
+                        if marker.get("fingerprint") == fingerprint
+                        and marker.get("status") == "ok"
+                        else 1
+                    )
+                    if status in {"ok", "partial"} and added == 0
+                    else 0
+                )
                 with self._db() as db:
                     db.execute(
                         "INSERT INTO metadata VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -811,6 +844,7 @@ class NarrativeOutreachMixin:
                                     else status,
                                     "candidates": added,
                                     "rejected": len(rejected),
+                                    "no_change_streak": next_no_change_streak,
                                     "policy_key": policy_key,
                                     "evidence_key": evidence_key,
                                 }

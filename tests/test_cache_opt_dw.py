@@ -1125,3 +1125,207 @@ def test_phase2_resident_and_outreach_prompts_maximize_common_prefix():
     assert okeys[0] == "citation_rule"
     assert okeys[-3:] == ["local_datetime", "now", "events"]
 
+
+# --------------------------------------------------------------------------- Phase 3 overnight/quiet gating & conciseness
+
+
+@pytest.mark.asyncio
+async def test_phase3_outreach_stops_30min_overnight_no_change_loop_and_wakes_on_activity(
+    tmp_path,
+):
+    now = [dt.datetime(2026, 11, 20, 2, 0, tzinfo=CHINA).timestamp()]
+    calls = []
+
+    async def model(request):
+        calls.append(request)
+        return {"no_change": True}
+
+    engine = NarrativeEngine(
+        tmp_path / "life.sqlite3",
+        {
+            "mode": "narrative",
+            "persona_id": "p",
+            "narrative_sessions": [UMO],
+            "contextual_care_sessions": [UMO],
+            "social_chat_sessions": [UMO],
+        },
+        model,
+        lambda: now[0],
+    )
+    try:
+        # Seed a chat message from 40 minutes ago (01:20).
+        await engine.ingest_events(
+            [
+                {
+                    "event_id": "m-old",
+                    "type": "message.received",
+                    "occurred_at": now[0] - 2400,
+                    "received_at": now[0] - 2400,
+                    "scope": SCOPE,
+                    "actor_id": "u1",
+                    "text": "晚安，明天聊",
+                    "data": {"directed_to_bot": True},
+                }
+            ]
+        )
+
+        # 1) Initial outreach review at 02:00 returns no_change.
+        res1 = await engine.review_outreach()
+        assert res1 == [{"status": "ok", "candidates": 0}]
+        assert len(calls) == 1
+
+        # 2) While character is asleep with unchanged evidence, polling every 30m
+        #    for 4 hours fires ZERO extra outreach calls (even if fiction diary grows).
+        with engine._db() as db:
+            row = db.execute("SELECT state FROM lives").fetchone()
+            life = json.loads(row[0])
+            life.update(
+                availability="asleep",
+                activity_code="sleeping",
+                valid_from=now[0],
+                valid_until=now[0] + 5 * 3600,
+            )
+            db.execute("UPDATE lives SET state=?", (json.dumps(life),))
+        for _ in range(8):
+            now[0] += 1800
+            assert await engine.review_outreach() == []
+        assert len(calls) == 1
+
+        # 3) Character wakes up at 06:00 -> availability flips back to awake ->
+        #    2nd check on unchanged fingerprint fires -> no_change_streak becomes 2 (TTL=2h),
+        #    so polling every 30m at 06:30, 07:00, 07:30 fires ZERO LLM calls!
+        with engine._db() as db:
+            row = db.execute("SELECT state FROM lives").fetchone()
+            life = json.loads(row[0])
+            life.update(
+                availability="available",
+                activity_code="reading",
+                valid_from=now[0],
+                valid_until=now[0] + 6 * 3600,
+            )
+            db.execute("UPDATE lives SET state=?", (json.dumps(life),))
+
+        assert len(await engine.review_outreach()) == 1  # 06:00 wake review (streak=2, TTL=2h)
+        assert len(calls) == 2
+
+        # Next three 30m polls (06:30, 07:00, 07:30 — all < 2h TTL and before 08:00 flip) -> ZERO calls!
+        for _ in range(3):
+            now[0] += 1800
+            assert await engine.review_outreach() == []
+        assert len(calls) == 2
+
+        # 4) A new chat message arrives -> wakes outreach IMMEDIATELY!
+        now[0] += 300
+        await engine.ingest_events(
+            [
+                {
+                    "event_id": "m-new",
+                    "type": "message.received",
+                    "occurred_at": now[0],
+                    "received_at": now[0],
+                    "scope": SCOPE,
+                    "actor_id": "u1",
+                    "text": "早上好，我有点头疼先休息一下",
+                    "data": {"directed_to_bot": True},
+                }
+            ]
+        )
+        res_wake = await engine.review_outreach()
+        assert res_wake == [{"status": "ok", "candidates": 0}]
+        assert len(calls) == 3
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_phase3_sleep_plan_skips_hourly_no_change_loop_and_wakes_on_schedule(
+    tmp_path,
+):
+    t_sleep = dt.datetime(2026, 11, 20, 2, 0, tzinfo=CHINA).timestamp()
+    t_wake = dt.datetime(2026, 11, 20, 7, 0, tzinfo=CHINA).timestamp()
+    now = [t_sleep]
+    calls = []
+
+    async def model(request):
+        calls.append(request)
+        return {"no_change": True}
+
+    engine = NarrativeEngine(
+        tmp_path / "life.sqlite3",
+        {"mode": "narrative", "persona_id": "p", "narrative_sessions": [UMO]},
+        model,
+        lambda: now[0],
+    )
+    try:
+        # Put character asleep with a 02:00-07:00 sleep plan entry, even with short 1h valid_until.
+        with engine._db() as db:
+            engine._ensure(db, GLOBAL, now[0])
+            row = db.execute("SELECT state FROM lives").fetchone()
+            life = json.loads(row[0])
+            life.update(
+                availability="asleep",
+                activity_code="sleeping",
+                activity="深夜熟睡安歇",
+                valid_from=t_sleep,
+                valid_until=t_sleep + 3600,
+                next_check=t_sleep + 3600,
+                narrated_until=t_sleep,
+                plan_date="2026-11-20",
+                plan=[{"start": t_sleep, "end": t_wake, "activity": "深夜熟睡安歇", "fact_kind": "plan"}],
+            )
+            db.execute("UPDATE lives SET state=?,revision=1", (json.dumps(life),))
+            db.execute(
+                "INSERT OR REPLACE INTO maintenance VALUES(?,'hourly',?)",
+                ('["p","p"]', t_sleep),
+            )
+
+        # Polling at 03:00, 04:00, 05:00, 06:00 while inside sleep plan -> ZERO LLM calls!
+        for hour_offset in (1, 2, 3, 4):
+            now[0] = t_sleep + hour_offset * 3600
+            await engine.tick()
+        assert len(calls) == 0
+
+        # At 07:00 scheduled wake-up transition -> fires IMMEDIATELY!
+        now[0] = t_wake
+        await engine.tick()
+        assert len(calls) == 1
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_phase3_deep_quiet_backoff_and_concise_rules(tmp_path, monkeypatch):
+    plugin, _, _ = await make_plugin(tmp_path, monkeypatch, runtime_enabled=True)
+    try:
+        seed(plugin)
+        engine = plugin.life.narrative
+        t0 = 1_800_000_000.0
+        monkeypatch.setattr(engine, "clock", lambda: t0)
+
+        # Escalates 5m -> 15m -> 30m -> 2h -> 4h on consecutive quiet ticks.
+        assert engine.effective_tick_interval(300, kind="resident", now=t0) == 300.0
+        assert engine.record_background_tick(kind="resident", now=t0) == 900.0
+        assert engine.record_background_tick(kind="resident", now=t0) == 1800.0
+        assert engine.record_background_tick(kind="resident", now=t0) == 7200.0
+        assert engine.record_background_tick(kind="resident", now=t0) == 14400.0
+
+        # Explicit tool query (read_current_world_state) immediately resets quiet backoff to 5m.
+        await plugin.life.read_current_world_state(SCOPE, "activity")
+        assert engine.effective_tick_interval(300, kind="resident", now=t0) == 300.0
+
+        # Verify conciseness instructions exist in all narrative & resident system prompts.
+        assert "输出简洁要求" in NARRATIVE_RULES
+        out_sys, _ = build_narrative_prompt_parts(
+            {"scope": SCOPE, "now": t0, "outreach_only": True, "events": []}, {}
+        )
+        assert "输出简洁要求" in out_sys
+        bg_sys, _ = build_narrative_prompt_parts(
+            {"scope": GLOBAL, "now": t0, "background_only": True, "events": []}, {}
+        )
+        assert "不做冗长推敲" in bg_sys
+        res_sys, _ = build_prompt_parts({"now": t0, "resident_context": {"acting_actor_id": "r1"}})
+        assert "输出简洁要求" in res_sys
+    finally:
+        await plugin.terminate()
+
+
