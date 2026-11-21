@@ -1,5 +1,5 @@
 /* Shared low-poly botanical and joinery shapes. No external textures or models. */
-import {BufferGeometry,Float32BufferAttribute,SphereGeometry,IcosahedronGeometry,CylinderGeometry,TorusGeometry,Shape,ExtrudeGeometry,SRGBColorSpace} from 'three';
+import {BoxGeometry,BufferGeometry,Float32BufferAttribute,SphereGeometry,IcosahedronGeometry,CylinderGeometry,TorusGeometry,Shape,ExtrudeGeometry,SRGBColorSpace,NearestFilter,NearestMipmapLinearFilter,RepeatWrapping} from 'three';
 import {RoundedBoxGeometry} from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 
 function chamferedTimber(radius=.025){
@@ -23,6 +23,43 @@ function chamferedTimber(radius=.025){
  }
  for(const sx of [-1,1])for(const sy of [-1,1])for(const sz of [-1,1]){const signs=[sx,sy,sz];face([0,1,2].map(axis=>signs.map((s,i)=>s*(i===axis?.5:inner))));}
  const g=new BufferGeometry();g.setAttribute('position',new Float32BufferAttribute(positions,3));g.setAttribute('uv',new Float32BufferAttribute(uvs,2));g.computeVertexNormals();return g;
+}
+
+// Exposed faces of a small voxel cluster. Instances carry the seasonal colour.
+function orchardCrown() {
+ const vertices=[],uv=[];
+ const levels=[
+  ['.....','.###.','.###.','.###.','.....'],
+  ['.###.','#####','#####','#####','.###.'],
+  ['.###.','#####','#####','#####','.###.'],
+  ['..##.','.####','#####','.###.','..#..'],
+  ['.....','..##.','.###.','..#..','.....'],
+ ];
+ const faces=[
+  [[1,0,0],[[1,0,1],[1,0,0],[1,1,0],[1,1,1]]],
+  [[-1,0,0],[[0,0,0],[0,0,1],[0,1,1],[0,1,0]]],
+  [[0,1,0],[[0,1,1],[1,1,1],[1,1,0],[0,1,0]]],
+  [[0,-1,0],[[0,0,0],[1,0,0],[1,0,1],[0,0,1]]],
+  [[0,0,1],[[0,0,1],[1,0,1],[1,1,1],[0,1,1]]],
+  [[0,0,-1],[[1,0,0],[0,0,0],[0,1,0],[1,1,0]]],
+ ];
+ const solid=(x,y,z)=>levels[y]?.[z]?.[x]==='#';
+ for(let y=0;y<5;y++)for(let z=0;z<5;z++)for(let x=0;x<5;x++){
+  if(!solid(x,y,z)) continue;
+  for(const [[dx,dy,dz],corners] of faces){
+   if(solid(x+dx,y+dy,z+dz)) continue;
+   for(const n of [0,1,2,0,2,3]){
+    const [a,b,c]=corners[n];
+    vertices.push((x+a)/5-.5,(y+b)/5-.5,(z+c)/5-.5);
+    uv.push(n===1||n===2?1:0,n>=2?1:0);
+   }
+  }
+ }
+ const geometry=new BufferGeometry();
+ geometry.setAttribute('position',new Float32BufferAttribute(vertices,3));
+ geometry.setAttribute('uv',new Float32BufferAttribute(uv,2));
+ geometry.computeVertexNormals();
+ return geometry;
 }
 
 export function createGardenShapes(){
@@ -55,8 +92,8 @@ export function createGardenShapes(){
  // Deliberately smooth and double-wound cloth uses a fixed front/back normal per face after expansion.
  const cloth=linen.toNonIndexed();cloth.computeVertexNormals();linen.dispose();
  return {
-  soft:new RoundedBoxGeometry(1,1,1,1,.075),timber:chamferedTimber(),
-  sphere,leaf,stone,clod:new IcosahedronGeometry(.5,0),crown:new IcosahedronGeometry(.5,1),stem:new CylinderGeometry(.34,.5,1,7),
+  voxel:new BoxGeometry(1,1,1),soft:new RoundedBoxGeometry(1,1,1,1,.075),timber:chamferedTimber(),
+  sphere,leaf,stone,clod:new IcosahedronGeometry(.5,0),crown:orchardCrown(),stem:new CylinderGeometry(.34,.5,1,7),
   cylinder:new CylinderGeometry(.5,.5,1,12),pot:new CylinderGeometry(.5,.37,1,12),
   cone:new CylinderGeometry(.16,.5,1,8),ring:new TorusGeometry(.5,.025,5,20),
   tubeRing:new TorusGeometry(.5,.07,6,16),picket,grass,pad,cloth,
@@ -64,19 +101,26 @@ export function createGardenShapes(){
 }
 
 export function createGardenSurface(THREE,kind,color){
- const canvas=document.createElement('canvas');canvas.width=canvas.height=128;const g=canvas.getContext('2d');
- g.fillStyle='#ffffff';g.fillRect(0,0,128,128);
+ const canvas=document.createElement('canvas');canvas.width=canvas.height=32;const g=canvas.getContext('2d');
+ g.fillStyle='#ffffff';g.fillRect(0,0,32,32);
  let seed=31;const rnd=()=>{seed=(Math.imul(seed,1664525)+1013904223)>>>0;return seed/4294967296;};
  if(kind==='wood'){
-  for(let n=0;n<42;n++){
-   const y=rnd()*128;g.strokeStyle=`rgba(74,50,30,${.04+rnd()*.07})`;g.lineWidth=.5+rnd();g.beginPath();
-   for(let x=0;x<=128;x+=4){const yy=y+Math.sin(x*.05+n)*1.3;x?g.lineTo(x,yy):g.moveTo(x,yy);}g.stroke();
+  for(let n=0;n<17;n++){
+   g.fillStyle=n%3?'#ecdfcf':'#d8cbbf';
+   g.fillRect(Math.floor(rnd()*32),Math.floor(rnd()*32),2+Math.floor(rnd()*9),1);
   }
  }else{
-  for(let n=0;n<1500;n++){g.fillStyle=`rgba(72,78,53,${.02+rnd()*.08})`;g.fillRect(rnd()*128,rnd()*128,1+rnd()*2,1+rnd()*2);}
+  for(let n=0;n<45;n++){
+   const x=Math.floor(rnd()*32),y=Math.floor(rnd()*32);
+   g.fillStyle=n%3?'#e4e2cf':'#cfd2be';
+   g.fillRect(x,y,2+n%3,1);
+   if(n%5===0) g.fillRect(x+1,y-1,1,1);
+  }
  }
  const texture=new THREE.CanvasTexture(canvas);
  texture.colorSpace=SRGBColorSpace;
+ texture.magFilter=NearestFilter; texture.minFilter=NearestMipmapLinearFilter;
+ texture.wrapS=texture.wrapT=RepeatWrapping;
  const mat=new THREE.MeshStandardMaterial({color,roughness:kind==='wood'?.86:.98,map:texture});
  return {material:mat,texture};
 }

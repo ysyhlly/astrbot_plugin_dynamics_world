@@ -637,6 +637,9 @@ def _read_world_projection(api, services, scope, character, key, can_write):
                 or actor.get("phase") == "travelling"
                 else ("room" if scene.get("room_id") else "garden")
             )
+            from .cabin_life import ACTIVITIES as CABIN_ACTIVITIES
+            if amb_pose in CABIN_ACTIVITIES and amb_loc != "away":
+                amb_loc = CABIN_ACTIVITIES[amb_pose].zone
             amb_summary = (
                 sc_act.get("label") if isinstance(sc_act, dict) else None
             ) or str(cues.get("plan_now") or life.get("activity") or "日常片刻").split(
@@ -672,6 +675,7 @@ def _read_world_projection(api, services, scope, character, key, can_write):
                     or actor.get("place_name")
                     or "",
                     "pose": amb_pose,
+                    "cabin_style":scene.get("cabin_style","cottage"),
                     "cat_spot": ((ecology or {}).get("cat") or {}).get(
                         "spot", "bed_nap"
                     ),

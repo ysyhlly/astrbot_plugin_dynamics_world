@@ -1,0 +1,18 @@
+/* Shared by the scene-controls panel and the compact legacy toolbar. */
+.cabin-style-picker{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:6px 10px;min-width:0}
+.cabin-style-picker label{font-size:12px;font-weight:600;color:var(--ds-muted,var(--wb-text-soft))}
+.cabin-style-picker select{box-sizing:border-box;width:100%;min-width:0;min-height:34px;padding:4px 9px;border:1px solid var(--ds-border,var(--wb-border));border-radius:9px;font:inherit;font-size:12px;color:var(--ds-text,var(--wb-text));background:var(--ds-surface,var(--wb-surface))}
+.cabin-style-picker select:focus-visible{outline:2px solid var(--ds-accent,var(--wb-accent));outline-offset:2px}
+.cabin-style-picker small{grid-column:1/-1;font-size:11px;line-height:1.5;color:var(--ds-muted,var(--wb-text-soft));overflow-wrap:anywhere}
+.cabin-style-picker small[hidden]{display:none}
+.cabin-art-credit{grid-column:1/-1;font-size:10px;color:var(--ds-muted,var(--wb-text-soft))}
+.cabin-art-credit[hidden]{display:none}
+.cabin-view-bar .cabin-style-picker{flex:0 1 245px;max-width:100%}
+.cabin-scene-popover{max-height:min(75dvh,550px);overflow-y:auto;overscroll-behavior:contain}
+.cabin-diorama.cabin3d-stage[data-cabin-style="whale_coast"]{background:radial-gradient(ellipse at 52% 70%,#e5f0e6,#c7e3e7 65%,#b2d8e2)}
+.cabin-diorama.cabin3d-stage[data-cabin-style="witch_court"]{background:radial-gradient(ellipse at 52% 70%,#ede2de,#ddd6df 65%,#c6c1d1)}
+.cabin-diorama.cabin3d-stage[data-cabin-style="whale_coast"][data-day-phase="night"]{background:radial-gradient(ellipse at 53% 65%,#354a5f,#202e49 72%)}
+.cabin-diorama.cabin3d-stage[data-cabin-style="witch_court"][data-day-phase="night"]{background:radial-gradient(ellipse at 53% 65%,#45374d,#242334 72%)}
+.cabin-diorama.cabin3d-stage[data-cabin-style="whale_coast"]:is([data-weather="rain"],[data-weather="fog"]):not([data-day-phase="night"]){background:radial-gradient(ellipse at 52% 70%,#dae6e3,#b3cbd2 72%)}
+.cabin-diorama.cabin3d-stage[data-cabin-style="witch_court"]:is([data-weather="rain"],[data-weather="fog"]):not([data-day-phase="night"]){background:radial-gradient(ellipse at 52% 70%,#ddd7d8,#bcb8c2 72%)}
+@media(max-width:600px){.cabin-view-bar .cabin-style-picker{flex-basis:auto;width:100%}.cabin-style-picker select{min-height:36px}}

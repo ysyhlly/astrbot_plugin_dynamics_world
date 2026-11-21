@@ -59,7 +59,10 @@ async def test_native_plugin_is_self_contained_and_cancels_loop(tmp_path, monkey
     assert plugin.world.store.list_cards() == []  # No forced bundled persona.
     assert plugin.life._worldbook() is plugin.world
     assert plugin.get_dynamics_capabilities()["enabled"] is False
-    assert len(routes) == 38
+    assert len(routes) == 41
+    assert ("/astrbot_plugin_dynamics_world/cabin_style", ("GET",)) in routes
+    assert ("/astrbot_plugin_dynamics_world/cabin_style", ("POST",)) in routes
+    assert ("/astrbot_plugin_dynamics_world/journal_feed", ("GET",)) in routes
     assert ("/astrbot_plugin_dynamics_world/series_workspace/open/<target>", ("GET",)) in routes
     assert ("/astrbot_plugin_dynamics_world/series_workspace/panel/<target>/<path:operation>", ("GET", "POST")) in routes
     assert ("/astrbot_plugin_dynamics_world/visual", ("POST",)) in routes
@@ -82,6 +85,9 @@ async def test_native_plugin_is_self_contained_and_cancels_loop(tmp_path, monkey
     await plugin.terminate()
     assert plugin.life._narrative_task.done()
     assert not plugin.get_dynamics_capabilities()["ready"]
+    assert plugin._series_panels.workspace.closed is True
+    assert plugin.web.guard("cabin_style") is not None
+    assert plugin.web.guard("cabin_style", True) is not None
 
 
 @pytest.mark.asyncio
@@ -221,7 +227,10 @@ async def test_panel_import_switches_only_owned_data_and_config(tmp_path, monkey
     assert (source / migration.WORLD / "worldbook_store.json").read_bytes() == before
     assert (await plugin.apply_imported_settings())["runtime_enabled"] is False
     assert plugin.host_config.saved["runtime_enabled"] is False
-    assert len(routes) == 38
+    assert len(routes) == 41
+    assert ("/astrbot_plugin_dynamics_world/cabin_style", ("GET",)) in routes
+    assert ("/astrbot_plugin_dynamics_world/cabin_style", ("POST",)) in routes
+    assert ("/astrbot_plugin_dynamics_world/journal_feed", ("GET",)) in routes
     await plugin.terminate()
 
 

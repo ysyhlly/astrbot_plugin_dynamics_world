@@ -1,4 +1,10 @@
-# astrbot_plugin_dynamics_world v0.23.0-rc.6
+# astrbot_plugin_dynamics_world v0.23.0-rc.7
+
+## v0.23.0-rc.7 — 2026-11-21
+
+- 升级系列面板 v2 与 3D 实况小屋体验：新增「今日生活手账」（`journal_feed`）、联邦搜索/群控矩阵只读钩子、可选小屋主题（`cabin_style`）及今日剩余日程手动重生成。
+- 合入跨群字节级一致 `system_prompt` / `contexts[0]` 前缀缓存分段与低信号群聊环境闲聊/主动外联门控优化。
+- 修复世界手账角色串味与未绑定群放宽问题，统一 `UTC+8` 自然日边界与显式 `[start_ts, end_ts)` 透传，补齐 `pages/world/whale-art-credit.txt` CC BY-NC-SA 4.0 单独素材许可说明。
 
 ## v0.23.0-rc.6 — 2026-11-20
 

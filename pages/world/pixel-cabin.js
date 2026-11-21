@@ -1,10 +1,11 @@
-import './causal-panel.js?v=mobile.2';
+import './causal-panel.js?v=wb-iso.1';
+import {createCabinStylePicker} from './cabin-style-picker.js?v=homes.1';
 import {installAvatarUI} from './cabin-avatar-ui.js?v=audit-poll.1';
 import {apiGet,apiPost,formatTs,withTimeout} from './api.js';
 import {msg,tr,setText,feedback} from './series-ui.js';
 import {messages} from './series-messages.js';
-import {cabinMessages} from './cabin-messages.js?v=stage.11';
-import {createCabinInspector,INSPECT_LABELS} from './cabin-inspect.js?v=causal.1';
+import {cabinMessages} from './cabin-messages.js?v=wb-iso.1';
+import {createCabinInspector,INSPECT_LABELS} from './cabin-inspect.js?v=wb-iso.1';
 import {createCabinBubbles} from './cabin-bubbles.js?v=causal.1';
 import {createCabinTimeline} from './cabin-timeline.js?v=stage.11';
 import {createCabinAudio} from './cabin-audio.js?v=stage.11';
@@ -12,15 +13,33 @@ import {composeClientPolaroid} from './cabin-polaroid.js?v=stage.11';
 import {worldStream} from './world-stream.js?v=round2.1';
 Object.assign(messages,cabinMessages);
 const $=id=>document.getElementById(id),make=(tag,value,cls='')=>{const n=document.createElement(tag);n.className=cls;if(value!=null)setText(n,value);return n;};
-const STAGE_DRAWER_VIEWS=new Set(['life','stories','projects','activity','scenes','weather']);
 const portals=[
  ['memory','笔记本','群间记忆','astrbot_plugin_dynamics_memory','DM'],
  ['visual','衣柜','视觉工坊','astrbot_plugin_visual_media','VW'],
  ['learning','随身读物','群间学习','astrbot_plugin_dynamics_learning','DL'],
  ['horizons','书架','群间见闻','astrbot_plugin_dynamics_horizons','DH'],
- ['chat','手机','Chat Dynamics','astrbot_plugin_chat_dynamics','CD'],
+ ['chat','手机','对话主控','astrbot_plugin_chat_dynamics','CD'],
  ['games','游戏机','群间游戏','astrbot_plugin_dynamics_games','DG'],
 ];
+const SVG_NS='http://www.w3.org/2000/svg';
+const PORTAL_ICON_PATHS={
+ memory:['M4 19.5A2.5 2.5 0 0 1 6.5 17H20','M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z','M9 7h7','M9 11h5'],
+ visual:['M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z','M8.5 10a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3z','M21 15l-5-5L5 21'],
+ learning:['M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z','M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z'],
+ horizons:['M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z','M2 12h20','M12 2a14.5 14.5 0 0 1 0 20','M12 2a14.5 14.5 0 0 0 0 20'],
+ chat:['M7 2h10a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z','M12 18h.01'],
+ games:['M6 6h12a4 4 0 0 1 4 4v4a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4v-4a4 4 0 0 1 4-4z','M6 12h4','M8 10v4','M15 11h.01','M17 13h.01'],
+};
+function svgIcon(paths,size=16,cls=''){
+ const svg=document.createElementNS(SVG_NS,'svg');
+ svg.setAttribute('viewBox','0 0 24 24');svg.setAttribute('width',String(size));svg.setAttribute('height',String(size));
+ svg.setAttribute('fill','none');svg.setAttribute('stroke','currentColor');svg.setAttribute('stroke-width','1.8');
+ svg.setAttribute('stroke-linecap','round');svg.setAttribute('stroke-linejoin','round');svg.setAttribute('aria-hidden','true');
+ if(cls)svg.setAttribute('class',cls);
+ for(const d of paths){const p=document.createElementNS(SVG_NS,'path');p.setAttribute('d',d);svg.append(p);}
+ return svg;
+}
+const TIME_CHIPS=[['auto','实时'],['dawn','清晨'],['day','正午'],['dusk','黄昏'],['night','夜晚']];
 const target3dKey=key=>key==='games'?null:key==='horizons'?'shelf':key;
 const portalKeyFrom3d=key=>key==='shelf'&&controls.has('horizons')?'horizons':(controls.has(key)?key:null);
 const labels={ready:'已就绪',enabled:'已启用',disabled:'已停用',missing:'未安装',unloaded:'未加载',conflict:'同名冲突',inactive:'未接入',not_ready:'未就绪',error:'状态异常'};
@@ -28,59 +47,83 @@ const TIME_MODES=[['auto','时段：实时'],['dawn','时段：清晨'],['day','
 const CURTAIN_CYCLE=['open','half','closed'];
 const LAMP_CYCLE=['warm','bright','dim','off'];
 let causalReading=false;
-let visible=false,busy=false,lastScope='',archiveKey='',snapshot=null,companionCache=null,room3d=null,initializing=null,cameraView='garden',pixelMode=false,timeIndex=0,activePortalKey=null,cozyCam=false;
+let visible=false,busy=false,lastScope='',archiveKey='',snapshot=null,companionCache=null,room3d=null,initializing=null,cameraView='room',pixelMode=true,timeIndex=0,activePortalKey=null,cozyCam=false;
 let localCurtainOverride=null,localLampOverride=null,activeReplaySnapshot=null,presenceLoadedAt=0;
 let worldScopeSerial=0,replaySerial=0;
 const capabilities=new Map(),controls=new Map();
 let presenceRequest=null;
 let presenceError='';
 const cabinAudio=createCabinAudio();
+const stylePicker=createCabinStylePicker(()=>room3d);
 
 const tab=make('button',msg('3D 像素小屋'),'wb-tab');tab.id='tab-cabin';tab.type='button';tab.dataset.view='cabin';tab.setAttribute('role','tab');tab.setAttribute('aria-selected','false');tab.setAttribute('aria-controls','view-cabin');tab.tabIndex=-1;$('wbTabs').prepend(tab);
 const host=make('section',null,'wb-view wb-hidden pixel-cabin');host.id='view-cabin';host.setAttribute('role','tabpanel');host.setAttribute('aria-labelledby',tab.id);$('worldContent').prepend(host);
 const message=make('p',null,'cabin-message');message.id='cabinMessage';message.setAttribute('role','status');host.append(message);
 const layout=make('div',null,'cabin-layout'),stage=make('div',null,'cabin-stage'),heading=make('div',null,'cabin-stage-head'),title=make('div');title.append(make('strong',msg('3D 像素小屋')),make('small',msg('小屋与花园，装下日常的片刻。')));heading.append(title,make('span','WORLD / HOME','cabin-world-badge'));stage.append(heading);
 
-const viewRow=make('div',null,'cabin-view-bar');
 const viewbar=make('div',null,'cabin-view-switch');viewbar.setAttribute('role','group');setText(viewbar,msg('小屋视角'),'aria-label');
+const ambientBar=make('div',null,'cabin-stage-ambient');
+const ambientPhasePill=make('span',msg('时段：实时'),'cabin-ambient-pill');ambientPhasePill.id='cabinAmbientPhase';
+const ambientCamPill=make('span',msg('室内近景'),'cabin-ambient-pill');ambientCamPill.id='cabinAmbientCam';
+ambientBar.append(ambientPhasePill,ambientCamPill);
+
 for(const [key,label] of [['garden','花园全景'],['room','室内近景']]){
  const button=make('button',msg(label),'wb-button tiny');button.type='button';button.dataset.cabinView=key;button.setAttribute('aria-pressed',String(key===cameraView));button.disabled=true;
- button.addEventListener('click',()=>{if(busy)return;if(cozyCam)setCozyCamMode(false);cameraView=key;inspector.close();closePortalPeek();room3d?.setView(key);for(const b of viewbar.children)b.setAttribute('aria-pressed',String(b.dataset.cabinView===key));});
+ button.addEventListener('click',()=>{
+  if(busy)return;
+  if(cozyCam)setCozyCamMode(false);
+  cameraView=key;
+  inspector.close();closePortalPeek();
+  room3d?.setView(key);
+  setText(ambientCamPill,msg(label));
+  for(const b of viewbar.children)b.setAttribute('aria-pressed',String(b.dataset.cabinView===key));
+ });
  viewbar.append(button);
 }
-const tools=make('div',null,'cabin-view-tools');
-const pixelBtn=make('button',msg('像素画风'),'wb-button tiny');pixelBtn.type='button';pixelBtn.id='cabinPixelMode';pixelBtn.setAttribute('aria-pressed','false');pixelBtn.disabled=true;
+
+const pixelBtn=make('button',msg('像素画风'),'wb-button tiny cabin-pop-toggle');pixelBtn.type='button';pixelBtn.id='cabinPixelMode';pixelBtn.setAttribute('aria-pressed',String(pixelMode));pixelBtn.disabled=true;
 pixelBtn.addEventListener('click',()=>{pixelMode=!pixelMode;pixelBtn.setAttribute('aria-pressed',String(pixelMode));room3d?.setPixelMode(pixelMode);});
 
-const timeBtn=make('button',msg(TIME_MODES[0][1]),'wb-button tiny');timeBtn.type='button';timeBtn.id='cabinTimeMode';timeBtn.dataset.timeMode='auto';timeBtn.disabled=true;
-function cycleTimeMode(){
+const timeBtn=make('button',msg(TIME_MODES[0][1]),'wb-button tiny cabin-time-cycle');timeBtn.type='button';timeBtn.id='cabinTimeMode';timeBtn.dataset.timeMode='auto';timeBtn.disabled=true;
+const timeChipRow=make('div',null,'cabin-time-chips');timeChipRow.setAttribute('role','group');setText(timeChipRow,msg('时段光影'),'aria-label');
+const timeChipButtons=[];
+function applyTimeIndex(nextIndex){
  if(timeline.isPreviewing())timeline.exitPreview();
- timeIndex=(timeIndex+1)%TIME_MODES.length;
+ timeIndex=((nextIndex%TIME_MODES.length)+TIME_MODES.length)%TIME_MODES.length;
  const [mode,label]=TIME_MODES[timeIndex];
  timeBtn.dataset.timeMode=mode;
  timeBtn.dataset.active=String(mode!=='auto');
  setText(timeBtn,msg(label));
+ setText(ambientPhasePill,msg(label));
+ for(const chip of timeChipButtons)chip.setAttribute('aria-pressed',String(chip.dataset.timeChip===mode));
  room3d?.setTimeMode(mode);
  syncStageBackdrop();
  inspector.refresh(snapshot,room3d?.diagnostics());
 }
+function cycleTimeMode(){applyTimeIndex(timeIndex+1);}
 timeBtn.addEventListener('click',cycleTimeMode);
+TIME_CHIPS.forEach(([mode,shortLabel],idx)=>{
+ const chip=make('button',msg(shortLabel),'wb-button tiny cabin-time-chip');chip.type='button';chip.dataset.timeChip=mode;chip.setAttribute('aria-pressed',String(idx===0));chip.disabled=true;
+ chip.addEventListener('click',()=>applyTimeIndex(idx));
+ timeChipButtons.push(chip);timeChipRow.append(chip);
+});
 
-const timelineBtn=make('button',msg('24h 足迹'),'wb-button tiny');timelineBtn.type='button';timelineBtn.id='cabinTimelineToggle';timelineBtn.setAttribute('aria-pressed','false');timelineBtn.disabled=true;
-const audioBtn=make('button',msg('环境音'),'wb-button tiny');audioBtn.type='button';audioBtn.id='cabinAudioToggle';audioBtn.setAttribute('aria-pressed','false');
+const timelineBtn=make('button',msg('24h 足迹'),'wb-button tiny cabin-pop-toggle');timelineBtn.type='button';timelineBtn.id='cabinTimelineToggle';timelineBtn.setAttribute('aria-pressed','false');timelineBtn.disabled=true;
+const audioBtn=make('button',msg('环境音'),'wb-button tiny cabin-pop-toggle');audioBtn.type='button';audioBtn.id='cabinAudioToggle';audioBtn.setAttribute('aria-pressed','false');
 audioBtn.addEventListener('click',()=>{
  const on=cabinAudio.toggle();
  audioBtn.setAttribute('aria-pressed',String(on));
  if(on)cabinAudio.playTap('wood');
 });
-const cozyBtn=make('button',msg('陪伴挂机'),'wb-button tiny');cozyBtn.type='button';cozyBtn.id='cabinCozyToggle';cozyBtn.setAttribute('aria-pressed','false');cozyBtn.disabled=true;
-const postcardBtn=make('button',msg('实况拍立得'),'wb-button tiny');postcardBtn.type='button';postcardBtn.id='cabinPostcardBtn';
-
-tools.append(pixelBtn,timeBtn,timelineBtn,audioBtn,cozyBtn,postcardBtn);
-viewRow.append(viewbar,tools);
-stage.append(viewRow);
+const cozyBtn=make('button',msg('陪伴挂机'),'wb-button tiny cabin-pop-toggle');cozyBtn.type='button';cozyBtn.id='cabinCozyToggle';cozyBtn.setAttribute('aria-pressed','false');cozyBtn.disabled=true;
+const postcardBtn=make('button',null,'wb-button tiny cabin-polaroid-fab');postcardBtn.type='button';postcardBtn.id='cabinPostcardBtn';
+postcardBtn.append(svgIcon(['M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z','M12 16a3 3 0 1 0 0-6 3 3 0 0 0 0 6z'],16),make('span',msg('实况拍立得'),'cabin-fab-label'));
+setText(postcardBtn,msg('实况拍立得'),'title');
+setText(postcardBtn,msg('实况拍立得'),'aria-label');
 
 const art=make('div',null,'cabin-diorama cabin3d-stage');stage.append(art);
+const polaroidFlash=make('div',null,'cabin-polaroid-flash');polaroidFlash.setAttribute('aria-hidden','true');art.append(polaroidFlash);
+art.append(ambientBar);
 const loading=make('p',msg('正在搭建 3D 小屋…'),'cabin3d-loading');art.append(loading);
 const hover=make('span','','cabin3d-hover');hover.hidden=true;art.append(hover);
 const cozyExitBtn=make('button',msg('退出挂机'),'wb-button tiny cabin-cozy-exit');cozyExitBtn.type='button';cozyExitBtn.hidden=true;art.append(cozyExitBtn);
@@ -93,6 +136,8 @@ function setCozyCamMode(next){
  if(cozyCam){
   inspector.close();
   closePortalPeek();
+  setScenePopoverOpen(false);
+  setJournalOpen(false);
   timeline.setOpen(false);
  }
  room3d?.setCozyCam(cozyCam);
@@ -154,6 +199,9 @@ async function captureAndShowPolaroid(noteOverride=''){
    dataUrl=res?.data_url||'';
   }
   if(dataUrl){
+   polaroidFlash.classList.remove('is-flashing');
+   void polaroidFlash.offsetWidth;
+   polaroidFlash.classList.add('is-flashing');
    postcardImg.src=dataUrl;
    postcardDownload.href=dataUrl;
    postcardDownload.download=`cabin-postcard-${Date.now()}.png`;
@@ -269,7 +317,7 @@ async function runCabinQuickAction(kind,payload={}){
 
 const inspector=createCabinInspector(art,{
  onResetFocus:()=>room3d?.clearFocus(),
- onOpenDrawer:viewName=>{room3d?.clearFocus();document.dispatchEvent(new CustomEvent('cabin-open-view',{detail:viewName}));},
+ onOpenDrawer:viewName=>{room3d?.clearFocus();document.dispatchEvent(new CustomEvent('cabin-open-view',{detail:{view:viewName,drawer:true}}));},
  onCycleTime:cycleTimeMode,
  onQuickAction:runCabinQuickAction,
 });
@@ -284,7 +332,7 @@ const bubbles=createCabinBubbles(art,{
    room3d?.pulseInspect?.(k);
    inspector.open(k,snapshot,room3d?.diagnostics());
   }else{
-   document.dispatchEvent(new CustomEvent('cabin-open-view',{detail:target}));
+   document.dispatchEvent(new CustomEvent('cabin-open-view',{detail:{view:target,drawer:true}}));
   }
  },
 });
@@ -383,6 +431,7 @@ function buildReplayState(keyframe,index=0,historyFrames=[]){
   },
  };
  const replaySnapshot={
+  cabinReplayActivity:rawPose.startsWith('cabin_')?rawPose:null,
   ...(snapshot||{}),
   isReplay:true,
   server_time:Number.isFinite(keyframe.occurred_at)?keyframe.occurred_at:(snapshot?.server_time||Date.now()/1000),
@@ -411,7 +460,7 @@ function buildReplayState(keyframe,index=0,historyFrames=[]){
    destination:away?(keyframe.place_name||'外出途中'):null,
    place_id:targetRoom?.place_id||baseScene.place_id||'',
    place_name:keyframe.place_name||baseScene.place_name||'',
-   room_id:away?null:(targetRoom?.id||baseScene.room_id||''),
+   room_id:away||(keyframe.location==='garden'&&!gardenRoom&&rawPose.startsWith('cabin_'))?null:(targetRoom?.id||baseScene.room_id||''),
    room_name:away?'':(targetRoom?.name||baseScene.room_name||''),
    room_design:replayRoomDesign,
    room_designs:[replayRoomDesign],
@@ -434,6 +483,7 @@ const timeline=createCabinTimeline(art,{
    const {replaySnapshot,replayRoomDesign,replayEnv}=buildReplayState(keyframe,index,keyframes);
    activeReplaySnapshot=replaySnapshot;
    const applyPreview=()=>{
+    stylePicker.replay(keyframe.cabin_style||'cottage');
     if(Number.isFinite(keyframe.occurred_at)){
      room3d?.setTimeMode('auto');
      room3d?.setEnvironment({...replayEnv,current:{...replayEnv.current,is_day:keyframe.timeMode!=='night'}},keyframe.occurred_at,snapshot?.scene?.items||[]);
@@ -452,6 +502,7 @@ const timeline=createCabinTimeline(art,{
   }else{
    activeReplaySnapshot=null;
    const restoreLive=()=>{
+    stylePicker.replay(null);
     room3d?.setTimeMode(TIME_MODES[timeIndex][0]);
     room3d?.setWeatherOverride(null);
     if(snapshot)applySnapshotTo3D(snapshot);
@@ -529,6 +580,8 @@ function buildPortalRows(key){
  const rows=[];
  rows.push(['接入状态',cap?labels[cap.state]||cap.state:'读取中…']);
  if(cap?.state==='error'&&presenceError)rows.push(['读取失败',presenceError]);
+ if(cap?.badge?.label)rows.push(['当前徽标',cap.badge.label]);
+ if(cap?.pulse?.headline)rows.push([msg('实时动态'),cap.pulse.headline]);
  if(comp.summary)rows.push(['实时快览',comp.summary]);
  if(key==='memory'){
   rows.push(['待核对冲突',String(comp.conflicts??0)+' 项'+(comp.bookmark_glow?' · 书签微光提醒中':'')]);
@@ -581,6 +634,8 @@ async function openPortalPeek(rawKey,{fromCanvas=false}={}){
  if(busy||!key)return;
  cabinAudio.playTap('wood');
  inspector.close();
+ setScenePopoverOpen(false);
+ setJournalOpen(false);
  if(activePortalKey&&activePortalKey!==key){
   controls.get(activePortalKey)?.button.classList.remove('is-opening','is-highlighted');
   const previousTarget=target3dKey(activePortalKey);
@@ -611,18 +666,236 @@ async function openPortalPeek(rawKey,{fromCanvas=false}={}){
  }
 }
 
-const footer=make('div',null,'cabin-footer');footer.append(make('span',msg('拖动旋转 · 双指或滚轮缩放 · 点选物件')));
-const map=make('button',msg('查看房间与地图'),'wb-button tiny');map.type='button';map.addEventListener('click',()=>$('tab-map').click());
-const reset=make('button',msg('重置视角'),'wb-button tiny');reset.type='button';reset.id='cabinResetView';reset.addEventListener('click',()=>{if(cozyCam)setCozyCamMode(false);inspector.close();closePortalPeek();room3d?.resetView();});
-const fx=make('button','光效动效','wb-button tiny');fx.type='button';fx.id='cabinEffects';fx.setAttribute('aria-pressed','true');let fxOn=true;
+const map=make('button',msg('查看房间与地图'),'wb-button tiny');map.type='button';map.id='cabinOpenMapBtn';map.addEventListener('click',()=>{setScenePopoverOpen(false);$('tab-map')?.click();});
+const reset=make('button',msg('重置视角'),'wb-button tiny cabin-reset-link');reset.type='button';reset.id='cabinResetView';reset.addEventListener('click',()=>{if(cozyCam)setCozyCamMode(false);inspector.close();closePortalPeek();room3d?.resetView();});
+const fx=make('button','光效动效','wb-button tiny cabin-pop-toggle');fx.type='button';fx.id='cabinEffects';fx.setAttribute('aria-pressed','true');let fxOn=true;
 fx.addEventListener('click',()=>{fxOn=!fxOn;fx.setAttribute('aria-pressed',String(fxOn));room3d?.setEffects(fxOn);});
-footer.append(reset,fx,map);stage.append(footer);
 const fxState={particle:.9,glow:.45,motion:2};
 
+/* Bottom-right: Quick Polaroid + Scene Controls Popover */
+const sceneControlsWrap=make('div',null,'cabin-stage-controls');
+const scenePopHolder=make('div',null,'cabin-scene-popover-wrap');
+const sceneControlsBtn=make('button',null,'wb-button tiny cabin-scene-trigger');
+sceneControlsBtn.type='button';sceneControlsBtn.id='cabinSceneControlsBtn';
+sceneControlsBtn.setAttribute('aria-expanded','false');
+sceneControlsBtn.setAttribute('aria-controls','cabinScenePopover');
+sceneControlsBtn.append(
+ svgIcon(['M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z','M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z'],15),
+ make('span',msg('场景控制'))
+);
+const scenePopover=make('div',null,'cabin-scene-popover');
+scenePopover.id='cabinScenePopover';scenePopover.hidden=true;
+scenePopover.setAttribute('role','dialog');
+setText(scenePopover,msg('镜头与氛围'),'aria-label');
+
+const popHead=make('div',null,'cabin-pop-head');
+popHead.append(make('strong',msg('镜头与氛围')),reset);
+
+const popCamSec=make('div',null,'cabin-pop-section');
+popCamSec.append(make('span',msg('镜头视角'),'cabin-pop-label'),viewbar);
+
+const popTimeSec=make('div',null,'cabin-pop-section');
+const popTimeHead=make('div',null,'cabin-pop-subhead');
+popTimeHead.append(make('span',msg('时段光影'),'cabin-pop-label'),timeBtn);
+popTimeSec.append(popTimeHead,timeChipRow);
+
+const popToggleSec=make('div',null,'cabin-pop-toggles');
+popToggleSec.append(pixelBtn,timelineBtn,audioBtn,cozyBtn,fx);
+
+const popFoot=make('div',null,'cabin-pop-foot');
+popFoot.append(map,make('small',msg('拖动旋转 · 双指或滚轮缩放 · 点选物件')));
+
+scenePopover.append(popHead,stylePicker.root,popCamSec,popTimeSec,popToggleSec,popFoot);
+scenePopHolder.append(sceneControlsBtn,scenePopover);
+sceneControlsWrap.append(postcardBtn,scenePopHolder);
+stage.append(sceneControlsWrap);
+
+function setScenePopoverOpen(next){
+ const open=Boolean(next);
+ scenePopover.hidden=!open;
+ sceneControlsBtn.setAttribute('aria-expanded',String(open));
+ if(open){
+  inspector.close();
+  closePortalPeek();
+  setJournalOpen(false);
+ }
+}
+sceneControlsBtn.addEventListener('click',()=>setScenePopoverOpen(scenePopover.hidden));
+
+/* Left Slide-Over Drawer: Today's Living Journal (world_journal_feed) */
+const journalDrawer=make('aside',null,'cabin-journal-drawer');
+journalDrawer.id='cabinJournalDrawer';journalDrawer.hidden=true;
+journalDrawer.setAttribute('role','region');
+setText(journalDrawer,msg('今日生活手账'),'aria-label');
+const journalHead=make('div',null,'cabin-journal-head');
+const journalHeadCopy=make('div',null,'cabin-journal-head-copy');
+journalHeadCopy.append(make('strong',msg('今日生活手账')),make('small',msg('跨插件自动聚合 · 点击条目直达来源')));
+const journalHeadBtns=make('div',null,'cabin-journal-head-btns');
+const journalRefreshBtn=make('button',null,'wb-button tiny cabin-icon-btn');
+journalRefreshBtn.type='button';journalRefreshBtn.id='cabinJournalRefresh';
+setText(journalRefreshBtn,msg('刷新手账'),'title');setText(journalRefreshBtn,msg('刷新手账'),'aria-label');
+journalRefreshBtn.append(svgIcon(['M21 12a9 9 0 1 1-2.64-6.36','M21 3v6h-6'],14));
+const journalCloseBtn=make('button','×','wb-button tiny cabin-icon-btn');
+journalCloseBtn.type='button';journalCloseBtn.id='cabinJournalClose';
+setText(journalCloseBtn,msg('关闭'),'aria-label');
+journalHeadBtns.append(journalRefreshBtn,journalCloseBtn);
+journalHead.append(journalHeadCopy,journalHeadBtns);
+
+const journalFilters=make('div',null,'cabin-journal-filters');
+journalFilters.setAttribute('role','group');
+const journalStatus=make('p','','cabin-journal-status');journalStatus.id='cabinJournalStatus';journalStatus.setAttribute('role','status');
+const journalList=make('div',null,'cabin-journal-list');journalList.id='cabinJournalList';
+journalDrawer.append(journalHead,journalFilters,journalStatus,journalList);
+stage.append(journalDrawer);
+
+let journalEvents=[];
+let journalFilter='all';
+let journalSerial=0;
+let journalCount=0;
+const JOURNAL_CAT_LABELS={
+ all:'全部',
+ world:'群间世界',
+ horizons:'群间见闻',
+ learning:'群间学习',
+ memory:'群间记忆',
+ games:'群间游戏',
+ visual_media:'视觉工坊',
+ group_chronicle:'群文化沿革',
+};
+
+function updateJournalPill(){
+ const pill=$('cabinJournalPill');
+ if(!pill)return;
+ const avatar=$('cabinJournalAvatar');
+ const mood=$('cabinJournalMood');
+ const meta=$('cabinJournalMeta');
+ const charName=snapshot?.character?.name||snapshot?.actor?.name||'';
+ if(avatar)avatar.textContent=(charName.trim()[0]||'世');
+ const lifeVal=lifeText.textContent||tr('等待当前世界状态');
+ const placeVal=placeText.textContent||'';
+ const moodStr=charName?`${charName} · ${lifeVal}`:(placeVal?`${placeVal} · ${lifeVal}`:lifeVal);
+ if(mood)mood.textContent=moodStr;
+ const wxVal=weatherText.textContent||tr('天气暂不可用');
+ const countPart=journalCount>0?` · ${tr('今日 {0} 条手账',journalCount)} ▸`:` · ${tr('今日生活手账')} ▸`;
+ if(meta)meta.textContent=wxVal+countPart;
+}
+
+function renderJournalFilters(){
+ const present=new Set(['all']);
+ for(const ev of journalEvents)if(ev.category)present.add(ev.category);
+ journalFilters.replaceChildren();
+ for(const cat of ['all','world','horizons','learning','memory','games','visual_media','group_chronicle']){
+  if(!present.has(cat))continue;
+  const chip=make('button',msg(JOURNAL_CAT_LABELS[cat]||cat),'cabin-journal-chip');
+  chip.type='button';
+  chip.setAttribute('aria-pressed',String(journalFilter===cat));
+  chip.addEventListener('click',()=>{journalFilter=cat;renderJournalFilters();renderJournalList();});
+  journalFilters.append(chip);
+ }
+}
+
+async function openJournalEvent(ev){
+ if(!ev)return;
+ if(!ev.target_plugin||ev.target_plugin==='astrbot_plugin_dynamics_world'){
+  setJournalOpen(false);
+  const route=ev.target_route||'activity';
+  document.dispatchEvent(new CustomEvent('cabin-open-view',{detail:{view:route,drawer:true}}));
+  return;
+ }
+ const navigation=window.DynamicsSeriesNavigation;
+ if(!navigation||typeof navigation.open!=='function'){
+  feedback(message,msg('请从 AstrBot 控制台打开'),'error');
+  return;
+ }
+ try{
+  setJournalOpen(false);
+  const opened=await navigation.open(ev.target_plugin);
+  if(!opened)feedback(message,msg('已取消跳转，保留当前编辑。'));
+ }catch(err){
+  feedback(message,err?.message||msg('未能打开面板，请稍后重试。'),'error');
+ }
+}
+
+function renderJournalList(){
+ const filtered=journalFilter==='all'?journalEvents:journalEvents.filter(ev=>ev.category===journalFilter);
+ journalList.replaceChildren();
+ if(!filtered.length){
+  const empty=make('div',null,'cabin-journal-empty');
+  empty.append(
+   svgIcon(['M4 19.5A2.5 2.5 0 0 1 6.5 17H20','M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z'],26),
+   make('p',msg('今日尚无手账记录，角色日常与伴生动态会自动汇入这里。'))
+  );
+  journalList.append(empty);
+  return;
+ }
+ for(const ev of filtered){
+  const card=make('button',null,'cabin-journal-item');
+  card.type='button';
+  card.dataset.journalCategory=ev.category||'world';
+  const top=make('div',null,'cabin-journal-item-top');
+  const tag=make('span',ev.source_label||JOURNAL_CAT_LABELS[ev.category]||'群间世界','cabin-journal-tag');
+  tag.dataset.tone=ev.tone||'info';
+  const ts=make('span',ev.time_label||'','cabin-journal-time');
+  top.append(tag,ts);
+  const headingNode=make('strong',ev.title||'','cabin-journal-item-title');
+  card.append(top,headingNode);
+  if(ev.subtitle)card.append(make('p',ev.subtitle,'cabin-journal-item-sub'));
+  card.addEventListener('click',()=>void openJournalEvent(ev));
+  journalList.append(card);
+ }
+}
+
+async function loadJournalFeed({quiet=false}={}){
+ const own=++journalSerial;
+ const scopeVal=$('dwScope')?.value?.trim()||'';
+ if(!quiet){
+  setText(journalStatus,msg('正在聚合今日手账…'));
+  journalStatus.hidden=false;
+ }
+ try{
+  const data=await apiGet('journal_feed',{scope:scopeVal,date:'today',limit:30});
+  if(own!==journalSerial)return;
+  journalEvents=Array.isArray(data?.events)?data.events:[];
+  journalCount=journalEvents.length;
+  if(journalFilter!=='all'&&!journalEvents.some(ev=>ev.category===journalFilter))journalFilter='all';
+  journalStatus.textContent='';journalStatus.hidden=true;
+  renderJournalFilters();
+  renderJournalList();
+  updateJournalPill();
+ }catch(err){
+  if(own!==journalSerial)return;
+  if(!quiet){
+   journalStatus.textContent=err?.message||tr('读取失败');
+   journalStatus.hidden=false;
+  }
+ }
+}
+
+function setJournalOpen(next){
+ const open=Boolean(next);
+ journalDrawer.hidden=!open;
+ const pill=$('cabinJournalPill');
+ if(pill)pill.setAttribute('aria-expanded',String(open));
+ if(open){
+  setScenePopoverOpen(false);
+  inspector.close();
+  closePortalPeek();
+  void loadJournalFeed();
+  journalCloseBtn.focus({preventScroll:true});
+ }
+}
+$('cabinJournalPill')?.addEventListener('click',()=>setJournalOpen(journalDrawer.hidden));
+journalCloseBtn.addEventListener('click',()=>{setJournalOpen(false);$('cabinJournalPill')?.focus({preventScroll:true});});
+journalRefreshBtn.addEventListener('click',()=>void loadJournalFeed());
+
+/* Centered Bottom Floating Dock: 6 Cabin Furniture Portals */
 const shortcuts=make('nav',null,'cabin-portals');setText(shortcuts,msg('小屋入口'),'aria-label');shortcuts.append(make('p',msg('小屋入口'),'cabin-portals-title'));layout.append(stage,shortcuts);host.append(layout);
 for(const [key,object,label,id,mark] of portals){
- const button=make('button',null,'cabin-portal');button.type='button';button.dataset.cabinLink=key;
- const copy=make('span');copy.append(make('strong',msg(object)));const state=make('small',msg('加载中…'));copy.append(state);button.append(make('span',mark,'cabin-portal-mark'),copy,make('span','↗','cabin-portal-arrow'));
+ const button=make('button',null,'cabin-portal');button.type='button';button.dataset.cabinLink=key;button.dataset.portal=key;
+ const badge=make('span','','cabin-portal-badge');badge.hidden=true;
+ const iconWrap=make('span',null,'cabin-portal-icon');iconWrap.append(svgIcon(PORTAL_ICON_PATHS[key]||PORTAL_ICON_PATHS.memory,18));
+ const copy=make('span',null,'cabin-portal-copy');copy.append(make('strong',msg(object)));const state=make('small',msg('加载中…'));copy.append(state);
+ button.append(badge,iconWrap,make('span',mark,'cabin-portal-mark'),copy,make('span','↗','cabin-portal-arrow'));
  setText(button,msg('{0} · {1}',msg(object),msg(label)),'aria-label');
  button.addEventListener('click',()=>openPortalPeek(key));
  const target=target3dKey(key);
@@ -632,7 +905,7 @@ for(const [key,object,label,id,mark] of portals){
   button.addEventListener('focus',()=>room3d?.focus(target));
   button.addEventListener('blur',()=>{if(activePortalKey!==key)room3d?.focus(null);});
  }
- shortcuts.append(button);controls.set(key,{button,state,id,label,object});
+ shortcuts.append(button);controls.set(key,{button,state,badge,id,label,object});
 }
 
 const live=make('div',null,'cabin-live'),life=make('div'),weather=make('div');life.append(make('small',msg('此刻的生活')));weather.append(make('small',msg('窗外天气')));const lifeText=make('strong',msg('等待当前世界状态')),placeText=make('small',''),weatherText=make('strong',msg('天气暂不可用'));life.append(lifeText,placeText);weather.append(weatherText);live.append(life,weather);layout.append(live);
@@ -657,6 +930,22 @@ function syncStageBackdrop(){
  }
 }
 
+function resolveDockBadge(key,value,comp){
+ const b=value?.badge;
+ if(b&&typeof b==='object'){
+  const count=Number(b.count)||0;
+  if(count>0||b.tone==='danger'){
+   return {count:count>99?'99+':String(count||'!' ),tone:b.tone||'accent',label:b.label||''};
+  }
+ }
+ if(key==='learning'&&Number(comp?.pending)>0)return {count:String(comp.pending),tone:'warm',label:''};
+ if(key==='horizons'&&Number(comp?.pending_reviews)>0)return {count:String(comp.pending_reviews),tone:'accent',label:''};
+ if(key==='memory'&&Number(comp?.conflicts)>0)return {count:String(comp.conflicts),tone:'danger',label:''};
+ if(key==='visual'&&Number(comp?.running)>0)return {count:String(comp.running),tone:'info',label:''};
+ if(key==='chat'&&Number(comp?.pending_outreach)>0)return {count:String(comp.pending_outreach),tone:'warm',label:''};
+ return null;
+}
+
 function paintControls(){
  room3d?.setAvailability(capabilities);
  const comps=snapshot?.companions||companionCache||{};
@@ -667,6 +956,22 @@ function paintControls(){
   control.button.dataset.canOpen=String(Boolean(value?.can_open));
   control.button.dataset.glow=String(Boolean(comp?.glow||comp?.bookmark_glow));
   setText(control.state,msg('{0} · {1}',msg(control.label),msg(value?labels[value.state]||'未知':'加载中…')));
+  const badgeInfo=resolveDockBadge(key,value,comp);
+  if(control.badge){
+   if(badgeInfo){
+    control.badge.textContent=badgeInfo.count;
+    control.badge.dataset.tone=badgeInfo.tone;
+    control.badge.hidden=false;
+   }else{
+    control.badge.textContent='';
+    delete control.badge.dataset.tone;
+    control.badge.hidden=true;
+   }
+  }
+  const tipParts=[`${tr(control.object)} · ${tr(control.label)}`];
+  if(value?.badge?.label)tipParts.push(value.badge.label);
+  else if(value?.pulse?.headline)tipParts.push(value.pulse.headline);
+  control.button.title=tipParts.join(' — ');
  }
  if(activePortalKey)renderPortalPeek(activePortalKey);
 }
@@ -711,6 +1016,7 @@ function applySnapshotTo3D(data){
 }
 
 function renderWorld(data){
+ stylePicker.observe(lastScope,data?.scene);
  if(!data)return;
  data.received_at_ms=data.received_at_ms||Date.now();
  snapshot=data;
@@ -740,6 +1046,7 @@ function renderWorld(data){
  const solar=data.ecology?.season?.solar_term;
  const wxParts=[solar,current.label||'',current.temperature!=null?current.temperature+' °C':''].filter(Boolean);
  setText(weatherText,environment.available?(wxParts.join(' · ')||msg('天气暂不可用')):(solar?`${solar} · 天气待接入`:msg('天气暂不可用')));
+ updateJournalPill();
 
  const archived=scene.archived_items||[];archive.hidden=!archived.length;
  const key=lastScope+'|'+JSON.stringify(archived.map(item=>[item.id,item.documents?.length,item.notes?.length]));
@@ -790,17 +1097,23 @@ function resetScopeState(scope){
  setText(lifeText,msg(scope?'等待当前世界状态':'请先选择会话'));
  setText(placeText,'');
  setText(weatherText,msg('天气暂不可用'));
+ journalEvents=[];journalCount=0;journalFilter='all';
+ setJournalOpen(false);setScenePopoverOpen(false);
+ updateJournalPill();
 }
 
 async function refresh({force=false}={}){
  if(busy)return;
  const scope=$('dwScope').value.trim();
+ void stylePicker.bind(scope,force);
  const scopeChanged=scope!==lastScope;
  if(scopeChanged)resetScopeState(scope);
  void refreshPresence(force);
+ void loadJournalFeed({quiet:true});
  if(!scope){
   if(worldStream.scope)await worldStream.setScope('');
   setText(lifeText,msg('请先选择会话'));
+  updateJournalPill();
   return;
  }
  if(scopeChanged||worldStream.scope!==scope){
@@ -815,11 +1128,12 @@ async function refresh({force=false}={}){
 worldStream.subscribe(data=>{
  const scope=$('dwScope')?.value?.trim()||'';
  if(scope!==worldStream.scope)return;
- if(!data||scope!==lastScope||
-   (snapshot?.revisions?.binding!==undefined&&snapshot.revisions.binding!==data.revisions?.binding))resetScopeState(scope);
+ const bindingChanged=Boolean(data&&snapshot?.revisions?.binding!==undefined&&snapshot.revisions.binding!==data.revisions?.binding);
+ if(!data||scope!==lastScope||bindingChanged)resetScopeState(scope);
  if(!data)return;
  if(visible)renderWorld(data);
  else snapshot=data;
+ if(bindingChanged)void loadJournalFeed({quiet:true});
 });
 
 worldStream.onError(err=>{
@@ -830,11 +1144,12 @@ worldStream.onError(err=>{
 });
 
 paintControls();
-document.addEventListener('world-view',event=>{
- const next=event.detail||'';
- visible=next==='cabin'||STAGE_DRAWER_VIEWS.has(next);
- if(!visible){inspector.close();closePortalPeek();if(cozyCam)setCozyCamMode(false);}
- bubbles.setHidden(STAGE_DRAWER_VIEWS.has(next));
+document.addEventListener('world-view',()=>{
+ const mode=document.body.dataset.stageMode||'workbench';
+ const isDrawer=mode==='cabin-drawer';
+ visible=mode==='cabin'||isDrawer;
+ if(!visible){inspector.close();closePortalPeek();setScenePopoverOpen(false);setJournalOpen(false);if(cozyCam)setCozyCamMode(false);}
+ bubbles.setHidden(isDrawer);
  room3d?.setActive(visible&&!document.hidden&&!causalReading);
  if(visible){ensure3D();void refresh();}
 });
@@ -863,7 +1178,7 @@ async function ensure3D(){
  setText(loading,msg('正在搭建 3D 小屋…'));
  delete loading.dataset.uiState;
  initializing=(async()=>{try{
-  const {createCabin3D}=await withTimeout(import('./cabin3d.min.js?v=cabin.2'));
+  const {createCabin3D}=await withTimeout(import('./cabin3d.min.js?v=homes.1'));
   room3d=createCabin3D(art,{
    onSelect:(rawKey,opts)=>openPortalPeek(portalKeyFrom3d(rawKey)||rawKey,opts),
    onHover:rawKey=>{
@@ -877,6 +1192,8 @@ async function ensure3D(){
     if(key){
      cabinAudio.playTap(key==='shelf'?'paper':'wood');
      closePortalPeek();
+     setScenePopoverOpen(false);
+     setJournalOpen(false);
      room3d.focusTarget(key);
      room3d.pulseInspect?.(key);
      inspector.open(key,timeline.isPreviewing()&&activeReplaySnapshot?activeReplaySnapshot:snapshot,room3d.diagnostics());
@@ -893,6 +1210,7 @@ async function ensure3D(){
     updateHoverPill();
    },
   });
+  stylePicker.attach();
   art.cabin3D=room3d;setText(room3d.canvas,msg('3D 小屋：方向键旋转，加减键缩放，Home 重置视角'),'aria-label');
   room3d.onFrame(()=>bubbles.syncPosition(room3d));
   room3d.setAvailability(capabilities);room3d.setView(cameraView);
@@ -903,6 +1221,7 @@ async function ensure3D(){
   room3d.setActive(visible&&!document.hidden&&!causalReading);room3d.setEffects(fxOn);room3d.setParticleAmount(fxState.particle);room3d.setGlow(fxState.glow);room3d.setMotion(fxState.motion);
   avatarUI.attach(room3d);
   for(const b of viewbar.children)b.disabled=false;
+  for(const c of timeChipButtons)c.disabled=false;
   pixelBtn.disabled=false;timeBtn.disabled=false;timelineBtn.disabled=false;cozyBtn.disabled=false;
   loading.hidden=true;
  }catch(error){
@@ -915,6 +1234,8 @@ async function ensure3D(){
 document.addEventListener('keydown',event=>{
  if(event.key==='Escape'&&visible){
   if(cozyCam){setCozyCamMode(false);return;}
+  if(!scenePopover.hidden){setScenePopoverOpen(false);sceneControlsBtn.focus({preventScroll:true});return;}
+  if(!journalDrawer.hidden){setJournalOpen(false);$('cabinJournalPill')?.focus({preventScroll:true});return;}
   if(inspector.activeKey||activePortalKey){
    inspector.close();
    closePortalPeek();
@@ -925,13 +1246,30 @@ document.addEventListener('keydown',event=>{
  }
 });
 document.addEventListener('click',event=>{
- if(!visible||(!inspector.activeKey&&!activePortalKey))return;
+ if(!visible)return;
  const path=event.composedPath();
- if([art,shortcuts,viewRow,footer].some(container=>path.includes(container)))return;
+ if(!scenePopover.hidden&&!path.includes(scenePopHolder))setScenePopoverOpen(false);
+ if(!journalDrawer.hidden&&!path.includes(journalDrawer)&&!path.includes($('cabinJournalPill')))setJournalOpen(false);
+ if(!inspector.activeKey&&!activePortalKey)return;
+ if([art,shortcuts,sceneControlsWrap,journalDrawer].some(container=>path.includes(container)))return;
  inspector.close();
  closePortalPeek();
  room3d?.clearFocus();
  bubbles.syncPosition(room3d);
+});
+window.addEventListener('series-languagechange',()=>{
+ updateJournalPill();
+ if(!journalDrawer.hidden){renderJournalFilters();renderJournalList();}
+});
+window.addEventListener('dynamics-presence-updated',event=>{
+ const data=event.detail;
+ if(!data||!Array.isArray(data.plugins))return;
+ for(const [key,,,id] of portals){
+  capabilities.set(key,data.plugins.find(plugin=>plugin.id===id)||{can_open:false,state:'missing'});
+ }
+ presenceLoadedAt=Date.now();
+ presenceError='';
+ paintControls();
 });
 document.addEventListener('visibilitychange',()=>room3d?.setActive(visible&&!document.hidden&&!causalReading));
 window.addEventListener('pagehide',event=>{cabinAudio.dispose();if(event.persisted)room3d?.setActive(false);else room3d?.dispose();});

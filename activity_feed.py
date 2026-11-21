@@ -4,6 +4,7 @@ import base64
 import json
 import math
 
+from .cabin_life import ACTIVITIES as CABIN_ACTIVITIES
 from .creative_projects import KINDS as PROJECTS
 from .creative_projects import LABELS as PROJECT_LABELS
 from .creative_projects import STAGES
@@ -252,7 +253,10 @@ def page(engine, db, scope, *, before="", limit=30, category="all"):
             event["project_id"] = project.get("id")
             event["description"] = "已保存的进度与版本保留。"
         elif kind == "step.completed":
-            if op in PROJECTS:
+            if op in CABIN_ACTIVITIES:
+                event["title"] = CABIN_ACTIVITIES[op].label
+                event["description"] = str(result.get("summary") or CABIN_ACTIVITIES[op].record)
+            elif op in PROJECTS:
                 event["title"] = (
                     PROJECT_LABELS[op] + " · " + str(result.get("project_title", ""))
                 )

@@ -3,7 +3,7 @@ import {OrbitControls} from 'three/examples/jsm/controls/OrbitControls.js';
 
 const SHOT_PRESETS = {
   garden: {target: [0, 1.0, 1.2], offset: [17, 15.3, 23.15], view: 'garden'},
-  room: {target: [0, 1.0, 0], offset: [10.8, 9.0, 13.2], view: 'room'},
+  room: {target: [0, 1.72, 0], offset: [9.8, 8.5, 14.4], view: 'room'},
   room_center: {target: [-0.2, 1.05, 0.2], offset: [9.4, 7.6, 11.4], view: 'room'},
   desk: {target: [-0.1, 1.32, -1.25], offset: [5.2, 3.8, 6.8], view: 'room'},
   kitchen: {target: [-3.4, 1.02, 2.35], offset: [6.4, 4.5, 6.8], view: 'room'},
@@ -12,7 +12,7 @@ const SHOT_PRESETS = {
 };
 
 export function createCabinCameraController({
-  THREE, camera, canvas, host, reducedMotion, inspectPresets, portalPresets, render, isActive, isDisposed,
+  THREE, camera, canvas, host, reducedMotion, inspectPresets, portalPresets, render, isActive, isDisposed, getStyle=()=> 'cottage',
 }) {
   const controls = new OrbitControls(camera, canvas);
   controls.target.set(0, 1, 1.2);
@@ -29,10 +29,17 @@ export function createCabinCameraController({
   controls.zoomSpeed = .8;
   controls.update();
 
-  let fitFactor = 1, view = 'garden', cozyCam = false, inspectedKey = null;
+  let fitFactor = 1, fitLimit = Infinity, view = 'garden', cozyCam = false, inspectedKey = null;
   let glideFrame = 0, dampingFrame = 0, interacting = false, dampingUntil = 0;
   const cozyTarget = new THREE.Vector3(), cozyDesiredPos = new THREE.Vector3();
 
+  // Widen the lens to fit narrow screens. Moving the camera backwards would
+  // add artificial atmospheric fog to a clear day and clip the garden at maxDistance.
+  function frameLens(limit) {
+    fitLimit=limit;
+    camera.zoom=1/Math.min(fitFactor,fitLimit);
+    camera.updateProjectionMatrix();
+  }
   function stopGlide() {
     if (glideFrame) {cancelAnimationFrame(glideFrame); glideFrame = 0;}
   }
@@ -79,9 +86,10 @@ export function createCabinCameraController({
     const preset = inspectPresets[key] || portalPresets[key];
     if (!preset) return false;
     inspectedKey = key;
+    frameLens(1.22);
     controls.minDistance = 3.6;
     const tgt = new THREE.Vector3(...preset.target);
-    const pos = new THREE.Vector3(...preset.offset).multiplyScalar(Math.min(1.22, fitFactor)).add(tgt);
+    const pos = new THREE.Vector3(...preset.offset).add(tgt);
     glideCamera(tgt, pos, reduced);
     return true;
   }
@@ -89,9 +97,10 @@ export function createCabinCameraController({
   function clearFocus(reduced = false) {
     inspectedKey = null;
     controls.minDistance = 10;
-    const outdoor = view === 'garden';
-    const tgt = new THREE.Vector3(0, 1, outdoor ? 1.2 : 0);
-    const pos = new THREE.Vector3(...(outdoor ? [17, 15.3, 23.15] : [10.8, 9, 13.2])).multiplyScalar(fitFactor).add(tgt);
+    const preset=SHOT_PRESETS[view];
+    const tgt = new THREE.Vector3(...preset.target);
+    frameLens(Infinity);
+    const pos = new THREE.Vector3(...preset.offset).add(tgt);
     glideCamera(tgt, pos, reduced);
   }
 
@@ -99,9 +108,10 @@ export function createCabinCameraController({
     stopGlide();
     inspectedKey = null;
     controls.minDistance = 10;
-    const outdoor = view === 'garden';
-    controls.target.set(0, 1, outdoor ? 1.2 : 0);
-    camera.position.set(...(outdoor ? [17, 15.3, 23.15] : [10.8, 9, 13.2])).multiplyScalar(fitFactor).add(controls.target);
+    const preset=SHOT_PRESETS[view];
+    controls.target.set(...preset.target);
+    frameLens(Infinity);
+    camera.position.set(...preset.offset).add(controls.target);
     controls.update();
     render();
   }
@@ -120,7 +130,9 @@ export function createCabinCameraController({
     inspectedKey = null;
     controls.minDistance = 3.6;
     const tgt = new THREE.Vector3(...preset.target);
-    const pos = new THREE.Vector3(...preset.offset).multiplyScalar(Math.min(1.24, fitFactor)).add(tgt);
+    if(getStyle()!=='cottage' && ['desk','kitchen','bed'].includes(focus))tgt.set(...inspectPresets[focus].target);
+    frameLens(1.24);
+    const pos = new THREE.Vector3(...preset.offset).add(tgt);
     glideCamera(tgt, pos, immediate);
     return {shot_mode: mode, focus};
   }
@@ -135,10 +147,8 @@ export function createCabinCameraController({
 
   function updateFitAspect(width, height) {
     camera.aspect = width / height;
-    const nextFit = Math.min(1.55, Math.max(1, 1.25 / camera.aspect));
-    camera.position.sub(controls.target).multiplyScalar(nextFit / fitFactor).add(controls.target);
-    fitFactor = nextFit;
-    camera.updateProjectionMatrix();
+    fitFactor = Math.min(1.78, Math.max(1, 1.25 / camera.aspect));
+    frameLens(fitLimit);
     controls.update();
   }
 
@@ -151,7 +161,7 @@ export function createCabinCameraController({
       cozyTarget.set(catPos.x, catPos.y + .35, catPos.z);
     }
     const sway = Math.sin(seconds * .085) * .38;
-    const distScale = (avatarDiag?.projection?.location === 'room' ? 11.2 : 14.8) * Math.min(1.25, fitFactor);
+    const distScale = avatarDiag?.projection?.location === 'room' ? 11.2 : 14.8;
     cozyDesiredPos.set(
       cozyTarget.x + Math.sin(.52 + sway) * distScale * .82,
       cozyTarget.y + distScale * .56 + Math.sin(seconds * .13) * .35,
@@ -190,7 +200,7 @@ export function createCabinCameraController({
     zoom,
     updateFitAspect,
     updateCozyCam,
-    setCozyCam(v) {cozyCam = Boolean(v); if (cozyCam) {inspectedKey = null; stopGlide();}},
+    setCozyCam(v) {cozyCam = Boolean(v); if (cozyCam) {inspectedKey = null; frameLens(1.25); stopGlide();} else frameLens(inspectedKey ? 1.22 : Infinity);},
     get cozyCam() {return cozyCam;},
     get view() {return view;},
     get inspectedKey() {return inspectedKey;},

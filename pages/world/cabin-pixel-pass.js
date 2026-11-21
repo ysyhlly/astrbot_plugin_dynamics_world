@@ -78,7 +78,7 @@ void main(){
  float sil=step(0.08,max(max(texel.a-aL,texel.a-aR),max(texel.a-aU,texel.a-aD)));
  float maxJump=max(max(dL-dC,dR-dC),max(dU-dC,dD-dC));
  float jumpEdge=smoothstep(dC*0.045+0.09,dC*0.09+0.24,maxJump);
- float edge=max(sil*0.85,jumpEdge*0.72);
+ float edge=max(sil*0.76,jumpEdge*0.54);
 
  // Concave crease & convex pixel highlight from depth laplacian.
  float lap=(dL+dR+dU+dD)-4.0*dC;
@@ -96,14 +96,15 @@ void main(){
  vec2 m=mod(cell,2.0);
  float bayer=(m.x<0.5?(m.y<0.5?0.0:2.0):(m.y<0.5?3.0:1.0))/4.0-0.375;
  float levels=22.0;
- outCol.rgb=clamp(floor(outCol.rgb*levels+0.5+bayer*0.48)/levels,0.0,1.0);
+ outCol.rgb=clamp(floor(outCol.rgb*levels+0.5+bayer*0.24)/levels,0.0,1.0);
  gl_FragColor=outCol;
 }`;
 
 export function createPixelPass(renderer,camera,{pixelSize=3}={}){
  let enabled=false,width=320,height=200,target=null,quad=null,material=null,failed=false;
  function ensureTarget(cssW,cssH){
-  const w=Math.max(96,Math.round(cssW/pixelSize)),h=Math.max(72,Math.round(cssH/pixelSize));
+  const cellSize=cssW<550?Math.min(1.5,pixelSize):pixelSize;
+  const w=Math.max(96,Math.round(cssW/cellSize)),h=Math.max(72,Math.round(cssH/cellSize));
   if(target&&w===width&&h===height)return;
   width=w;height=h;
   if(!target){

@@ -1,4 +1,6 @@
 import {BED_PLACEMENTS, DESK_PLACEMENTS, furniturePoint} from './cabin-layout.js';
+import {BED_FRAME,BED_SEAT,BED_SLEEP,DEFAULT_BODY,FLOOR_Y,bedFootprint,clearBedFloor,floorWalk,insideBed} from './cabin-bed.js';
+import {cabinPlan,relocatePoint} from './cabin-plans.js';
 
 // The cabin illustration provides a position for each room and action pose.
 // Anchors align with the furniture: desk chair, bed edge, dining stool, kitchen
@@ -9,9 +11,6 @@ const BASE_ANCHORS = {
     idle: [1.5, 0.13, 1.5],
     read: [-1.75, 0.13, 0.75],
     write: [0, 0.38, 0.22],
-    rest: [-2.13, 0.49, 0.8],
-    game: [-2.13, 0.49, 0.8],
-    sleep: [-2.78, 0.90, 0.47],
     cook: [-3.96, 0.13, 2.50],
     eat: [2.1, 0.38, 1.85],
     wash: [-4.0, 0.13, -2.7],
@@ -42,7 +41,7 @@ const BASE_FACING = {
   garden: {water: -1.02},
 };
 
-const BED_ATTACH = {right_wall: 'C1', back_wall: 'C2', center: 'H', near_window: 'N'};
+const BED_ATTACH = {left_wall:'B', right_wall:'C1', back_wall:'C2', center:'H', near_window:'N'};
 
 const BOOKCASE_SLOT_ANCHORS = {
   left_wall: {read: [-3.28, 0.13, 0.48], yaw: -Math.PI / 2, attach: 'B'},
@@ -51,38 +50,44 @@ const BOOKCASE_SLOT_ANCHORS = {
   near_window: {read: [0.62, 0.13, -2.15], yaw: Math.PI, attach: 'N'},
 };
 
-export function resolveFurnitureLayout(data) {
+export function resolveFurnitureLayout(data,body=DEFAULT_BODY,renderedBedSlot=null,plan=cabinPlan(data?.scene?.cabin_style)) {
   const roomAnchors = {...BASE_ANCHORS.room};
   const roomFacing = {...BASE_FACING.room};
   const attachOverrides = {};
   const occupiedSlots = {};
-  let chair = DESK_PLACEMENTS.near_window.chair, bed = BED_PLACEMENTS.left_wall;
+  const original=cabinPlan('cottage');
+  let chair=plan.desks.near_window.chair,desk=plan.desks.near_window.desk;
+  if(plan.id!=='cottage'){
+    for(const [key,owner] of [['cook','kitchen'],['wash','washstand'],['eat','table'],['water','plant']]){
+      roomAnchors[key]=relocatePoint(original[owner],plan[owner],roomAnchors[key]);
+      roomFacing[key]+=plan[owner][3];
+    }
+    roomAnchors.write=furniturePoint(chair,0,.38,.04);
+    roomFacing.write=chair[3]+Math.PI;
+    attachOverrides.write=plan.desks.near_window.attach;
+  }
 
   const scene = data?.scene;
   const designs = Array.isArray(scene?.room_designs)
     ? scene.room_designs
     : (scene?.room_design ? [scene.room_design] : []);
-  const activeDesign = designs.find(d => d && d.room_id && d.room_id === scene?.room_id) || designs[0] || null;
+  const activeDesign = designs.find(d => d && d.room_id && d.room_id === scene?.room_id) || designs[0] || scene?.room_design || null;
   const furniture = Array.isArray(activeDesign?.furniture) ? activeDesign.furniture : [];
+  const bedItem=furniture.find(item=>item?.kind==='bed' && item.movable && BED_PLACEMENTS[item.position]);
+  const bedSlot=renderedBedSlot || bedItem?.position || 'left_wall', bed=plan.beds[bedSlot];
+  const obstacle=bedFootprint(bed,body.radius);
 
   for (const item of furniture) {
     if (!item || !item.kind || !item.position) continue;
     occupiedSlots[item.position] = item.kind;
     if (item.kind === 'desk' && item.movable && DESK_PLACEMENTS[item.position]) {
-      const cfg = DESK_PLACEMENTS[item.position];
+      const cfg = plan.desks[item.position];
+      desk=cfg.desk;
       chair = cfg.chair;
       roomAnchors.write = furniturePoint(chair, 0, .38, .04);
       roomFacing.write = chair[3] > 0 ? chair[3] - Math.PI : chair[3] + Math.PI;
       attachOverrides.write = cfg.attach;
       attachOverrides.desk_tea = cfg.attach;
-    } else if (item.kind === 'bed' && item.movable && BED_ATTACH[item.position]) {
-      bed = BED_PLACEMENTS[item.position];
-      roomAnchors.rest = furniturePoint(bed, 1.12, .49, .75);
-      roomAnchors.game = [...roomAnchors.rest];
-      roomAnchors.sleep = furniturePoint(bed, .47, .90, .42);
-      roomFacing.rest = roomFacing.game = bed[3] + Math.PI / 2;
-      roomFacing.sleep = bed[3];
-      attachOverrides.rest = attachOverrides.game = attachOverrides.sleep = BED_ATTACH[item.position];
     } else if (item.kind === 'bookcase' && item.movable && item.position !== 'back_wall' && BOOKCASE_SLOT_ANCHORS[item.position]) {
       const cfg = BOOKCASE_SLOT_ANCHORS[item.position];
       roomAnchors.read = [...cfg.read];
@@ -94,13 +99,32 @@ export function resolveFurnitureLayout(data) {
   if (occupiedSlots.center) {
     roomAnchors.idle = [1.85, 0.13, 2.25];
   }
+  const blockedSeats=new Set();
+  for(const [key,point] of Object.entries(roomAnchors)){
+    if(point[1]===FLOOR_Y) roomAnchors[key]=clearBedFloor(point,obstacle);
+    else if((key==='write'||key==='eat') && insideBed(point,obstacle)){
+      blockedSeats.add(key);
+      roomAnchors[key]=clearBedFloor([point[0],FLOOR_Y,point[2]],obstacle);
+    }
+  }
+  for(const key of ['rest','game','sleep']){
+    const [x,z]=key==='sleep'?BED_SLEEP:BED_SEAT;
+    roomAnchors[key]=furniturePoint(bed,x,body[key],z);
+    roomFacing[key]=bed[3]+(key==='sleep'?0:Math.PI/2);
+    attachOverrides[key]=BED_ATTACH[bedSlot];
+  }
+  attachOverrides.cat_check=BED_ATTACH[bedSlot];
+  const aisleX=BED_FRAME.halfWidth+body.radius+.08;
   return {
     anchors: {room: roomAnchors, garden: BASE_ANCHORS.garden},
     facing: {room: roomFacing, garden: BASE_FACING.garden},
     attachOverrides,
     occupiedSlots,
-    chairApproach: furniturePoint(chair, .63, .13, .04),
-    bedApproach: furniturePoint(bed, 1.48, .13, .75),
+    obstacle, blockedSeats, bedSlot, plan, desk, chair,
+    chairApproach: clearBedFloor(furniturePoint(chair,.63,FLOOR_Y,.04),obstacle),
+    bedApproach: furniturePoint(bed,aisleX,FLOOR_Y,BED_SEAT[1]),
+    catWatch: furniturePoint(bed,aisleX,FLOOR_Y,1.10),
+    catWatchYaw: bed[3]-Math.PI/2,
   };
 }
 
@@ -186,7 +210,7 @@ function actionLabel(label, expired) {
   return [label, '等待同步'].filter(Boolean).join(' · ');
 }
 
-export function projectAvatar(data, selection, nowMs = Date.now()) {
+export function projectAvatar(data, selection, nowMs = Date.now(), furnitureLayout=null) {
   const scene = data?.scene;
   const actor = data?.actor;
   const paused = scene?.paused === true || actor?.paused === true;
@@ -237,13 +261,20 @@ export function projectAvatar(data, selection, nowMs = Date.now()) {
   const garden = boundRoom(selection?.garden_room_id);
   const roomId = scene.room_id || (step?.kind === 'enter' ? step.target_id : null);
   const matchesRoom = room => placeId && room && room.id === roomId && room.place_id === placeId;
-  const location = matchesRoom(home) ? 'room' : matchesRoom(garden) ? 'garden' : null;
+  const operation=step?.kind || (data?.isReplay ? data.cabinReplayActivity : null);
+  const station=scene?.cabin_stations;
+  const specifiedOutdoor=operation==='cabin_whale_watch'||operation==='cabin_weigh_evidence';
+  const specifiedIndoor=operation==='cabin_tide_chart'||operation==='cabin_testimony';
+  const atStation=Boolean(station && station.place===placeId);
+  const location=specifiedOutdoor&&atStation&&(roomId||null)===(station.garden||null)?'garden'
+    : specifiedIndoor&&atStation&&roomId===station.room?'room'
+    : matchesRoom(home)?'room':matchesRoom(garden)?'garden':null;
   if (!location) {
     const atBoundPlace = placeId && (home?.place_id === placeId || garden?.place_id === placeId);
     return {...projection, location: placeId && (scene.room_id || !atBoundPlace) ? 'away' : 'unknown'};
   }
 
-  const layout = resolveFurnitureLayout(data);
+  const layout = furnitureLayout || resolveFurnitureLayout(data);
   const entering = step?.kind === 'enter' && step.target_id === roomId;
   const leaving = step?.kind === 'leave' && Boolean(scene.room_id);
   const walking = entering || leaving;
@@ -258,17 +289,20 @@ export function projectAvatar(data, selection, nowMs = Date.now()) {
     if (life) {pose = life.pose; source = life.source; lifeLabel = life.text;}
     else if (data?.environment?.current?.is_day === false) {pose = 'rest'; source = 'night';}
   }
-  const seated = !walking && SEATED[location].has(pose);
+  const themed=walking||asleep?null:themeAction(operation,layout,location);
+  if(themed){pose=themed.pose;source='action';}
+  const seated = !walking && (themed?.seated || SEATED[location].has(pose)) && !(location==='room' && layout.blockedSeats.has(themed?.seated?'write':pose));
   const points = layout.anchors[location];
   const from = entering ? points.threshold : points.hall;
   const to = entering ? points.hall : points.threshold;
-  const position = walking ? from.map((value, axis) => value + (to[axis] - value) * actionTime.progress) : [...points[pose]];
-  const rotationY = walking ? Math.atan2(to[0] - from[0], to[2] - from[2]) : layout.facing[location][pose] || 0;
+  const position = !walking ? [...(themed?.position || points[pose])] : location==='room' ? floorWalk(from,to,actionTime.progress,layout.obstacle)
+    : from.map((value, axis) => value + (to[axis] - value) * actionTime.progress);
+  const rotationY = walking ? Math.atan2(to[0] - from[0], to[2] - from[2]) : themed?.yaw ?? layout.facing[location][pose] ?? 0;
   let approach = null;
   if (seated || pose === 'sleep') {
     if (location === 'garden') approach = [position[0], -.25, position[2] + .52];
-    else if (pose === 'write') approach = layout.chairApproach;
-    else if (pose === 'eat') approach = [position[0] - .5, .13, position[2]];
+    else if (pose === 'write'||themed?.seated) approach = layout.chairApproach;
+    else if (pose === 'eat') approach = furniturePoint(layout.plan.table,-1.73,.13,.05);
     else approach = layout.bedApproach;
   }
   const actionPose = source === 'action';
@@ -283,11 +317,23 @@ export function projectAvatar(data, selection, nowMs = Date.now()) {
     position,
     rotationY,
     source,
+    cabinActivity:themed?operation:null,
     clock: actionPose || walking ? 'action' : 'wall',
     label: projection.label || lifeLabel.slice(0, 40),
     positionBasis: pose === 'idle' ? 'room_anchor' : 'action_anchor',
     animate: pose === 'sleep' ? !paused : actionPose && pose !== 'rest' && actionTime.running,
   };
+}
+
+// A named activity is shown only for an actual timed scene step at the right station.
+function themeAction(kind,layout,location){
+  const sea=layout.plan.id==='whale_coast',court=layout.plan.id==='witch_court';
+  if(location==='room'&&((sea&&kind==='cabin_tide_chart')||(court&&kind==='cabin_testimony'))){
+    return {pose:sea?'write':'read',position:layout.anchors.room.write,yaw:layout.facing.room.write,seated:true};
+  }
+  if(location==='garden'&&sea&&kind==='cabin_whale_watch')return {pose:'survey',position:[-1.72,-.25,5.16],yaw:-.76};
+  if(location==='garden'&&court&&kind==='cabin_weigh_evidence')return {pose:'weigh',position:[5.54,-.25,6.30],yaw:2.78};
+  return null;
 }
 
 function stableHash(str) {
@@ -300,7 +346,7 @@ function stableHash(str) {
   return h >>> 0;
 }
 
-export function projectAmbientMicro(data, baseProjection, nowMs = Date.now()) {
+export function projectAmbientMicro(data, baseProjection, nowMs = Date.now(), furnitureLayout=null) {
   const fallback = {
     active: false,
     bucket: 0,
@@ -326,35 +372,35 @@ export function projectAmbientMicro(data, baseProjection, nowMs = Date.now()) {
   const seed = stableHash(data?.actor?.character_id || data?.scene?.place_id || 'cabin');
   const effect = data?.environment?.current?.effect || '';
   const rainy = effect === 'rain' || effect === 'storm';
-  const layout = resolveFurnitureLayout(data);
+  const layout = furnitureLayout || resolveFurnitureLayout(data);
 
   if (baseProjection.location === 'room') {
     const spots = [
       {id: 'center_stand', position: [...layout.anchors.room.idle], rotationY: 0, pose: 'idle', thought: ''},
       {
         id: 'window_gaze',
-        position: [0.08, 0.13, -2.55],
+        position: relocatePoint(cabinPlan('cottage').window,layout.plan.window,[.08,.13,-2.55]),
         rotationY: Math.PI,
         pose: 'idle',
         thought: rainy ? '听着北窗外的雨声发呆' : '站在北窗边望了望窗外天光',
       },
       {
         id: 'desk_tea',
-        position: [layout.anchors.room.write[0] + 0.35, 0.13, layout.anchors.room.write[2] - 0.85],
+        position: layout.plan.id==='cottage'?[layout.anchors.room.write[0]+.35,.13,layout.anchors.room.write[2]-.85]:layout.chairApproach,
         rotationY: layout.facing.room.write ?? Math.PI,
         pose: 'idle',
         thought: '在书桌旁端详刚记下的随笔',
       },
       {
         id: 'cat_check',
-        position: [-2.15, 0.13, 1.15],
-        rotationY: -Math.PI / 2,
+        position: layout.catWatch,
+        rotationY: layout.catWatchYaw,
         pose: 'idle',
         thought: '俯身看看小猫今天睡得香不香',
       },
       {
         id: 'shelf_browse',
-        position: [-2.45, 0.13, -2.55],
+        position: relocatePoint(cabinPlan('cottage').shelves.back_wall,layout.plan.shelves.back_wall,[-2.45,.13,-2.55]),
         rotationY: Math.PI,
         pose: 'idle',
         thought: '指尖轻轻拂过书架上的旧书脊',
@@ -362,7 +408,7 @@ export function projectAmbientMicro(data, baseProjection, nowMs = Date.now()) {
     ];
     const idx = rainy && (bucket + seed) % 3 === 0 ? 1 : (bucket * 7 + seed) % spots.length;
     const chosen = spots[idx];
-    return {active: true, bucket, ...chosen, position: [...chosen.position]};
+    return {active: true, bucket, ...chosen, position: [...clearBedFloor(chosen.position,layout.obstacle)]};
   }
 
   if (baseProjection.location === 'garden') {

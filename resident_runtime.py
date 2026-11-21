@@ -117,7 +117,15 @@ def build_prompt_parts(request) -> tuple[str, str]:
         if "observation_rule" in resident_context:
             world_static["observation_rule"] = resident_context["observation_rule"]
         if "places" in resident_context:
-            world_static["places"] = resident_context["places"]
+            places_val = resident_context["places"]
+            world_static["places"] = (
+                sorted(
+                    places_val,
+                    key=lambda p: str(p.get("id", "")) if isinstance(p, dict) else str(p),
+                )
+                if isinstance(places_val, list)
+                else places_val
+            )
         if world_static:
             system_parts.append(
                 "世界基础信息：\n"

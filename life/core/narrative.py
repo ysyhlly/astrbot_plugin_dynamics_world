@@ -168,6 +168,7 @@ class NarrativeEngine(
         )
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._locks: dict[str, asyncio.Lock] = {}
+        self._plan_regens: set[str] = set()
         self._outreach_lock = asyncio.Lock()
         self._closed = False
         self._owner_active = owner_active
@@ -1030,6 +1031,80 @@ class NarrativeEngine(
         )
         return not any(word in text for word in signals)
 
+    _GROUP_SIGNAL_CUES = (
+        "答应",
+        "约定",
+        "取消",
+        "提醒",
+        "别再",
+        "不要再",
+        "不喜欢",
+        "承诺",
+        "说好了",
+        "头疼",
+        "头痛",
+        "发烧",
+        "生病",
+        "不舒服",
+        "难受",
+        "医院",
+        "吃药",
+        "出门",
+        "出差",
+        "回家",
+        "到家",
+        "报平安",
+        "路上",
+        "飞机",
+        "高铁",
+        "火车",
+        "叫我",
+        "外号",
+        "昵称",
+        "纠正",
+        "误会",
+        "简短",
+        "不要主动",
+        "别主动",
+    )
+
+    _GROUP_SIGNAL_DATA_KEYS = (
+        "commitment_id",
+        "commitments",
+        "completed_commitment_ids",
+        "reminder_id",
+        "intent_id",
+        "goal_id",
+        "interest_id",
+        "care_activity_id",
+    )
+
+    def _is_low_signal_group_batch(self, scope: dict, pending: list[dict]) -> bool:
+        """Return True when a group-chat batch is strictly non-bot-directed ambient chatter."""
+        if not pending or not self._group_scope(scope.get("umo", "")):
+            return False
+        for event in pending:
+            etype = event.get("type", "")
+            if etype not in {"message.received", "chat.message"}:
+                return False
+            data = event.get("data") or {}
+            if (
+                data.get("directed_to_bot") is True
+                or data.get("addressed") is True
+                or bool(data.get("quoted_message_id"))
+                or data.get("event_impact") in {"activity", "commitment", "relationship"}
+                or any(data.get(k) for k in self._GROUP_SIGNAL_DATA_KEYS)
+            ):
+                return False
+            # Preserve legacy chat.message callers that omit directed_to_bot metadata;
+            # only treat chat.message as ambient when explicitly marked directed_to_bot=False.
+            if etype == "chat.message" and data.get("directed_to_bot") is not False:
+                return False
+            text = str(event.get("text") or "")
+            if any(cue in text for cue in self._GROUP_SIGNAL_CUES):
+                return False
+        return True
+
     def _apply_reminder_effect(self, db, event):
         data, scope = event["data"], event["scope"]
         action = data.get("effect_kind")
@@ -1502,6 +1577,24 @@ class NarrativeEngine(
                     ):
                         return self._result("policy_refusal", snapshot)
                     return self._result(queue_status, snapshot)
+                if self._is_low_signal_group_batch(scope, pending):
+                    for event in pending:
+                        db.execute(
+                            "UPDATE events SET status='observed_only',error='routing:low_signal_group_ambient' WHERE event_id=?",
+                            (event["event_id"],),
+                        )
+                    local_row = db.execute(
+                        "SELECT state FROM scopes WHERE identity=? AND umo=?",
+                        (identity, scope["umo"]),
+                    ).fetchone()
+                    if local_row:
+                        local_state = json.loads(local_row[0])
+                        local_state["observed_until"] = now
+                        db.execute(
+                            "UPDATE scopes SET state=? WHERE identity=? AND umo=?",
+                            (_json(local_state), identity, scope["umo"]),
+                        )
+                    return self._result("no_change", self._snapshot(db, scope, now))
                 triggers = {event.get("data", {}).get("trigger") for event in pending}
                 if not all(event["type"] == "life.tick" for event in pending):
                     kind = "extra"
@@ -2020,6 +2113,9 @@ class NarrativeEngine(
                     )
         elif self.causal is not None and change.get("plan_id"):
             self.causal.attach_interval(db, scope, change["plan_id"], life, now)
+        if change["daily_plan"] is not None and self.scenes is not None and self.causal is not None:
+            from ...cabin_life import reconcile_committed_plan
+            reconcile_committed_plan(self, db, scope, now)
 
     async def list_due_intents(self, now: float | None = None) -> list[dict]:
         """Return current pending motivations; caller must claim before sending."""
@@ -2391,8 +2487,416 @@ class NarrativeEngine(
                 "calls": calls,
                 "daily_plan": life["plan"],
                 "plan_date": life["plan_date"],
+                "plan_status": self._plan_status(db, scope, life, now),
                 "source_ids": snapshot["source_ids"],
             }
+
+    def _plan_status(
+        self,
+        db,
+        scope: dict,
+        life: dict,
+        now: float,
+        *,
+        generating: bool | None = None,
+    ) -> dict:
+        identity = _identity(scope)
+        china_date = dt.datetime.fromtimestamp(now, CHINA).date()
+        today = china_date.isoformat()
+        midnight = dt.datetime.combine(china_date, dt.time(), CHINA).timestamp()
+        plan_date = str(life.get("plan_date") or "")
+        plan_items = life.get("plan") if isinstance(life.get("plan"), list) else []
+        is_today = bool(plan_date == today and len(plan_items) > 0)
+        last_call = db.execute(
+            "SELECT status,started FROM calls "
+            "WHERE identity=? AND umo='' AND kind IN ('hourly','plan_regen') AND started>=? "
+            "ORDER BY started DESC LIMIT 1",
+            (identity, midnight),
+        ).fetchone()
+        last_err_row = db.execute(
+            "SELECT error,occurred FROM events "
+            "WHERE identity=? AND umo='' AND error!='' AND occurred>=? "
+            "ORDER BY occurred DESC LIMIT 1",
+            (identity, midnight),
+        ).fetchone()
+        last_call_status = str(last_call["status"]) if last_call else ""
+        last_call_at = float(last_call["started"]) if last_call else None
+        last_error = str(last_err_row["error"]) if last_err_row else ""
+        is_gen = (
+            identity in self._plan_regens if generating is None else bool(generating)
+        )
+        if is_gen:
+            status = "generating"
+        elif is_today:
+            status = "ready"
+        elif last_call_status in {
+            "invalid",
+            "timeout",
+            "policy_refusal",
+            "provider_unavailable",
+            "failed",
+        } or last_error:
+            status = "failed"
+        else:
+            status = "missing"
+        return {
+            "today": today,
+            "plan_date": plan_date,
+            "is_today": is_today,
+            "status": status,
+            "last_attempt_at": last_call_at,
+            "last_attempt_status": last_call_status,
+            "last_error": last_error,
+            "generating": is_gen,
+        }
+
+    def get_plan_status(
+        self, scope: dict, *, generating: bool | None = None
+    ) -> dict:
+        scope = normalize_scope(scope)
+        global_scope = dict(scope, umo="", platform="")
+        now = self.clock()
+        with self._db() as db:
+            self._ensure(db, global_scope, now)
+            row = db.execute(
+                "SELECT state FROM lives WHERE identity=?", (_identity(global_scope),)
+            ).fetchone()
+            life = json.loads(row[0]) if row else {"plan": [], "plan_date": ""}
+            return self._plan_status(
+                db, global_scope, life, now, generating=generating
+            )
+
+    async def regenerate_daily_plan(
+        self,
+        scope: dict,
+        *,
+        extra: str = "",
+    ) -> dict:
+        """Manually regenerate today's remaining daily plan without rewriting past history."""
+        scope = normalize_scope(scope)
+        if self._closed or not self._allowed(scope):
+            return {
+                "schema_version": 1,
+                "status": "unmanaged",
+                "message": "当前会话未启用持续叙事生活。",
+                "plan_status": self.get_plan_status(scope),
+            }
+        global_scope = dict(scope, umo="", platform="")
+        identity = _identity(global_scope)
+        if identity in self._plan_regens:
+            return {
+                "schema_version": 1,
+                "status": "generating",
+                "message": "今日日程正在重新生成中，请稍候。",
+                "plan_status": self.get_plan_status(global_scope),
+            }
+        clean_extra = str(extra or "").strip()[:200]
+        self._plan_regens.add(identity)
+        try:
+            async with self._locks.setdefault(identity, asyncio.Lock()):
+                now = self.clock()
+                with self._db() as db:
+                    self._ensure(db, global_scope, now)
+                    if self._paused(db, scope) or self._paused(db, global_scope):
+                        row = db.execute(
+                            "SELECT state FROM lives WHERE identity=?", (identity,)
+                        ).fetchone()
+                        paused_life = (
+                            json.loads(row[0]) if row else {"plan": [], "plan_date": ""}
+                        )
+                        return {
+                            "schema_version": 1,
+                            "status": "paused",
+                            "message": "持续叙事已暂停，请先恢复后再重新生成日程。",
+                            "plan_status": self._plan_status(
+                                db, global_scope, paused_life, now, generating=False
+                            ),
+                        }
+                    if self.causal is not None and self.spatial is not None:
+                        self.causal.advance(db, global_scope, now)
+                    if self.scenes is not None and self.spatial is not None:
+                        self.spatial.settle(db, global_scope, now)
+                        self.scenes.settle(db, global_scope, now)
+                    snapshot = self._snapshot(db, global_scope, now)
+                    life = json.loads(
+                        db.execute(
+                            "SELECT state FROM lives WHERE identity=?", (identity,)
+                        ).fetchone()[0]
+                    )
+                    diary = [
+                        dict(row)
+                        for row in db.execute(
+                            "SELECT occurred,text,fact_kind,source_ids FROM diary "
+                            "WHERE identity=? AND umo='' ORDER BY occurred DESC LIMIT 8",
+                            (identity,),
+                        )
+                    ]
+                    event_id = f"admin.regen_plan:{identity}:{uuid.uuid4().hex[:12]}"
+                    event = {
+                        "event_id": event_id,
+                        "type": "life.tick",
+                        "scope": global_scope,
+                        "occurred_at": now,
+                        "received_at": now,
+                        "actor_id": "admin",
+                        "fact_kind": "fiction",
+                        "data": {
+                            "trigger": "admin_regenerate_plan",
+                            **(
+                                {"hint": clean_extra}
+                                if clean_extra
+                                else {}
+                            ),
+                        },
+                    }
+                    db.execute(
+                        "INSERT INTO events VALUES(?,?,?,?,?,?,'pending','',?,0,0)",
+                        (event_id, identity, "", now, now, _json(event), now),
+                    )
+                    causal_rev = (
+                        self.causal.load(db, global_scope)[0]
+                        if self.causal is not None
+                        else None
+                    )
+                china_date = dt.datetime.fromtimestamp(now, CHINA).date()
+                day_end = dt.datetime.combine(
+                    china_date + dt.timedelta(days=1), dt.time(), CHINA
+                ).timestamp()
+                request = {
+                    "schema_version": 1,
+                    "scope": global_scope,
+                    "now": now,
+                    "day_end": day_end,
+                    "local_datetime": dt.datetime.fromtimestamp(now, CHINA).isoformat(),
+                    "timezone": "Asia/Shanghai",
+                    "local_date": china_date.isoformat(),
+                    "plan_window": {"start": now, "end": day_end},
+                    "trigger": "admin_regenerate_plan",
+                    "snapshot": dict(
+                        snapshot, **snapshot.get("global_presentation", {})
+                    ),
+                    "events": [event],
+                    "recent_diary": diary,
+                    "plan": life["plan"],
+                    "needs_daily_plan": True,
+                    "manual_plan_regeneration": True,
+                    **(
+                        {"regeneration_hint": clean_extra}
+                        if clean_extra
+                        else {}
+                    ),
+                    "weather_reassessment": False,
+                    "offline_catchup": False,
+                }
+                if causal_rev is not None:
+                    request["causal_revision"] = causal_rev
+                request["snapshot"]["humanlike"] = copy.deepcopy(snapshot["humanlike"])
+                started = time.monotonic()
+                call_id = str(uuid.uuid4())
+                request["inference_call_id"] = call_id
+                kind = "plan_regen"
+                raw = None
+                plan_only_keys = {
+                    "schema_version",
+                    "no_change",
+                    "source_ids",
+                    "state",
+                    "daily_plan",
+                    "next_check",
+                }
+                try:
+                    timeout = max(
+                        1.0,
+                        min(
+                            float(self.config.get("narrative_timeout_seconds", 90)),
+                            90.0,
+                        ),
+                    )
+                    change = None
+                    for attempt_idx in range(2):
+                        raw = await asyncio.wait_for(
+                            self.model(copy.deepcopy(request)), timeout
+                        )
+                        sanitized = (
+                            {k: v for k, v in raw.items() if k in plan_only_keys}
+                            if isinstance(raw, dict)
+                            else raw
+                        )
+                        try:
+                            change = self._validate_change(sanitized, request)
+                            if not change.get("daily_plan"):
+                                raise NarrativeValidationError(
+                                    "empty_daily_plan_on_regeneration",
+                                    "Model did not return a daily plan",
+                                )
+                            break
+                        except NarrativeValidationError as v_exc:
+                            if attempt_idx == 0 and v_exc.code not in {
+                                "unsupported_narrative_response",
+                                "empty_daily_plan_on_regeneration",
+                            }:
+                                request["previous_validation_failure"] = {
+                                    "reason_code": "validation." + v_exc.code,
+                                    "attempt": 1,
+                                    "instruction": "Return only valid daily_plan entries strictly within plan_window (start < end, non-overlapping) and optional state/next_check; omit world_action and movement.",
+                                }
+                                continue
+                            raise
+                except asyncio.CancelledError:
+                    self._call(call_id, identity, "", now, started, "cancelled", kind)
+                    raise
+                except Exception as exc:
+                    if self._is_policy_refusal(exc):
+                        self._call(
+                            call_id, identity, "", now, started, "policy_refusal", kind
+                        )
+                        self._block_policy_refusal([event])
+                        return {
+                            "schema_version": 1,
+                            "status": "policy_refusal",
+                            "error": "policy_refusal",
+                            "message": "模型拒绝了本次日程生成请求，请稍后重试。",
+                            "plan_status": self.get_plan_status(
+                                global_scope, generating=False
+                            ),
+                        }
+                    requested_status = getattr(exc, "status_code", "")
+                    err_status = (
+                        requested_status
+                        if requested_status == "provider_unavailable"
+                        else ("timeout" if isinstance(exc, TimeoutError) else "invalid")
+                    )
+                    self._call(call_id, identity, "", now, started, err_status, kind)
+                    code = (
+                        "validation." + exc.code
+                        if isinstance(exc, NarrativeValidationError)
+                        else type(exc).__name__
+                    )
+                    http_status = getattr(exc, "code", None)
+                    if type(http_status) is int and 400 <= http_status <= 599:
+                        code = f"provider.http_{http_status}.{type(exc).__name__}"
+                    with self._db() as db:
+                        db.execute(
+                            "UPDATE events SET status='failed',error=?,retry_attempt=retry_attempt+1 WHERE event_id=?",
+                            (code, event_id),
+                        )
+                    msg_map = {
+                        "timeout": "日程生成超时，请稍后重试。",
+                        "provider_unavailable": "当前模型服务不可用，请检查模型配置后重试。",
+                    }
+                    return {
+                        "schema_version": 1,
+                        "status": err_status,
+                        "error": code,
+                        "message": msg_map.get(
+                            err_status, f"日程重新生成失败（{code}），请重试。"
+                        ),
+                        "plan_status": self.get_plan_status(
+                            global_scope, generating=False
+                        ),
+                    }
+                if not self._allowed(global_scope):
+                    self._call(call_id, identity, "", now, started, "unmanaged", kind)
+                    return {
+                        "schema_version": 1,
+                        "status": "unmanaged",
+                        "message": "当前会话未启用持续叙事生活。",
+                        "plan_status": self.get_plan_status(
+                            global_scope, generating=False
+                        ),
+                    }
+                stale_response = None
+                try:
+                    with self._db() as db:
+                        db.execute("BEGIN IMMEDIATE")
+                        current = self._snapshot(db, global_scope, self.clock())
+                        if current["revision"] != snapshot["revision"] or self._paused(
+                            db, global_scope
+                        ):
+                            db.execute(
+                                "UPDATE events SET status='failed',error='stale_revision' WHERE event_id=?",
+                                (event_id,),
+                            )
+                            stale_row = db.execute(
+                                "SELECT state FROM lives WHERE identity=?", (identity,)
+                            ).fetchone()
+                            stale_life = (
+                                json.loads(stale_row[0])
+                                if stale_row
+                                else {"plan": [], "plan_date": ""}
+                            )
+                            stale_response = {
+                                "schema_version": 1,
+                                "status": "stale",
+                                "error": "stale_revision",
+                                "message": "生成期间生活状态已变化，请再次点击重新生成。",
+                                "plan_status": self._plan_status(
+                                    db,
+                                    global_scope,
+                                    stale_life,
+                                    self.clock(),
+                                    generating=False,
+                                ),
+                            }
+                        else:
+                            self._commit(
+                                db,
+                                global_scope,
+                                change,
+                                [event],
+                                now,
+                                snapshot["revision"] + 1,
+                            )
+                            result_snap = self._snapshot(db, global_scope, self.clock())
+                            updated_life = json.loads(
+                                db.execute(
+                                    "SELECT state FROM lives WHERE identity=?",
+                                    (identity,),
+                                ).fetchone()[0]
+                            )
+                            plan_st = self._plan_status(
+                                db,
+                                global_scope,
+                                updated_life,
+                                self.clock(),
+                                generating=False,
+                            )
+                except (ValueError, sqlite3.Error) as exc:
+                    code = (
+                        "validation." + exc.code
+                        if isinstance(exc, NarrativeValidationError)
+                        else type(exc).__name__
+                    )
+                    with self._db() as db:
+                        db.execute(
+                            "UPDATE events SET status='failed',error=? WHERE event_id=?",
+                            (code, event_id),
+                        )
+                    self._call(call_id, identity, "", now, started, "invalid", kind)
+                    return {
+                        "schema_version": 1,
+                        "status": "invalid",
+                        "error": code,
+                        "message": f"日程校验未通过（{code}），请重试。",
+                        "plan_status": self.get_plan_status(
+                            global_scope, generating=False
+                        ),
+                    }
+                if stale_response is not None:
+                    self._call(call_id, identity, "", now, started, "stale", kind)
+                    return stale_response
+                self._call(call_id, identity, "", now, started, "advanced", kind)
+                return {
+                    "schema_version": 1,
+                    "status": "regenerated",
+                    "plan_date": updated_life.get("plan_date", china_date.isoformat()),
+                    "count": len(updated_life.get("plan", [])),
+                    "daily_plan": updated_life.get("plan", []),
+                    "snapshot": result_snap,
+                    "plan_status": plan_st,
+                }
+        finally:
+            self._plan_regens.discard(identity)
 
     async def tick(self, now: float | None = None) -> dict:
         """Check hourly life and five-minute scoped queues without catch-up storms."""
@@ -2410,6 +2914,9 @@ class NarrativeEngine(
         with self._db() as db:
             self._ensure(db, scope, now)
             self._compact_old_queue(db, identity)
+            if self.scenes is not None and self.causal is not None:
+                from ...cabin_life import tick_homes
+                tick_homes(self.scenes, db, now)
             if self.causal is not None:
                 self.causal.advance(db, scope, now)
             if self.scenes is not None:

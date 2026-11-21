@@ -620,12 +620,10 @@ async def run():
             await page.wait_for_function(
                 "document.getElementById('dwLifeSummary').textContent.includes('沿海边散步')"
             )
-            await page.screenshot(path=str(output / "life.png"), full_page=True)
-            await page.locator('[data-view="stories"]').click()
             await page.wait_for_function(
                 "document.getElementById('dwDiary').textContent.includes('管理员纠正')"
             )
-            await page.screenshot(path=str(output / "stories.png"), full_page=True)
+            await page.screenshot(path=str(output / "life.png"), full_page=True)
             await page.locator('[data-view="cards"]').click()
             await page.locator("#wbCardName").wait_for()
             await page.locator("#wbCardName").fill("小夏 <script>alert(1)</script>")
@@ -656,7 +654,6 @@ async def run():
                 "sessions",
                 "map",
                 "life",
-                "stories",
                 "migration",
                 "preview",
                 "config",

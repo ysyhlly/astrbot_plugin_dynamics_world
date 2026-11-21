@@ -1,5 +1,6 @@
 import { apiGet, apiPost, escapeHtml as esc, formatTs } from "./api.js";
 import { getSharedScope, msg, setSharedScope, setText, tr } from "./series-ui.js";
+import { worldStream } from "./world-stream.js?v=round2.1";
 
 const $ = (id) => document.getElementById(id);
 window.DynamicsGetActiveScope = () => $("dwScope")?.value?.trim() || "";
@@ -52,8 +53,15 @@ export async function refreshLife() {
   const serial = ++lifeSerial;
   if (currentLife?.umo !== umo) currentLife = null;
   if (!umo) {
-    for (const id of lifePanels) $(id).innerHTML = '<div class="wb-empty" data-series-text="请先选择会话。">请先选择会话。</div>';
-    document.querySelectorAll("[data-life-action], #dwCorrect").forEach(x=>x.disabled=true);
+    for (const id of lifePanels) {
+      const node = $(id);
+      if (node) node.innerHTML = '<div class="wb-empty" data-series-text="请先选择会话。">请先选择会话。</div>';
+    }
+    const planCard = $("dwPlanCard");
+    if (planCard) planCard.hidden = true;
+    const planNode = $("dwPlan");
+    if (planNode) planNode.innerHTML = "";
+    document.querySelectorAll("[data-life-action], #dwCorrect, #dwRegenPlan").forEach(x=>x.disabled=true);
     return;
   }
   try {
@@ -65,11 +73,39 @@ export async function refreshLife() {
     if (serial === lifeSerial) {
       currentLife = null;
       const message = `<div class="wb-empty">${esc(error.message)}</div>`;
-      lifePanels.forEach(id=>$(id).innerHTML=message);
-      document.querySelectorAll("[data-life-action], #dwCorrect").forEach(x=>x.disabled=true);
+      lifePanels.forEach(id=>{ const node = $(id); if (node) node.innerHTML = message; });
+      const planCard = $("dwPlanCard");
+      if (planCard) planCard.hidden = true;
+      const planNode = $("dwPlan");
+      if (planNode) planNode.innerHTML = "";
+      document.querySelectorAll("[data-life-action], #dwCorrect, #dwRegenPlan").forEach(x=>x.disabled=true);
       notice(tr("读取生活失败：")+error.message,true);
     }
   }
+}
+
+function renderPlanStatusBanner(data) {
+    const ps = data.plan_status;
+    if (!ps || ps.status === "ready") return "";
+    const failed = ps.status === "failed";
+    const generating = ps.status === "generating";
+    const tone = failed ? "error" : "warning";
+    const title = generating
+      ? tr("今日日程正在重新生成中…")
+      : failed
+      ? tr("今日日程生成失败")
+      : tr("今日日程尚未生成");
+    const bits = [];
+    if (ps.last_attempt_at) bits.push(tr("最近尝试 ") + formatTs(ps.last_attempt_at));
+    if (ps.last_attempt_status && ps.last_attempt_status !== "advanced") bits.push(ps.last_attempt_status);
+    if (ps.last_error) bits.push(ps.last_error);
+    if (ps.plan_date && ps.today && ps.plan_date !== ps.today) {
+      bits.push(tr("当前显示的是 {0} 的旧安排", ps.plan_date));
+    }
+    const detail = bits.length ? `<p class="dw-meta">${esc(bits.join(" · "))}</p>` : "";
+    const btnText = generating ? tr("生成中…") : failed ? tr("重新生成今日日程") : tr("生成今日日程");
+    const disabled = generating || data.paused || (!data.managed && !data.legacy) ? "disabled" : "";
+    return `<div class="dw-plan-banner is-${tone}" role="status"><div><strong>${esc(title)}</strong>${detail}</div><button class="wb-button primary tiny" type="button" data-regen-plan="true" ${disabled}>${esc(btnText)}</button></div>`;
 }
 
 function renderLife(data) {
@@ -82,11 +118,25 @@ function renderLife(data) {
     const summary = `<div class="dw-hero-copy"><h2>${esc(data.character?.name || tr("角色"))} · ${esc(activity)}</h2><p>${esc(data.character?.scenario || tr("尚未设置场景"))} ${tag(s.availability || "unknown")}${data.paused ? tag(tr("生活已暂停")) : ""}</p><p>${esc(s.summary || s.subjective_state || (data.managed ? tr("等待新的生活记录。") : tr("本会话尚未启用持续生活，请检查角色与会话范围配置。")))}</p></div>${weather}`;
     $("dwLifeSummary").innerHTML = summary;
     $("dwOverviewLife").innerHTML = summary;
-    $("dwPlan").innerHTML = data.legacy ? `<pre class="wb-pre">${esc(data.legacy.text)}</pre>` : items(data.daily_plan, x=>`<span class="dw-meta">${esc(formatTs(x.start))} — ${esc(formatTs(x.end))}</span><p>${esc(x.activity)}</p>`,tr("今天还没有安排。计划不会被当作已经发生的经历。"));
+    const planStatus = data.plan_status || null;
+    const showPlanFallback = Boolean(data.legacy) || Boolean(planStatus && planStatus.status !== "ready");
+    const planCard = $("dwPlanCard");
+    if (planCard) planCard.hidden = !showPlanFallback;
+    const planNode = $("dwPlan");
+    if (planNode) {
+      if (showPlanFallback) {
+        const planBanner = renderPlanStatusBanner(data);
+        planNode.innerHTML = planBanner + (data.legacy ? `<pre class="wb-pre">${esc(data.legacy.text)}</pre>` : "");
+      } else {
+        planNode.innerHTML = "";
+      }
+    }
     $("dwDiary").innerHTML = items(data.diary,x=>`${tag(x.fact_kind)} <span class="dw-meta">${esc(formatTs(x.occurred))}</span><p>${esc(x.text)}</p>`,tr("还没有生活故事。"));
     $("dwCommitments").innerHTML = items(s.commitments,x=>`${tag(x.status)}<p>${esc(x.description)}</p><span class="dw-meta">${x.due_at ? esc(formatTs(x.due_at)) : tr("未指定时间")}</span>`,tr("当前没有约定。"));
     $("dwIntents").innerHTML = items(data.intents,x=>`${tag(x.status)}<p>${esc(x.reason || x.motivation || x.topic || tr("联系动机"))}</p>${["pending","failed"].includes(x.status) ? `<button class="wb-button tiny" data-cancel-intent="${esc(x.intent_id)}" data-series-text="取消联系">取消联系</button>`:""}`,tr("当前没有待联系事项。"));
     document.querySelectorAll("[data-life-action], #dwCorrect").forEach(x=>x.disabled=!data.managed);
+    const regenBtn = $("dwRegenPlan");
+    if (regenBtn) regenBtn.disabled = (!data.managed && !data.legacy) || Boolean(data.paused) || Boolean(data.plan_status?.generating);
 }
 window.addEventListener("series-languagechange",()=>{
   if (currentWorld) renderRuntime(currentWorld);
@@ -128,6 +178,27 @@ $("dwCorrect").addEventListener("click",()=>action($("dwCorrect"),async()=>{
 $("dwIntents").addEventListener("click",event=>{
   const button = event.target.closest("[data-cancel-intent]");if (!button) return;
   action(button,async()=>{await apiPost("life",{action:"cancel_intent",umo:$("dwScope").value.trim(),intent_id:button.dataset.cancelIntent});await refreshLife();});
+});
+async function triggerRegenPlan(button) {
+  const umo = $("dwScope").value.trim();
+  if (!umo) return;
+  const targets = [button, $("dwRegenPlan"), ...document.querySelectorAll("#dwPlan [data-regen-plan]")].filter(Boolean);
+  targets.forEach(b => { b.disabled = true; });
+  notice(tr("正在保留已发生历史并重新生成今日日程…"));
+  try {
+    const res = await apiPost("life", { action: "regenerate_plan", umo });
+    notice(tr("今日日程已重新生成（{0} 项安排）。", res?.count ?? (res?.daily_plan?.length || 0)));
+  } catch (error) {
+    notice(tr("日程重新生成失败：") + error.message, true);
+  } finally {
+    await Promise.allSettled([refreshLife(), worldStream.refreshNow({ fresh: true })]);
+  }
+}
+$("dwRegenPlan")?.addEventListener("click", () => void triggerRegenPlan($("dwRegenPlan")));
+$("dwPlan")?.addEventListener("click", event => {
+  const button = event.target.closest("[data-regen-plan]");
+  if (!button) return;
+  void triggerRegenPlan(button);
 });
 $("dwPreviewMigration").addEventListener("click",()=>action($("dwPreviewMigration"),async()=>{
   preview=null;$("dwImportMigration").disabled=true;

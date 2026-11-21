@@ -2,9 +2,9 @@
 import { languagePicker, msg, setText, tr } from "./series-ui.js";
 import "./map.js?v=round2.1";
 import "./setup.js?v=series-audit.1";
-import "./creative-world.js";
-import "./pixel-cabin.js?v=cabin.2";
-import { refreshWorld, refreshLife } from "./world.js?v=series-audit.1";
+import "./creative-world.js?v=wb-iso.1";
+import "./pixel-cabin.js?v=wb-iso.1";
+import { refreshWorld, refreshLife } from "./world.js?v=wb-iso.1";
 import { apiGet, escapeHtml, readyBridge } from "./api.js";
 import { createWorkbenchOps } from "./workbench-ops.js?v=stage.11";
 import { createWorkbenchStudio } from "./workbench-studio.js?v=stage.11";
@@ -65,13 +65,11 @@ function shortId(value) {
   return text.length > 34 ? text.slice(0, 18) + "…" + text.slice(-10) : text;
 }
 
-const STAGE_DRAWER_VIEWS = new Set(["life", "stories", "projects", "activity", "scenes", "weather"]);
-const CLUSTER_SPEC = [
-  ["companion", "日常陪伴", ["cabin", "life", "stories", "projects", "activity", "scenes", "weather"]],
-  ["map", "地图出行", ["map"]],
-  ["studio", "设定工坊", ["cards", "books", "sessions", "overview"]],
-  ["ops", "调试运维", ["setup", "preview", "config", "migration"]],
-];
+const STAGE_DRAWER_VIEWS = new Set(["life", "projects", "activity", "scenes", "weather"]);
+const CORE_VIEWS = ["life", "map", "cards", "books"];
+const VIEW_ALIASES = { stories: "life" };
+const MORE_VIEWS = ["scenes", "weather", "projects", "activity", "sessions", "overview", "setup", "preview", "config", "migration"];
+const MORE_VIEW_SET = new Set(MORE_VIEWS);
 
 const views = {
   cabin: ["3D 像素小屋", "小屋与花园，装下日常的片刻。"],
@@ -82,8 +80,7 @@ const views = {
   setup: ["安装引导与检查", "逐步建立角色和世界，确认配套能力已经接通。"],
   overview: ["世界总览", "查看角色的生活状态，维护共同的世界。"],
   map: ["世界地图", "看见角色在哪里、在做什么，以及周围的环境。"],
-  life: ["日常动态", "今天的安排、当前的状态，都有迹可循。"],
-  stories: ["故事与约定", "回看已经发生的事，记住还未完成的约定。"],
+  life: ["生活与故事", "管理生活节奏、纠正当下状态，回看生活故事与聊天约定。"],
   books: ["世界书", "整理世界设定，决定哪些内容在对话中生效。"],
   cards: ["角色卡", "维护角色身份、性格与共同的生活背景。"],
   sessions: ["场景与会话", "为不同会话选择角色与场景。"],
@@ -92,9 +89,18 @@ const views = {
   migration: ["数据迁移", "把已有设定与生活记录带入群间世界。"],
 };
 
+function normalizeView(rawName, anchor = "") {
+  const key = String(rawName || "").trim();
+  if (!key) return { name: "", anchor };
+  const resolved = Object.hasOwn(VIEW_ALIASES, key) ? VIEW_ALIASES[key] : key;
+  const resolvedAnchor = anchor || (key === "stories" ? "stories" : "");
+  return { name: resolved, anchor: resolvedAnchor };
+}
+
 let drawerBar = null;
 let drawerOpener = null;
 let landingView = null;
+let landingAnchor = "";
 let loaded = false;
 const isVisible = (node) => Boolean(node?.getClientRects().length) && !node.disabled &&
   !node.closest("[inert]") && getComputedStyle(node).visibility !== "hidden";
@@ -110,34 +116,74 @@ function ensureDrawerBar() {
   const lede = document.createElement("small");
   lede.id = "cabinDrawerLede";
   copy.append(title, lede);
+  const actions = document.createElement("div");
+  actions.className = "cabin-drawer-actions";
+  const toWorkbenchBtn = document.createElement("button");
+  toWorkbenchBtn.type = "button";
+  toWorkbenchBtn.id = "cabinDrawerToWorkbench";
+  toWorkbenchBtn.className = "wb-button tiny";
+  setText(toWorkbenchBtn, msg("进入工作台"));
+  toWorkbenchBtn.addEventListener("click", () => setView(state.view, { focus: true, drawer: false }));
   const closeBtn = document.createElement("button");
   closeBtn.type = "button";
   closeBtn.id = "cabinDrawerClose";
   closeBtn.className = "wb-button tiny cabin-drawer-close";
   setText(closeBtn, msg("回到 3D 小屋"));
   closeBtn.addEventListener("click", () => setView("cabin"));
-  drawerBar.append(copy, closeBtn);
+  actions.append(toWorkbenchBtn, closeBtn);
+  drawerBar.append(copy, actions);
   return drawerBar;
 }
 
 function organizeTabClusters() {
   const tabs = $("wbTabs");
   if (!tabs) return;
-  for (const [cluster, label, names] of CLUSTER_SPEC) {
-    let firstPlaced = false;
-    for (const viewName of names) {
+  const moreDetails = $("wbTabsMore");
+  const moreMenu = $("wbTabsMoreMenu");
+  const anchor = moreDetails || null;
+
+  const cabinTab = tabs.querySelector('.wb-tab[data-view="cabin"]');
+  if (cabinTab) {
+    cabinTab.dataset.cluster = "cabin";
+    delete cabinTab.dataset.clusterStart;
+    delete cabinTab.dataset.clusterLabel;
+    if (anchor) tabs.insertBefore(cabinTab, anchor);
+  }
+
+  for (const viewName of CORE_VIEWS) {
+    const btn = tabs.querySelector(`.wb-tab[data-view="${viewName}"]`);
+    if (!btn) continue;
+    btn.dataset.cluster = "core";
+    delete btn.dataset.clusterStart;
+    delete btn.dataset.clusterLabel;
+    if (anchor) tabs.insertBefore(btn, anchor);
+    else tabs.append(btn);
+  }
+
+  if (moreMenu) {
+    for (const viewName of MORE_VIEWS) {
       const btn = tabs.querySelector(`.wb-tab[data-view="${viewName}"]`);
       if (!btn) continue;
-      btn.dataset.cluster = cluster;
-      if (!firstPlaced) {
-        btn.dataset.clusterStart = "true";
-        btn.dataset.clusterLabel = msg(label);
-        firstPlaced = true;
-      } else {
-        delete btn.dataset.clusterStart;
-        delete btn.dataset.clusterLabel;
-      }
-      tabs.append(btn);
+      btn.dataset.cluster = "ops";
+      delete btn.dataset.clusterStart;
+      delete btn.dataset.clusterLabel;
+      moreMenu.append(btn);
+    }
+  }
+}
+
+function updateMoreTabsIndicator(activeView) {
+  const moreDetails = $("wbTabsMore");
+  const summary = $("wbTabsMoreSummary");
+  if (!moreDetails || !summary) return;
+  const labelNode = summary.querySelector(".wb-tabs-more-label");
+  const inMore = MORE_VIEW_SET.has(activeView);
+  summary.dataset.active = String(inMore);
+  if (labelNode) {
+    if (inMore && views[activeView]) {
+      setText(labelNode, msg("{0} · {1}", msg("更多与运维"), msg(views[activeView][0])));
+    } else {
+      setText(labelNode, msg("更多与运维"));
     }
   }
 }
@@ -166,11 +212,14 @@ const studio = createWorkbenchStudio({
   refreshOverviewSilently,
 });
 
-function setView(name, { focus = false, remember = true } = {}) {
+function setView(rawName, { focus = false, remember = true, drawer = false, anchor = "" } = {}) {
+  const normalized = normalizeView(rawName, anchor);
+  let name = normalized.name;
+  const resolvedAnchor = normalized.anchor;
   if (!views[name]) name = "overview";
-  const wasDrawer = STAGE_DRAWER_VIEWS.has(state.view);
+  const wasDrawer = document.body.dataset.stageMode === "cabin-drawer";
   state.view = name;
-  const isDrawer = STAGE_DRAWER_VIEWS.has(name);
+  const isDrawer = Boolean(drawer) && name !== "cabin" && STAGE_DRAWER_VIEWS.has(name);
   const isCabinStage = name === "cabin" || isDrawer;
   if (isDrawer && !wasDrawer && focus) drawerOpener = document.activeElement;
   document.body.dataset.stageMode = name === "cabin" ? "cabin" : isDrawer ? "cabin-drawer" : "workbench";
@@ -183,12 +232,15 @@ function setView(name, { focus = false, remember = true } = {}) {
     url.searchParams.set("view", name);
     history.replaceState(history.state, "", url);
   } catch {}
-  if (["life", "stories"].includes(name)) refreshLife();
+  if (name === "life") refreshLife();
   const selected = isDrawer && !isVisible($("tab-" + name)) ? "cabin" : name;
-  document.querySelectorAll(".wb-tab").forEach((tab) => {
+  document.querySelectorAll(".wb-tab[data-view]").forEach((tab) => {
     tab.setAttribute("aria-selected", String(tab.dataset.view === selected));
     tab.tabIndex = tab.dataset.view === selected ? 0 : -1;
   });
+  updateMoreTabsIndicator(name);
+  const moreDetails = $("wbTabsMore");
+  if (moreDetails && moreDetails.open && !focus) moreDetails.open = false;
   const bar = ensureDrawerBar();
   document.querySelectorAll(".wb-view").forEach((section) => {
     const isTarget = section.id === "view-" + name;
@@ -205,6 +257,11 @@ function setView(name, { focus = false, remember = true } = {}) {
   document.dispatchEvent(new CustomEvent("world-view", { detail: name }));
   if (name === "books" && !state.bookId) studio.selectFirstBook();
   if (name === "cards" && !state.cardId) studio.selectFirstCard();
+  if (name === "life" && resolvedAnchor === "stories") {
+    requestAnimationFrame(() => {
+      $("dwStoriesSection")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }
   if (isDrawer && focus) $("cabinDrawerClose")?.focus({ preventScroll: true });
   if (wasDrawer && !isDrawer) {
     if (name === "cabin") {
@@ -218,7 +275,10 @@ function setView(name, { focus = false, remember = true } = {}) {
 function updateDocumentTitle() {
   document.title = tr(views[state.view][0]) + tr(" · 群间世界");
 }
-window.addEventListener("series-languagechange", updateDocumentTitle);
+window.addEventListener("series-languagechange", () => {
+  updateDocumentTitle();
+  updateMoreTabsIndicator(state.view);
+});
 
 async function refreshOverviewSilently() {
   try {
@@ -259,7 +319,8 @@ async function loadOverview() {
     state.overview = await apiGet("overview");
     renderAll();
     if (!loaded && state.view === "overview") {
-      setView(landingView || (state.overview.cards?.length ? "cabin" : "setup"));
+      const target = landingView || (state.overview.cards?.length ? "cabin" : "setup");
+      setView(target, { drawer: false, anchor: landingView ? landingAnchor : "" });
     }
     loaded = true;
     document.body.dataset.worldStartup = "ready";
@@ -279,15 +340,30 @@ async function loadOverview() {
 function wireTabs() {
   const tabs = $("wbTabs");
   if (!tabs) return;
+  const moreDetails = $("wbTabsMore");
   tabs.addEventListener("click", (event) => {
-    const button = event.target.closest(".wb-tab");
+    const button = event.target.closest(".wb-tab[data-view]");
     if (!button) return;
     landingView = button.dataset.view || "overview";
-    setView(landingView, { focus: true });
+    landingAnchor = "";
+    if (moreDetails?.open) moreDetails.open = false;
+    setView(landingView, { focus: true, drawer: false });
+  });
+  document.addEventListener("click", (event) => {
+    if (moreDetails?.open && !moreDetails.contains(event.target)) {
+      moreDetails.open = false;
+    }
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && moreDetails?.open) {
+      event.preventDefault();
+      moreDetails.open = false;
+      $("wbTabsMoreSummary")?.focus({ preventScroll: true });
+    }
   });
   tabs.addEventListener("keydown", (event) => {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
-    const buttons = [...tabs.querySelectorAll(".wb-tab")].filter(isVisible);
+    const buttons = [...tabs.querySelectorAll(".wb-tab[data-view]")].filter(isVisible);
     const index = buttons.indexOf(document.activeElement);
     if (index < 0) return;
     event.preventDefault();
@@ -305,12 +381,56 @@ function wireTabs() {
 function wireActions() {
   document.addEventListener("world-setup-saved", () => loadOverview());
   document.addEventListener("cabin-open-view", (event) => {
-    if (event.detail && views[event.detail]) setView(event.detail, { focus: true });
+    const detail = event.detail;
+    const rawView = typeof detail === "string" ? detail : detail?.view;
+    const { name, anchor } = normalizeView(rawView, typeof detail === "object" && detail ? detail.anchor || "" : "");
+    if (!name || !views[name]) return;
+    const drawer = typeof detail === "object" && detail ? Boolean(detail.drawer) : false;
+    setView(name, { focus: true, drawer, anchor });
   });
   const backCabin = $("wbBackCabin");
   if (backCabin) backCabin.addEventListener("click", () => setView("cabin"));
+  const cmdK = $("dwCmdK");
+  if (cmdK) {
+    cmdK.addEventListener("click", () => {
+      if (typeof window.DynamicsSeriesNavigation?.openCmdK === "function") {
+        window.DynamicsSeriesNavigation.openCmdK();
+      } else if (typeof window.DynamicsCommandPalette?.open === "function") {
+        window.DynamicsCommandPalette.open();
+      } else {
+        document.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true, cancelable: true })
+        );
+      }
+    });
+  }
+  window.addEventListener("dynamics-cmdk-deeplink", (event) => {
+    const item = event.detail || {};
+    const dl = typeof item.deep_link === "object" && item.deep_link ? item.deep_link : {};
+    if (dl.umo) {
+      const scopeInput = $("dwScope");
+      if (scopeInput && scopeInput.value.trim() !== String(dl.umo).trim()) {
+        scopeInput.value = String(dl.umo).trim();
+        scopeInput.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    }
+    const rawTarget = dl.view || (typeof item.deep_link === "string" ? item.deep_link : "");
+    const { name: targetView, anchor } = normalizeView(rawTarget, dl.anchor || "");
+    if (targetView && views[targetView]) {
+      const currentMode = document.body.dataset.stageMode || "workbench";
+      const openInDrawer = currentMode !== "workbench" && STAGE_DRAWER_VIEWS.has(targetView);
+      setView(targetView, { focus: true, drawer: openInDrawer, anchor });
+      if (targetView === "books" && dl.id) {
+        state.bookId = String(dl.id);
+        studio.loadBook(state.bookId);
+      } else if (targetView === "cards" && dl.id) {
+        state.cardId = String(dl.id);
+        studio.loadCard(state.cardId);
+      }
+    }
+  });
   document.addEventListener("keydown", (event) => {
-    if (event.defaultPrevented || event.key !== "Escape" || !STAGE_DRAWER_VIEWS.has(state.view)) return;
+    if (event.defaultPrevented || event.key !== "Escape" || document.body.dataset.stageMode !== "cabin-drawer") return;
     if ($("wbDrawerHost")?.children.length) return;
     if (document.querySelector("#causal-panel:not([hidden]), dialog[open]")) return;
     if (CSS.supports("selector(:popover-open)") && document.querySelector(":popover-open")) return;
@@ -334,14 +454,19 @@ function wireActions() {
 export function boot() {
   const language = languagePicker();
   language.classList.add("dw-cabin-language");
-  document.querySelector(".dw-nav-tools")?.prepend(language);
+  const navTools = document.querySelector(".dw-nav-tools");
+  const themeBtn = $("dwTheme");
+  if (navTools && themeBtn) navTools.insertBefore(language, themeBtn);
+  else navTools?.prepend(language);
   organizeTabClusters();
   wireTabs();
   wireActions();
   const query = new URLSearchParams(location.search);
   // Companion panels offer "return to cabin" even before the first card is set up.
-  const requested = query.get("view") || (query.has("series_entry") ? "cabin" : "");
-  landingView = Object.hasOwn(views, requested) ? requested : null;
-  setView("overview", { remember: false });
+  const requestedRaw = query.get("view") || (query.has("series_entry") ? "cabin" : "");
+  const normalized = normalizeView(requestedRaw);
+  landingView = Object.hasOwn(views, normalized.name) ? normalized.name : null;
+  landingAnchor = normalized.anchor;
+  setView("overview", { remember: false, drawer: false });
   void loadOverview();
 }

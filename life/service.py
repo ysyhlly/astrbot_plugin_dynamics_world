@@ -4,10 +4,10 @@
 
 import asyncio
 import datetime
+import hashlib
 import inspect
 import json
 import re
-import time
 from collections.abc import AsyncGenerator
 
 from apscheduler.executors.asyncio import AsyncIOExecutor
@@ -27,7 +27,10 @@ from .core.injector import (
 )
 from .core.narrative import NarrativeEngine, normalize_scope
 from .core.narrative_io import WorldIOBusy, WorldIOClosed
-from .core.narrative_prompt import build_narrative_prompt_parts
+from .core.narrative_prompt import (
+    build_narrative_prompt_parts,
+    build_narrative_prompt_segments,
+)
 from .core.narrative_types import AVAILABILITIES, _identity
 from .core.state import (
     CHINA_TIMEZONE,
@@ -308,18 +311,52 @@ class LifeService:
             raise NarrativeProviderUnavailable(
                 "Selected narrative provider has no text_chat method"
             )
+        parameters = inspect.signature(text_chat).parameters
+        accepts_kwargs = any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values()
+        )
+        supports_system_prompt = "system_prompt" in parameters or accepts_kwargs
+        supports_contexts = "contexts" in parameters or accepts_kwargs
+        shared_context_block = ""
         if request.get("resident_isolated"):
             from ..resident_runtime import build_prompt_parts
 
             system_prompt, prompt = build_prompt_parts(request)
+        elif supports_system_prompt and supports_contexts:
+            system_prompt, shared_context_block, prompt = (
+                build_narrative_prompt_segments(request, character)
+            )
         else:
             system_prompt, prompt = build_narrative_prompt_parts(request, character)
         from .core.narrative_schema import narrative_schema
 
-        kwargs = {
-            "session_id": "dynamics_world_narrative_" + str(time.time_ns()),
-            "contexts": [],
-        }
+        prefix_hash = (
+            hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()[:12]
+            if system_prompt
+            else ""
+        )
+        kwargs: dict = {}
+        if "session_id" in parameters or accepts_kwargs:
+            kwargs["session_id"] = (
+                f"dynamics_world_narrative_{prefix_hash}"
+                if prefix_hash
+                else "dynamics_world_narrative"
+            )
+        if supports_system_prompt:
+            kwargs["system_prompt"] = system_prompt
+        else:
+            prompt = f"{system_prompt}\n{prompt}"
+        if supports_contexts:
+            if supports_system_prompt and prefix_hash:
+                anchor = shared_context_block or (
+                    f"[cache_anchor task=dynamics_world.narrative prefix={prefix_hash}]"
+                )
+                kwargs["contexts"] = [
+                    {"role": "user", "content": anchor},
+                    {"role": "assistant", "content": "OK"},
+                ]
+            else:
+                kwargs["contexts"] = []
         if getattr(provider, "provider_config", {}).get(
             "type"
         ) == "googlegenai_chat_completion" or any(
@@ -329,14 +366,6 @@ class LifeService:
             kwargs["optimizer_operation_id"] = str(
                 request.get("inference_call_id", "")
             ).replace("-", "")
-        parameters = inspect.signature(text_chat).parameters
-        accepts_kwargs = any(
-            p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values()
-        )
-        if "system_prompt" in parameters or accepts_kwargs:
-            kwargs["system_prompt"] = system_prompt
-        else:
-            prompt = f"{system_prompt}\n{prompt}"
         supports_retry_limit = "request_max_retries" in parameters or accepts_kwargs
         if supports_retry_limit:
             kwargs["request_max_retries"] = 1
@@ -1285,6 +1314,34 @@ class LifeService:
 
         yield event.plain_result(self._format_full_state(data))
 
+    async def regenerate_plan(self, scope: dict, *, extra: str = "") -> dict:
+        """Manually regenerate today's schedule in either narrative or legacy mode."""
+        if self.config.get("mode", "legacy") == "narrative":
+            return await self.narrative.regenerate_daily_plan(scope, extra=extra)
+        if self.generator.is_generating:
+            return {
+                "schema_version": 1,
+                "status": "generating",
+                "message": "已有生成任务在进行中，请稍后再试。",
+            }
+        now = self._now()
+        _, target_date = self._select_current_state(now)
+        result = await self.generator.generate(target_date, force=True, extra=extra)
+        if not result.succeeded or result.state is None:
+            return {
+                "schema_version": 1,
+                "status": "failed",
+                "message": "重新生成失败，已保留原状态。"
+                if result.used_previous_state
+                else "状态生成失败，请稍后再试。",
+            }
+        return {
+            "schema_version": 1,
+            "status": "regenerated",
+            "plan_date": str(target_date),
+            "count": len(result.state.timeline),
+        }
+
     async def dls_regen(
         self,
         event: AstrMessageEvent,
@@ -1297,17 +1354,35 @@ class LifeService:
         Yields:
             生成进度和结果消息。
         """
+        extra = _extract_args_after(event.message_str, "群间日常 重新生成")
         if self.config.get("mode", "legacy") == "narrative":
-            yield event.plain_result(
-                "持续叙事模式保留已发生的历史。请用管理面板纠正当前状态，或 /群间日常 推进 检查待处理事件。"
-            )
+            scope = await self._scope_for_event(event)
+            if scope is None:
+                yield event.plain_result("当前会话没有匹配的角色生活状态。")
+                return
+            yield event.plain_result("正在保留已发生历史并重新生成今日剩余日程…")
+            res = await self.narrative.regenerate_daily_plan(scope, extra=extra)
+            if res.get("status") != "regenerated":
+                yield event.plain_result(
+                    str(res.get("message") or "今日日程重新生成失败，请稍后再试。")
+                )
+                return
+            lines = [
+                f"今日日程重新生成完成（{res.get('plan_date')}，共 {res.get('count', 0)} 项）："
+            ]
+            for item in (res.get("daily_plan") or [])[:12]:
+                start_dt = datetime.datetime.fromtimestamp(
+                    item["start"], CHINA_TIMEZONE
+                ).strftime("%H:%M")
+                end_dt = datetime.datetime.fromtimestamp(
+                    item["end"], CHINA_TIMEZONE
+                ).strftime("%H:%M")
+                lines.append(f"- {start_dt}–{end_dt}：{item['activity']}")
+            yield event.plain_result("\n".join(lines))
             return
         if self.generator.is_generating:
             yield event.plain_result("已有生成任务在进行中，请稍后再试。")
             return
-
-        # 保留命令分词之外的完整附加需求。
-        extra = _extract_args_after(event.message_str, "群间日常 重新生成")
 
         now = self._now()
         _, target_date = self._select_current_state(now)

@@ -1,5 +1,7 @@
 import {createAvatar, createGardenVisitorMesh} from './avatar-model.js';
 import {projectAvatar, projectAmbientMicro, projectJourneyRadar, resolveFurnitureLayout} from './avatar-state.js';
+import {DEFAULT_BODY,avoidBed,clearBedFloor,crossesBed} from './cabin-bed.js';
+import {cabinPlan,relocatePoint} from './cabin-plans.js';
 
 // Visual interpolation never commits world events or starts new daily actions.
 // Anchor changes glide through a Bezier-rounded navigation graph that dynamically
@@ -25,10 +27,10 @@ const BASE_NAV = {
   garden: {
     nodes: {
       GT: [1.05, -.25, 4.35], GS: [2.4, -.25, 4.35], GE: [4.85, -.25, 4.35], GX: [5.1, -.25, 5.15],
-      GP: [-2.1, -.25, 5.6], GG: [.6, -.25, 6.4],
+      GP: [-2.1, -.25, 5.6], GG: [.6, -.25, 6.4], SCALE: [5.05,-.25,6.23],
     },
-    edges: [['GT', 'GS'], ['GS', 'GE'], ['GE', 'GX'], ['GT', 'GP'], ['GT', 'GG']],
-    attach: {water: 'GX', flower_scent: 'GX', pond_koi: 'GP', gate_look: 'GG', threshold: 'GT'},
+    edges: [['GT', 'GS'], ['GS', 'GE'], ['GE', 'GX'], ['GX','SCALE'], ['GT', 'GP'], ['GT', 'GG']],
+    attach: {water: 'GX', flower_scent: 'GX', pond_koi: 'GP', gate_look: 'GG', survey:'GP',weigh:'SCALE', threshold: 'GT'},
   },
 };
 
@@ -47,7 +49,15 @@ export function buildDynamicRoomGraph(layout = null) {
   if (occ.back_wall === 'bed' || occ.back_wall === 'desk') {
     nodes.C2 = [1.35, .13, -1.65];
   }
-  return {nodes, edges: BASE_NAV.room.edges, attach};
+  if(layout?.plan?.id && layout.plan.id!=='cottage'){
+    const original=cabinPlan('cottage');
+    for(const [node,owner] of [['K','kitchen'],['W','washstand'],['E','table'],['P','plant'],['N','window']]){
+      nodes[node]=relocatePoint(original[owner],layout.plan[owner],BASE_NAV.room.nodes[node]);
+    }
+    nodes.D=layout.chairApproach;nodes.B=layout.bedApproach;
+    nodes.S=relocatePoint(original.shelves.back_wall,layout.plan.shelves.back_wall,BASE_NAV.room.nodes.S);
+  }
+  return {nodes, edges: BASE_NAV.room.edges, attach, obstacle:layout?.obstacle};
 }
 
 const VISITOR_GARDEN_SPOTS = {
@@ -92,7 +102,7 @@ export function pathLength(path) {
 }
 
 // Builds piecewise linear + quadratic Bezier corner arcs so interior turns never snap yaw.
-function buildRoundedSegments(path, cornerRadius = 0.42) {
+function buildRoundedSegments(path, cornerRadius = 0.42, obstacle = null) {
   if (!Array.isArray(path) || path.length === 0) return {segments: [], total: 0};
   if (path.length === 1) return {segments: [{kind: 'line', a: path[0], b: path[0], len: 0}], total: 0};
   if (path.length === 2) {
@@ -107,6 +117,7 @@ function buildRoundedSegments(path, cornerRadius = 0.42) {
     const lenNext = dist(path[i], path[i + 1]);
     const r = Math.min(cornerRadius, lenPrev * 0.38, lenNext * 0.38);
     if (r > 0.03) {
+      if (obstacle && crossesBed(lerp3(path[i],path[i-1],r/lenPrev),lerp3(path[i],path[i+1],r/lenNext),obstacle)) continue;
       trimIn[i] = r;
       trimOut[i] = r;
     }
@@ -228,7 +239,7 @@ function route(graph, start, goal) {
   return names;
 }
 
-function localPath(location, from, to, pose, roomGraph) {
+function graphPath(location, from, to, pose, roomGraph) {
   const graph = location === 'room' ? roomGraph : BASE_NAV.garden;
   const goalNode = graph?.attach[pose];
   if (!graph || !goalNode || flat(from, to) < .85) return [from, to];
@@ -242,13 +253,27 @@ function localPath(location, from, to, pose, roomGraph) {
   return path;
 }
 
+function localPath(location,from,to,pose,roomGraph) {
+  const path=graphPath(location,from,to,pose,roomGraph);
+  return location==='room'?avoidBed(path,roomGraph?.obstacle):path;
+}
+
+// Fold the legs (or turn onto the back) on the clear side, then slide onto
+// the bedding. Reversing these phases gets the whole rig clear before standing.
+function bedTransfer(aisle,onBed,t) {
+  const fold=Math.min(1,t/.46), slide=Math.max(0,(t-.46)/.54);
+  const point=lerp3(aisle,onBed,slide);
+  point[1]=aisle[1]+(onBed[1]-aisle[1])*fold;
+  return {point,fold};
+}
+
 function buildPath(fromLocation, from, toLocation, to, pose, roomGraph) {
   if (!fromLocation || fromLocation === toLocation || !THRESHOLDS[fromLocation] || !THRESHOLDS[toLocation]) {
     return localPath(toLocation, from, to, pose, roomGraph);
   }
   const out = localPath(fromLocation, from, THRESHOLDS[fromLocation], 'threshold', roomGraph);
   const inside = localPath(toLocation, THRESHOLDS[toLocation], to, pose, roomGraph);
-  return [...out, ...inside];
+  return out && inside ? [...out, ...inside] : null;
 }
 
 function modelPose(projection, overridePose = null) {
@@ -256,7 +281,7 @@ function modelPose(projection, overridePose = null) {
   const p = overridePose || projection.pose;
   if (projection.seated && p === 'read') return 'sit_read';
   if (projection.seated && p === 'write') return 'sit_write';
-  if (p === 'eat') return 'sit_eat';
+  if (p === 'eat') return projection.seated ? 'sit_eat' : 'idle';
   if (p === 'game') return 'sit_game';
   if (p === 'stroll') return 'walk';
   return p;
@@ -264,10 +289,11 @@ function modelPose(projection, overridePose = null) {
 
 const strollRoute = buildRoundedSegments([...STROLL_LOOP, STROLL_LOOP[0]], .55);
 
-export function createWorldAvatar(THREE, scene, render, {onDoorSwing = null} = {}) {
+export function createWorldAvatar(THREE, scene, render, {onDoorSwing = null, getBedSlot = ()=>null,getPlan=()=>cabinPlan('cottage')} = {}) {
   let character = null, modelId = '', textureIndex = 0, data = null, selection = {}, projection = null;
   let active = true, disposed = false, epoch = 0, guestEpoch = 0, frame = 0, lastFrame = 0, onState = () => {}, signature = '';
   let visual = null, yaw = 0, transit = null, settling = false, lastLocation = null, lastApproach = null, lastSample = 0, lastPath = null, strollFrom = 0;
+  let body=DEFAULT_BODY, previousBedSlot=null, lastOnBed=false;
   let guestAvatar = null, guestKey = '', guestModelData = null, guestModelId = 'builtin', guestTexIdx = 0;
   let guestVisual = null, guestYaw = 0, guestTransit = null, hadHydratedScene = false;
   let doorAngle = 0;
@@ -420,10 +446,10 @@ export function createWorldAvatar(THREE, scene, render, {onDoorSwing = null} = {
   }
 
   function sample(now = Date.now()) {
-    const layout = resolveFurnitureLayout(data);
+    const layout = resolveFurnitureLayout(data,body,getBedSlot(),getPlan());
     const roomGraph = buildDynamicRoomGraph(layout);
-    const base = projectAvatar(data, selection, now);
-    const micro = projectAmbientMicro(data, base, now);
+    const base = projectAvatar(data, selection, now,layout);
+    const micro = projectAmbientMicro(data, base, now,layout);
     const journeyRadar = (base.location === 'away' || data?.scene?.phase === 'travelling' || data?.actor?.phase === 'travelling')
       ? projectJourneyRadar(data, now)
       : null;
@@ -431,7 +457,16 @@ export function createWorldAvatar(THREE, scene, render, {onDoorSwing = null} = {
     const targetPos = micro.active ? micro.position : projection.position;
     const targetYaw = micro.active ? micro.rotationY : (projection.rotationY || 0);
     const effectivePose = micro.active ? micro.pose : projection.pose;
-    const navKey = micro.active && micro.id !== 'center_stand' ? micro.id : effectivePose;
+    const onBed=projection.location==='room' && ['rest','game','sleep'].includes(effectivePose);
+    const bedKey=layout.plan.id+'/'+layout.bedSlot;
+    if(previousBedSlot!==null && previousBedSlot!==bedKey && lastLocation==='room' && visual){
+      transit=null;
+      visual=lastOnBed && onBed?null:clearBedFloor([visual[0],.13,visual[2]],layout.obstacle);
+      if(visual)place(visual,yaw);
+      lastApproach=null;lastOnBed=false;
+    }
+    previousBedSlot=bedKey;
+    const navKey = projection.cabinActivity==='cabin_testimony'?'write':micro.active && micro.id !== 'center_stand' ? micro.id : effectivePose;
     const dt = lastSample ? Math.min(.1, (now - lastSample) / 1000) : 0.033;
     lastSample = now;
 
@@ -478,10 +513,11 @@ export function createWorldAvatar(THREE, scene, render, {onDoorSwing = null} = {
         // A fresh snapshot can move the chair or interrupt the activity partway through.
         lastApproach = transit.sitFrom ? transit.path.at(-1)
           : now < transit.start + transit.standUpMs ? transit.path[0] : null;
+        lastOnBed = !!lastApproach && (transit.sitFrom ? transit.ontoBed : transit.offBed);
         transit = null;
       }
       if (!projection.visible) {
-        visual = null; transit = null; settling = false; lastLocation = null; lastApproach = null;
+        visual = null; transit = null; settling = false; lastLocation = null; lastApproach = null; lastOnBed=false;
         character.setPose('idle', 0);
       } else if (still || effectivePose === 'walk' || !visual) {
         transit = null; settling = false; visual = [...targetPos]; yaw = targetYaw; place(visual, yaw);
@@ -491,13 +527,15 @@ export function createWorldAvatar(THREE, scene, render, {onDoorSwing = null} = {
         );
         lastLocation = projection.location;
         lastApproach = projection.approach;
+        lastOnBed=onBed;
       } else if (transit) {
         const elapsed = Math.max(0, now - transit.start);
         if (elapsed < transit.standUpMs) {
           const weight = easeInOut(elapsed / transit.standUpMs);
-          visual = lerp3(transit.from, transit.path[0], weight);
+          const transfer=transit.offBed?bedTransfer(transit.path[0],transit.from,1-weight):null;
+          visual = transfer?transfer.point:lerp3(transit.from, transit.path[0], weight);
           place(visual, yaw);
-          character.setPose('idle', 0, transit.standFrom, weight);
+          character.setPose('idle', 0, transit.standFrom, transfer?1-transfer.fold:weight);
         } else if (elapsed < transit.standUpMs + transit.walkMs) {
           // Stage 2: Smooth Bezier corner-rounded walk
           const walkElapsed = elapsed - transit.standUpMs;
@@ -513,17 +551,21 @@ export function createWorldAvatar(THREE, scene, render, {onDoorSwing = null} = {
           const weight = easeInOut(sitElapsed / transit.sitDownMs);
           transit.sitFrom ??= character.capturePose();
           transit.arrivalYaw ??= yaw;
-          visual = lerp3(transit.path.at(-1), transit.to, weight);
-          yaw = transit.arrivalYaw + shortestYaw(transit.arrivalYaw, targetYaw) * weight;
+          const transfer=transit.ontoBed?bedTransfer(transit.path.at(-1),transit.to,weight):null;
+          const poseWeight=transfer?transfer.fold:weight;
+          visual = transfer?transfer.point:lerp3(transit.path.at(-1), transit.to, weight);
+          yaw = transit.arrivalYaw + shortestYaw(transit.arrivalYaw, targetYaw) * poseWeight;
           place(visual, yaw);
-          character.setPose(modelPose(projection, effectivePose), phase, transit.sitFrom, weight);
+          character.setPose(modelPose(projection, effectivePose), phase, transit.sitFrom, poseWeight);
         } else {
           visual = [...transit.to];
+          yaw=targetYaw;
           place(visual, yaw);
           character.setPose(modelPose(projection, effectivePose), phase);
           transit = null;
           settling = true;
           lastApproach = projection.approach;
+          lastOnBed=onBed;
         }
       } else if (effectivePose === 'stroll' && strollFrom) {
         stroll(now, dt);
@@ -531,13 +573,23 @@ export function createWorldAvatar(THREE, scene, render, {onDoorSwing = null} = {
         const from = [...visual];
         const walkStart = lastApproach || from, walkEnd = projection.approach || targetPos;
         const path = buildPath(lastLocation, [...walkStart], projection.location, [...walkEnd], navKey, roomGraph);
+        if (!path) {
+          // If an unusually wide model cannot fit the aisle, hold the safe
+          // side until a new destination or furniture layout supplies a route.
+          visual=clearBedFloor([...walkStart],layout.obstacle);
+          place(visual,yaw);
+          character.setPose('idle',0);
+          lastApproach=null;lastOnBed=false;settling=false;lastPath=null;
+          updateDoorProximity(dt);publish();render();
+          return projection;
+        }
         lastPath = path;
-        const route = buildRoundedSegments(path);
+        const route = buildRoundedSegments(path,.42,layout.obstacle);
         const standUpMs = lastApproach ? STAND_UP_MS : 0;
         const sitDownMs = projection.approach ? SIT_DOWN_MS : 0;
         const walkMs = Math.max(460, route.total / WALK_SPEED * 1000);
         transit = {
-          path, route, from, to: [...targetPos],
+          path, route, from, to: [...targetPos],offBed:lastOnBed,ontoBed:onBed,
           start: now,
           standFrom: standUpMs ? character.capturePose() : null,
           standUpMs,
@@ -546,6 +598,7 @@ export function createWorldAvatar(THREE, scene, render, {onDoorSwing = null} = {
           totalMs: standUpMs + walkMs + sitDownMs,
         };
         lastApproach = null;
+        lastOnBed=false;
         if (!standUpMs) character.setPose('walk', 0);
       } else if (effectivePose === 'stroll') {
         stroll(now, dt);
@@ -555,6 +608,7 @@ export function createWorldAvatar(THREE, scene, render, {onDoorSwing = null} = {
         yaw += delta * Math.min(1, dt * 8);
         settling = Math.abs(delta) > .01;
         lastApproach = projection.approach;
+        lastOnBed=onBed;
         place(visual, yaw);
         character.setPose(modelPose(projection, effectivePose), phase);
       }
@@ -620,17 +674,20 @@ export function createWorldAvatar(THREE, scene, render, {onDoorSwing = null} = {
 
   return {
     placement,
+    refreshLayout:update,
     async setModel(model, index = 0) {
       const own = ++epoch;
       const next = createAvatar(THREE, model?.format === 'builtin' ? null : model, index, {molang: true});
       next.group.userData.worldAvatar = true;
       try {await next.ready;} catch (error) {next.dispose(); throw error;}
       if (own !== epoch || disposed) {next.dispose(); return false;}
+      body=next.bedBody();
       character?.dispose();
       character = next;
       modelId = model?.id || 'builtin';
       textureIndex = index;
       visual = null; transit = null; settling = false; lastLocation = null; lastApproach = null;
+      lastOnBed=false;previousBedSlot=null;
       scene.add(next.group);
       signature = '';
       update();

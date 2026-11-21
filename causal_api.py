@@ -16,6 +16,7 @@ class CausalAPIMixin:
             result["can_write"] = self.plugin.world.web.settings.web_panel_allow_write and viewer == "admin"
             if viewer == "admin":
                 result["cards"] = [{"id": c.id, "name": c.name} for c in self.plugin.world.store.list_cards() if c.persona_id != scope["persona_id"]]
+                result["plan_status"] = engine.get_plan_status(scope)
             return _ok(result)
         except (ValueError, TypeError) as exc:
             return _err(str(exc), 409)

@@ -15,7 +15,9 @@ const status=node('p','causal-status',tr('等待同步')),content=node('div','ca
 panel.append(head,scopeRow,status,content);
 document.querySelector('.wb-app')?.append(panel);
 const worldNavigation=document.querySelector('.dw-navigation');
-worldNavigation?.after(nav);
+const cabinCenter=document.getElementById('dwCabinCenter');
+if(cabinCenter)cabinCenter.append(nav);
+else worldNavigation?.after(nav);
 const smallViewport=window.matchMedia('(max-width: 650px)');
 const navEdgeProperty='--causal-nav-edge';
 let layoutFrame=0;
@@ -55,16 +57,39 @@ let active='now',data=null,world=null,replaying=false,seq=0,scope='',loading=fal
 let scopeSerial=0;
 let renderedBody='', renderedView='', deferredViewer=false, lastActorRevision=null;
 const time=v=>esc(formatTs(v));
+function dayKeyOf(ts){
+ const n=Number(ts);if(!Number.isFinite(n)||n<=0)return '0000-00-00';
+ const d=new Date(n*1000);
+ return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+function clockOf(ts){
+ const n=Number(ts);if(!Number.isFinite(n)||n<=0)return '--:--';
+ const d=new Date(n*1000);
+ return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+}
+function dayHeading(key,todayKey){
+ if(key==='0000-00-00')return tr('未指定日期');
+ const [y,m,d]=key.split('-').map(Number);
+ const dt=new Date(y,m-1,d);
+ const weekdays=[tr('周日'),tr('周一'),tr('周二'),tr('周三'),tr('周四'),tr('周五'),tr('周六')];
+ const wd=weekdays[dt.getDay()]||'';
+ const md=`${String(m).padStart(2,'0')}/${String(d).padStart(2,'0')}`;
+ if(key===todayKey)return `${tr('今天')} · ${md} ${wd}`;
+ const [ty,tm,td]=todayKey.split('-').map(Number);
+ const diffDays=Math.round((new Date(ty,tm-1,td)-dt)/86400000);
+ if(diffDays===1)return `${tr('昨天')} · ${md} ${wd}`;
+ return `${y}-${md} ${wd}`;
+}
 const section=(key,title,body)=>`<section class="causal-card" data-causal-key="${esc(key)}"><h3>${esc(title)}</h3>${body}</section>`;
 const empty=text=>`<p class="causal-empty">${esc(text)}</p>`;
-const tag=s=>`<span class="causal-tag">${esc(labels[s]?tr(labels[s]):s)}</span>`;
+const tag=(s,cls='')=>`<span class="causal-tag${cls?' '+cls:''}">${esc(labels[s]?tr(labels[s]):s)}</span>`;
 const hasWritePermission=()=>Boolean(data?.can_write)&&viewer.value==='admin';
 const canWrite=()=>hasWritePermission()&&!replaying&&!stale&&!loading;
 const viewerAvailable=()=>['admin','self'].includes(viewer.value)||
  menuResidents.some(actor=>actor.id===viewer.value);
 
 for(const [id,label] of tabs){
- const b=node('button','wb-button',msg(label));b.type='button';b.dataset.causalTab=id;b.setAttribute('aria-controls','causal-panel');b.setAttribute('aria-expanded','false');
+ const b=node('button','wb-button causal-seg-btn',msg(label));b.type='button';b.dataset.causalTab=id;b.setAttribute('aria-controls','causal-panel');b.setAttribute('aria-expanded','false');
  b.onclick=()=>{
   const opening=panel.hidden;
   active=id;errorText='';
@@ -73,15 +98,26 @@ for(const [id,label] of tabs){
    positionMobileSheet();
    document.dispatchEvent(new CustomEvent('dw-causal-open',{detail:true}));
   }
-  for(const x of nav.children){
+  for(const x of nav.querySelectorAll('[data-causal-tab]')){
    const expanded=String(x===b);
    if(x.getAttribute('aria-expanded')!==expanded)x.setAttribute('aria-expanded',expanded);
   }
   render();title.focus({preventScroll:true});
-  if(opening||!data||id==='manage'&&viewer.value==='admin')void refresh();
+  if(opening||!data||(id==='manage'||id==='agenda')&&viewer.value==='admin')void refresh();
  };nav.append(b);
 }
-close.onclick=()=>{panel.hidden=true;document.dispatchEvent(new CustomEvent('dw-causal-open',{detail:false}));for(const x of nav.children)x.setAttribute('aria-expanded','false');nav.querySelector(`[data-causal-tab="${active}"]`)?.focus();};
+const wbJump=node('button','wb-button causal-seg-btn causal-workbench-btn',msg('工作台'));
+wbJump.type='button';wbJump.id='cabinWorkbenchSwitch';wbJump.dataset.cabinWorkbench='true';
+wbJump.onclick=()=>{
+ if(!panel.hidden){
+  panel.hidden=true;
+  document.dispatchEvent(new CustomEvent('dw-causal-open',{detail:false}));
+  for(const x of nav.querySelectorAll('[data-causal-tab]'))x.setAttribute('aria-expanded','false');
+ }
+ document.dispatchEvent(new CustomEvent('cabin-open-view',{detail:{view:'overview',drawer:false}}));
+};
+nav.append(wbJump);
+close.onclick=()=>{panel.hidden=true;document.dispatchEvent(new CustomEvent('dw-causal-open',{detail:false}));for(const x of nav.querySelectorAll('[data-causal-tab]'))x.setAttribute('aria-expanded','false');nav.querySelector(`[data-causal-tab="${active}"]`)?.focus();};
 viewer.onchange=()=>{
  seq++;data=null;errorText='';lastActorRevision=null;
  render();void refresh();
@@ -117,8 +153,82 @@ function agendaForm(plan){
   <button class="wb-button" name="mode" value="cancelled" ${disabled} data-series-text="取消安排">取消安排</button>
  </form>`;
 }
+function renderPlanRegenCard(){
+ if(!hasWritePermission())return '';
+ const ps=data?.plan_status;
+ const st=ps?.status||'missing';
+ const failed=st==='failed';
+ const generating=st==='generating'||loading;
+ const disabled=canWrite()&&!generating&&!data?.paused?'':'disabled';
+ const headline=generating?tr('正在重新生成今日日程…')
+  :failed?tr('今日日程生成失败')
+  :st==='ready'?tr('今日日程已就绪（{0}）',ps?.plan_date||ps?.today||'')
+  :tr('今日日程尚未生成');
+ const details=[];
+ if(ps?.last_attempt_at&&st!=='ready')details.push(tr('最近尝试 ')+time(ps.last_attempt_at));
+ if(ps?.last_attempt_status&&st!=='ready'&&ps.last_attempt_status!=='advanced')details.push(ps.last_attempt_status);
+ if(ps?.last_error&&st!=='ready')details.push(ps.last_error);
+ if(ps?.plan_date&&ps?.today&&ps.plan_date!==ps.today)details.push(tr('当前日程停留在 {0}',ps.plan_date));
+ const toneCls=failed?' is-error':st==='missing'?' is-warning':'';
+ const btnCls=failed||st==='missing'?'wb-button primary':'wb-button';
+ const btnText=generating?tr('生成中…'):failed?tr('重新生成今日日程'):st==='ready'?tr('重新生成'):tr('生成今日日程');
+ return `<section class="causal-card causal-plan-banner${toneCls}" data-causal-key="plan-regen"><div class="causal-plan-head"><div><h3>${esc(headline)}</h3>${details.length?`<p class="causal-meta">${esc(details.join(' · '))}</p>`:''}</div><button class="${btnCls}" type="button" data-regen-plan="true" ${disabled}>${esc(btnText)}</button></div></section>`;
+}
+function renderPlanItem(p,nowTs){
+ const isCancelled=p.status==='cancelled';
+ const isActive=p.status==='running'||(p.status==='planned'&&Number(p.start)<=nowTs&&Number(p.end)>nowTs);
+ const statusCls=isActive?'is-running':p.status==='completed'?'is-done':p.status==='deferred'?'is-warn':(isCancelled||p.status==='interrupted')?'is-muted':'';
+ const startClock=clockOf(p.start),endClock=clockOf(p.end);
+ const sameDay=dayKeyOf(p.start)===dayKeyOf(p.end);
+ const rangeLabel=sameDay?`${startClock} – ${endClock}`:`${startClock} – ${tr('次日')} ${endClock}`;
+ const formHtml=agendaForm(p);
+ const metaBody=`<div class="causal-tracks"><div><small data-series-text="原计划">原计划</small><p>${time(p.original?.start||p.start)} → ${time(p.original?.end||p.end)}</p></div><div><small data-series-text="当前安排 / 实际">当前安排 / 实际</small><p>${time(p.start)} → ${time(p.end)}</p><p>${p.actual_start?tr('实际开始 ')+time(p.actual_start):tr('尚无执行回执')}${p.actual_end?tr(' · 结束 ')+time(p.actual_end):''}</p></div></div>${(p.history||[]).map(h=>`<p>${time(h.at)} · ${esc(h.reason)}</p>`).join('')}<p>${esc(tr("{0} 条行动回执",(p.receipts||[]).length))}</p>${formHtml}`;
+ return `<article class="causal-card causal-plan-item${isCancelled?' is-cancelled':''}${isActive?' is-current':''}" data-causal-key="plan:${esc(p.id)}"><div class="causal-plan-item-head"><span class="causal-plan-time">${esc(rangeLabel)}</span>${tag(p.status,statusCls)}</div><p class="causal-plan-activity">${esc(p.activity)}</p>${p.reason?`<p class="causal-meta">${esc(p.reason)}</p>`:''}<details data-causal-key="plan-reasons"><summary data-series-text="详情与调整">详情与调整</summary>${metaBody}</details></article>`;
+}
 function renderAgenda(){
- return (data?.agenda||[]).slice().reverse().map(p=>section('plan:'+p.id,p.activity,`${tag(p.status)}<div class="causal-tracks"><div><small data-series-text="原计划">原计划</small><p>${time(p.original?.start||p.start)} → ${time(p.original?.end||p.end)}</p></div><div><small data-series-text="当前安排 / 实际">当前安排 / 实际</small><p>${time(p.start)} → ${time(p.end)}</p><p>${p.actual_start?tr('实际开始 ')+time(p.actual_start):tr('尚无执行回执')}${p.actual_end?tr(' · 结束 ')+time(p.actual_end):''}</p></div></div>${p.reason?`<p>${esc(p.reason)}</p>`:''}<details data-causal-key="plan-reasons"><summary data-series-text="修订与执行依据">修订与执行依据</summary>${(p.history||[]).map(h=>`<p>${time(h.at)} · ${esc(h.reason)}</p>`).join('')}<p>${esc(tr("{0} 条行动回执",(p.receipts||[]).length))}</p></details>${agendaForm(p)}`)).join('')||empty(tr('日程从新版本启用后的计划开始积累；不会把旧计划补记为已经完成。'));
+ const header=renderPlanRegenCard();
+ const rawList=Array.isArray(data?.agenda)?data.agenda:[];
+ if(!rawList.length){
+  return header+empty(tr('日程从新版本启用后的计划开始积累；不会把旧计划补记为已经完成。'));
+ }
+ const nowTs=Number(world?.server_time||Date.now()/1000);
+ const todayKey=data?.plan_status?.today||dayKeyOf(nowTs);
+ const groups=new Map();
+ for(const item of rawList){
+  const key=dayKeyOf(item.start||item.original?.start);
+  if(!groups.has(key))groups.set(key,[]);
+  groups.get(key).push(item);
+ }
+ const sortedDays=[...groups.keys()].sort((a,b)=>{
+  if(a===todayKey&&b!==todayKey)return -1;
+  if(b===todayKey&&a!==todayKey)return 1;
+  const aActive=groups.get(a).some(x=>x.status!=='cancelled')?0:1;
+  const bActive=groups.get(b).some(x=>x.status!=='cancelled')?0:1;
+  if(aActive!==bActive)return aActive-bActive;
+  return b.localeCompare(a);
+ });
+ const firstOpenKey=groups.has(todayKey)?todayKey:(sortedDays.find(k=>groups.get(k).some(x=>x.status!=='cancelled'))||sortedDays[0]);
+ const dayBlocks=sortedDays.map(dayKey=>{
+  const dayItems=groups.get(dayKey).slice().sort((a,b)=>{
+   const sa=Number(a.start||a.original?.start||0);
+   const sb=Number(b.start||b.original?.start||0);
+   if(sa!==sb)return sa-sb;
+   const ca=a.status==='cancelled'?1:0,cb=b.status==='cancelled'?1:0;
+   if(ca!==cb)return ca-cb;
+   return Number(a.end||0)-Number(b.end||0);
+  });
+  const activeItems=dayItems.filter(x=>x.status!=='cancelled');
+  const cancelledItems=dayItems.filter(x=>x.status==='cancelled');
+  const openAttr=dayKey===firstOpenKey?' open':'';
+  const countText=cancelledItems.length
+   ?tr('{0} 项有效 · {1} 项已替代',activeItems.length,cancelledItems.length)
+   :tr('{0} 项安排',activeItems.length);
+  const cancelledBlock=cancelledItems.length
+   ?`<details class="causal-cancelled-group" data-causal-key="day-cancelled:${esc(dayKey)}"><summary>${esc(tr('查看当日已取消 / 替代的 {0} 项旧计划',cancelledItems.length))}</summary><div class="causal-day-list">${cancelledItems.map(p=>renderPlanItem(p,nowTs)).join('')}</div></details>`
+   :'';
+  return `<details class="causal-day-group${dayKey===todayKey?' is-today':''}" data-causal-key="day:${esc(dayKey)}"${openAttr}><summary class="causal-day-head"><strong>${esc(dayHeading(dayKey,todayKey))}</strong><span class="causal-day-count">${esc(countText)}</span></summary><div class="causal-day-list">${activeItems.map(p=>renderPlanItem(p,nowTs)).join('')||empty(tr('当日暂无有效安排。'))}${cancelledBlock}</div></details>`;
+ }).join('');
+ return header+dayBlocks;
 }
 function renderEvents(){return (data?.events||[]).map(e=>section('event:'+e.id,e.summary||e.operation||e.kind,`<p class="causal-meta">${time(e.occurred_at)} · ${esc(e.origin==='admin'||e.kind.startsWith('admin.')?tr('管理操作'):e.kind==='step.completed'?tr('完成回执'):tr('世界事件'))}</p>${e.reason?`<p>${esc(e.reason)}</p>`:''}<details><summary data-series-text="事件依据">事件依据</summary><p>${esc(e.id)}</p>${e.action_id?`<p>${esc(tr("关联行动：{0}",e.action_id))}</p>`:''}${e.result?`<p>${esc(e.result.summary||e.result.name||tr('状态变化已保存'))}</p>`:''}</details>`)).join('')||knowledge();}
 function knowledge(){return(data?.knowledge||[]).slice().reverse().map(k=>section('knowledge:'+k.id,k.text,`<p>${time(k.at)}</p>`)).join('')||empty(tr('还没有可展示的已感知事件。'));}
@@ -246,7 +356,7 @@ async function mutate(body){
 }
 content.addEventListener('click',e=>{
  if(e.target.closest('[data-retry]')){errorText='';refresh();}
- const jump=e.target.closest('[data-jump]');if(jump){close.click();document.dispatchEvent(new CustomEvent('cabin-open-view',{detail:jump.dataset.jump}));}
+ const jump=e.target.closest('[data-jump]');if(jump){close.click();document.dispatchEvent(new CustomEvent('cabin-open-view',{detail:{view:jump.dataset.jump,drawer:true}}));}
  const sceneAction=e.target.closest('[data-scene-action]');
  if(sceneAction&&canWrite()){
   const own=scopeSerial;
@@ -254,6 +364,20 @@ content.addEventListener('click',e=>{
   apiPost('scene',{umo:scope,action:sceneAction.dataset.sceneAction,expected_revision:world.scene.revision})
    .then(()=>{if(own===scopeSerial)return worldStream.refreshNow({fresh:true});})
    .catch(err=>{if(own===scopeSerial){status.textContent=err.message;sceneAction.disabled=false;}});
+ }
+ const regenBtn=e.target.closest('[data-regen-plan]');
+ if(regenBtn&&canWrite()){
+  const requestedScope=scope,own=scopeSerial;
+  const current=()=>own===scopeSerial&&requestedScope===scope;
+  loading=true;errorText=tr('正在保留已发生历史并重新生成今日日程…');render();
+  apiPost('life',{action:'regenerate_plan',umo:requestedScope})
+   .then(res=>{if(current())errorText=tr('今日日程已重新生成（{0} 项安排）。',res?.count??(res?.daily_plan?.length||0));})
+   .catch(err=>{if(current())errorText=tr('日程重新生成失败：')+err.message;})
+   .finally(async()=>{
+    if(current())await Promise.allSettled([worldStream.refreshNow({fresh:true}),refresh()]);
+    if(current()){loading=false;render();}
+   });
+  return;
  }
  const r=e.target.closest('[data-resident]');if(r)mutate({action:'resident_enabled',actor_id:r.dataset.resident,enabled:r.dataset.enabled==='true'});
  const i=e.target.closest('[data-cancel-invitation]');if(i)mutate({action:'cancel_invitation',invitation_id:i.dataset.cancelInvitation});

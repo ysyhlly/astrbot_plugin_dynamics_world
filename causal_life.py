@@ -125,6 +125,8 @@ class CausalLifeService(BackgroundResidentsMixin):
                     k in p for k in ("start", "end", "activity")
                 ):
                     continue
+                if str(p.get("id","")).startswith("cabin:"):
+                    continue
                 key = (
                     "plan_"
                     + hashlib.sha256(
@@ -368,6 +370,8 @@ class CausalLifeService(BackgroundResidentsMixin):
     def sync_plan(self, db, scope, plan, now):
         rev, doc = self.load(db, scope)
         for p in plan:
+            if str(p.get("id","")).startswith("cabin:") and any(a["id"]==p["id"] for a in doc["agenda"]):
+                continue
             key = (
                 "plan_"
                 + hashlib.sha256(
@@ -391,6 +395,7 @@ class CausalLifeService(BackgroundResidentsMixin):
                 a["start"] >= now
                 and a["id"] not in current
                 and a["status"] == "planned"
+                and not a.get("cabin_operation")
             ):
                 a["status"] = "cancelled"
                 a["reason"] = "新日程替代，原计划保留"
@@ -404,6 +409,13 @@ class CausalLifeService(BackgroundResidentsMixin):
         entry = next((p for p in doc["agenda"] if p["id"] == plan_id), None)
         if not entry or entry["status"] not in {"planned", "deferred", "interrupted"}:
             raise ValueError("日程不可开始")
+        if entry.get("cabin_operation"):
+            key, _, state = self.engine.scenes.load(db,scope)
+            flow=(state or {}).get("flow") or {}
+            if key!=entry.get("cabin_world") or flow.get("id")!=action_id or not any(
+                step.get("kind")==entry["cabin_operation"] for step in flow.get("steps",[])
+            ):
+                raise ValueError("主题日程需要对应的实际设施行动")
         entry.update(status="running", action_id=action_id, actual_start=now)
         self.save(db, scope, rev, doc)
 
@@ -412,6 +424,8 @@ class CausalLifeService(BackgroundResidentsMixin):
         entry = next((p for p in doc["agenda"] if p["id"] == plan_id), None)
         if not entry or entry["status"] not in {"planned", "deferred", "interrupted"}:
             raise ValueError("日程不可开始")
+        if entry.get("cabin_operation"):
+            raise ValueError("主题日程须凭实际设施行动的完成回执结算")
         entry.update(
             status="running",
             actual_start=now,

@@ -213,6 +213,7 @@ class KeepsakeTimelineService:
                 and prev_payload.get("lighting") == cues.get("lighting")
                 and prev_payload.get("location") == cues.get("location")
                 and prev_payload.get("pose") == cues.get("pose")
+                and prev_payload.get("cabin_style","cottage") == cues.get("cabin_style","cottage")
                 and (compact_furn is None or prev_payload.get("furniture") == compact_furn)
             )
             elapsed = now - float(latest["occurred"])
@@ -241,6 +242,7 @@ class KeepsakeTimelineService:
             "location": str(cues.get("location") or "room"),
             "place_name": str(cues.get("place_name") or ""),
             "pose": str(cues.get("pose") or "idle"),
+            "cabin_style":str(cues.get("cabin_style") or "cottage"),
             "cat_spot": str(cues.get("cat_spot") or "bed_nap"),
             "outfit_now": str(cues.get("outfit_now") or "")[:80],
             "summary": str(summary or "日常片刻")[:160],

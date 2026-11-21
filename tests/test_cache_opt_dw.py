@@ -19,6 +19,7 @@ from astrbot_plugin_dynamics_world.life.core.narrative_prompt import (
     NARRATIVE_RULES,
     build_narrative_prompt,
     build_narrative_prompt_parts,
+    build_narrative_prompt_segments,
 )
 from astrbot_plugin_dynamics_world.life.core.narrative_schema import narrative_schema
 from astrbot_plugin_dynamics_world.life.core.narrative_types import (
@@ -994,11 +995,12 @@ def test_phase2_narrative_prompt_slow_to_fast_key_ordering_and_prefix_ratio():
     assert req1["snapshot"]["spatial"]["places"]
     assert req1["snapshot"]["scene"]["rooms"]
 
-    # System prompt is 100% byte-identical and includes hoisted static world metadata.
+    # System prompt is 100% byte-identical and includes immutable map places (not volatile rooms).
     assert sys1 == sys2
     assert "静态世界基础信息：" in sys1
     assert "海边咖啡馆" in sys1
-    assert "书房" in sys1
+    assert "书房" not in sys1
+    assert "书房" in usr1
 
     # Verify strict slow-to-fast key order in projected JSON.
     raw_json = usr2.split("有类型与来源的状态和事件：\n", 1)[1]
@@ -1327,5 +1329,480 @@ async def test_phase3_deep_quiet_backoff_and_concise_rules(tmp_path, monkeypatch
         assert "输出简洁要求" in res_sys
     finally:
         await plugin.terminate()
+
+
+# --------------------------------------------------------------------------- Phase 4 static cache-anchor contexts
+
+
+@pytest.mark.asyncio
+async def test_phase4_static_contexts_anchor_for_narrative_and_resident_calls(
+    tmp_path, monkeypatch
+):
+    import hashlib
+
+    plugin, _, _ = await make_plugin(
+        tmp_path, monkeypatch, runtime_enabled=True, narrative_provider_id="bg"
+    )
+    try:
+        seed(plugin)
+        captured = []
+
+        async def text_chat(
+            prompt=None,
+            system_prompt=None,
+            session_id=None,
+            contexts=None,
+            func_tool=None,
+            request_max_retries=None,
+            response_format=None,
+        ):
+            captured.append(
+                {
+                    "prompt": prompt,
+                    "system_prompt": system_prompt,
+                    "session_id": session_id,
+                    "contexts": contexts,
+                }
+            )
+            return NS(completion_text='{"no_change": true}')
+
+        plugin.context.get_provider_by_id = lambda _: NS(
+            text_chat=text_chat, provider_config={}
+        )
+
+        # 1) Two consecutive narrative calls with different volatile now/events.
+        await plugin.life._narrative_model(
+            {
+                "scope": GLOBAL,
+                "now": 1_800_000_100.0,
+                "events": [{"event_id": "e1", "type": "life.tick", "text": "t1"}],
+            }
+        )
+        await plugin.life._narrative_model(
+            {
+                "scope": GLOBAL,
+                "now": 1_800_000_400.0,
+                "events": [{"event_id": "e2", "type": "life.tick", "text": "t2"}],
+            }
+        )
+        assert len(captured) == 2
+        c1, c2 = captured
+        assert c1["system_prompt"] == c2["system_prompt"]
+        assert c1["prompt"] != c2["prompt"]
+        expected_hash = hashlib.sha256(c1["system_prompt"].encode("utf-8")).hexdigest()[:12]
+        expected_contexts = [
+            {
+                "role": "user",
+                "content": f"[cache_anchor task=dynamics_world.narrative prefix={expected_hash}]",
+            },
+            {"role": "assistant", "content": "OK"},
+        ]
+        assert c1["contexts"] == c2["contexts"] == expected_contexts
+        assert c1["session_id"] == c2["session_id"] == f"dynamics_world_narrative_{expected_hash}"
+
+        # 2) Two consecutive resident_isolated calls with different volatile now.
+        captured.clear()
+        base_res = {
+            "scope": GLOBAL,
+            "resident_isolated": True,
+            "resident_context": {
+                "acting_actor_id": "emma",
+                "private_character": {"name": "艾玛", "personality": "温柔认真"},
+                "available_source_ids": ["observation:emma"],
+            },
+        }
+        await plugin.life._narrative_model({**base_res, "now": 1_800_001_000.0})
+        await plugin.life._narrative_model({**base_res, "now": 1_800_001_300.0})
+        r1, r2 = captured
+        assert r1["system_prompt"] == r2["system_prompt"]
+        assert r1["prompt"] != r2["prompt"]
+        res_hash = hashlib.sha256(r1["system_prompt"].encode("utf-8")).hexdigest()[:12]
+        assert res_hash != expected_hash
+        assert r1["contexts"] == r2["contexts"] == [
+            {
+                "role": "user",
+                "content": f"[cache_anchor task=dynamics_world.narrative prefix={res_hash}]",
+            },
+            {"role": "assistant", "content": "OK"},
+        ]
+        assert r1["session_id"] == r2["session_id"] == f"dynamics_world_narrative_{res_hash}"
+    finally:
+        await plugin.terminate()
+
+
+@pytest.mark.asyncio
+async def test_phase4_strict_mock_without_contexts_param_works_cleanly(
+    tmp_path, monkeypatch
+):
+    plugin, _, _ = await make_plugin(tmp_path, monkeypatch, runtime_enabled=True)
+    try:
+        seed(plugin)
+        seen = {}
+
+        async def strict_chat(prompt=None, system_prompt=None):
+            seen["prompt"] = prompt
+            seen["system_prompt"] = system_prompt
+            return NS(completion_text='{"no_change": true}')
+
+        plugin.life.generator._get_provider = lambda: asyncio.sleep(
+            0, result=NS(text_chat=strict_chat, provider_config={})
+        )
+        res = await plugin.life._narrative_model(
+            {"scope": GLOBAL, "now": 1_800_000_500.0, "events": []}
+        )
+        assert res == {"no_change": True}
+        assert NARRATIVE_RULES in seen["system_prompt"]
+        assert "1800000500.0" in seen["prompt"]
+    finally:
+        await plugin.terminate()
+
+
+# --------------------------------------------------------------------------- Phase 5 cross-group prefix sharing & ambient throttling
+
+
+@pytest.mark.asyncio
+async def test_phase5_two_different_groups_share_byte_identical_system_prompt_and_contexts0(
+    tmp_path, monkeypatch
+):
+    plugin, _, _ = await make_plugin(
+        tmp_path,
+        monkeypatch,
+        runtime_enabled=True,
+        narrative_provider_id="bg",
+        narrative_all_groups=True,
+    )
+    try:
+        seed(plugin)
+        # Add constant worldbook entry so get_character_context produces per-scope world_items + unique fingerprint!
+        book = WorldBook(
+            id="shared_wb",
+            name="共享世界书",
+            entries=[
+                WorldEntry(uid="c1", name="背景一", constant=True, content="小镇共有背景设定。" * 40),
+                WorldEntry(uid="c2", name="背景二", constant=True, content="角色共同记忆与世界观。" * 40),
+            ],
+        )
+        plugin.world.store.upsert_book(book)
+        plugin.world.store.set_global_active_books(["shared_wb"])
+
+        scope_a = {"platform": "qq", "umo": "qq:GroupMessage:111111", "persona_id": "p", "instance_id": "p"}
+        scope_b = {"platform": "qq", "umo": "qq:GroupMessage:222222", "persona_id": "p", "instance_id": "p"}
+
+        # Confirm get_character_context itself produces DIFFERENT per-group fingerprints
+        # (because world_items embed scope.umo), yet _narrative_model strips scope metadata!
+        char_a = await plugin.life._character(scope_a)
+        char_b = await plugin.life._character(scope_b)
+        assert char_a["fingerprint"] != char_b["fingerprint"]
+
+        captured = []
+
+        async def text_chat(
+            prompt=None,
+            system_prompt=None,
+            session_id=None,
+            contexts=None,
+            func_tool=None,
+            request_max_retries=None,
+            response_format=None,
+        ):
+            captured.append(
+                {
+                    "prompt": prompt,
+                    "system_prompt": system_prompt,
+                    "session_id": session_id,
+                    "contexts": contexts,
+                }
+            )
+            return NS(completion_text='{"no_change": true}')
+
+        plugin.context.get_provider_by_id = lambda _: NS(
+            text_chat=text_chat, provider_config={}
+        )
+
+        shared_snapshot_base = {
+            "world_space": {"shared": True, "active_guest": None, "recent_encounters": []},
+            "ecology": {
+                "season": {"solar_term": "小雪"},
+                "pantry": {"tea": 4, "berries": 5},
+                "flowerbed": {"stage": "blooming"},
+                "veg_patch": {"stage": "growing"},
+                "recent_meals": [{"name": "热汤"}],
+                "vitality": {"body": 0.8},
+            },
+            "environment": {
+                "mode": "fiction",
+                "source": "world_sim",
+                "fact_kind": "fiction",
+                "status": "ready",
+                "location": "海边小镇",
+                "timezone": "Asia/Shanghai",
+                "available": True,
+                "stale": False,
+                "sunrise": "06:18",
+                "sunset": "17:42",
+                "forecast": [{"hour": h, "temp": 20 + (h % 3)} for h in range(24)],
+                "current": {"temperature": 21.0, "label": "晴"},
+            },
+            "scene": {
+                "available": True,
+                "fact_kind": "fiction",
+                "map_revision": 1,
+                "rooms": [{"id": "study", "name": "书房", "lighting": "warm"}],
+                "places": {"home": {"kind": "home", "open": True}},
+                "room_designs": [{"room_id": "study", "furniture": [{"id": "desk_1", "kind": "desk"}]}],
+                "items": [{"id": "book_1", "name": "笔记", "kind": "book"}],
+                "projects": [{"id": "proj_1", "title": "海边随笔", "outline_excerpt": "大纲。" * 40}],
+                "action": None,
+            },
+            "spatial": {
+                "available": True,
+                "map_type": "virtual",
+                "map_revision": 1,
+                "place_id": "home",
+                "places": [
+                    {"id": "cafe", "name": "咖啡馆"},
+                    {"id": "home", "name": "住所"},
+                ],
+            },
+            "causal_life": {
+                "viewer": "actor",
+                "actor_id": "self",
+                "baseline": "已确认活动与完成回执",
+                "paused": False,
+                "growth": {"reading": {"sessions": 5}},
+                "agenda": [
+                    {"id": f"plan_{i}", "activity": f"阅读章节 {i}", "status": "planned", "start": 1_800_000_000.0 + i * 3600, "end": 1_800_003_600.0 + i * 3600}
+                    for i in range(6)
+                ],
+                "events": [{"id": "ce1", "kind": "step.completed", "summary": "倒茶", "occurred_at": 1_799_999_000.0, "source_ids": ["s1"]}],
+                "server_time": 1_800_000_100.0,
+            },
+            "humanlike": {
+                "preferences": [
+                    {"id": "p_global", "text": "喜欢靠窗看海", "status": "active", "origin": "personal"},
+                ],
+                "interests": [
+                    {"id": "i_global", "topic": "推理小说", "text": "在读新章节", "status": "active", "origin": "personal"},
+                ],
+                "goals": [],
+                "moods": [],
+                "nicknames": [],
+                "corrections": [],
+            },
+        }
+
+        req_a = {
+            "scope": scope_a,
+            "timezone": "Asia/Shanghai",
+            "local_date": "2026-11-21",
+            "day_end": 1_800_057_600.0,
+            "plan": [{"start": 1_800_000_000.0, "end": 1_800_003_600.0, "activity": "阅读与记录灵感"}],
+            "now": 1_800_000_100.0,
+            "local_datetime": "2026-11-21T09:00:00+08:00",
+            "events": [{"event_id": "evt_a", "type": "message.received", "text": "群A消息"}],
+            "snapshot": {
+                **shared_snapshot_base,
+                "scope": scope_a,
+                "commitments": [{"commitment_id": "c_a", "description": "群A约定", "status": "proposed"}],
+                "mailbox": {"unopened_count": 1},
+                "narrated_until": 1_800_000_000.0,
+                "humanlike": {
+                    **shared_snapshot_base["humanlike"],
+                    "preferences": shared_snapshot_base["humanlike"]["preferences"]
+                    + [{"id": "p_a", "text": "群A局部偏好", "status": "active", "origin": "conversation"}],
+                },
+            },
+        }
+        req_b = {
+            "scope": scope_b,
+            "timezone": "Asia/Shanghai",
+            "local_date": "2026-11-21",
+            "day_end": 1_800_057_600.0,
+            "plan": [{"start": 1_800_000_000.0, "end": 1_800_003_600.0, "activity": "阅读与记录灵感"}],
+            "now": 1_800_000_400.0,
+            "local_datetime": "2026-11-21T09:05:00+08:00",
+            "events": [{"event_id": "evt_b", "type": "message.received", "text": "群B消息"}],
+            "snapshot": {
+                **shared_snapshot_base,
+                "scope": scope_b,
+                "commitments": [{"commitment_id": "c_b", "description": "群B约定", "status": "proposed"}],
+                "mailbox": {"unopened_count": 3},
+                "narrated_until": 1_800_000_300.0,
+                "humanlike": {
+                    **shared_snapshot_base["humanlike"],
+                    "preferences": shared_snapshot_base["humanlike"]["preferences"]
+                    + [{"id": "p_b", "text": "群B局部偏好", "status": "active", "origin": "conversation"}],
+                },
+            },
+        }
+
+        await plugin.life._narrative_model(req_a)
+        await plugin.life._narrative_model(req_b)
+        assert len(captured) == 2
+        ca, cb = captured
+
+        # 1) 100% byte-identical system_prompt, contexts[0..1], and session_id across DIFFERENT groups!
+        assert ca["system_prompt"] == cb["system_prompt"]
+        assert ca["contexts"] == cb["contexts"]
+        assert ca["session_id"] == cb["session_id"]
+        assert "111111" not in ca["system_prompt"] and "222222" not in ca["system_prompt"]
+        assert "111111" not in ca["contexts"][0]["content"] and "222222" not in ca["contexts"][0]["content"]
+        assert "群A约定" not in ca["contexts"][0]["content"] and "群A局部偏好" not in ca["contexts"][0]["content"]
+        assert "书房" not in ca["system_prompt"] and "书房" in ca["contexts"][0]["content"]
+        assert "咖啡馆" in ca["system_prompt"]
+        assert "群A消息" in ca["prompt"] and "群B消息" in cb["prompt"]
+        assert "群A约定" in ca["prompt"] and "群B约定" in cb["prompt"]
+
+        # 2) system_prompt + contexts[0] accounts for >= 60% of total prompt bytes!
+        shared_bytes = len((ca["system_prompt"] + ca["contexts"][0]["content"]).encode("utf-8"))
+        total_bytes_a = shared_bytes + len(ca["prompt"].encode("utf-8"))
+        total_bytes_b = shared_bytes + len(cb["prompt"].encode("utf-8"))
+        assert shared_bytes / max(total_bytes_a, total_bytes_b) >= 0.60
+
+        # Also verify build_narrative_prompt_segments directly.
+        s1, ctx1, u1 = build_narrative_prompt_segments(req_a, char_a)
+        s2, ctx2, u2 = build_narrative_prompt_segments(req_b, char_b)
+        assert s1 == s2 and ctx1 == ctx2 and u1 != u2
+    finally:
+        await plugin.terminate()
+
+
+@pytest.mark.asyncio
+async def test_phase5_low_signal_group_ambient_chatter_skips_llm_while_real_signals_fire(
+    tmp_path,
+):
+    now = [1_800_000_000.0]
+    calls = []
+
+    async def model(request):
+        calls.append(request)
+        return {"no_change": True}
+
+    private_scope = {
+        "platform": "qq",
+        "umo": "qq:FriendMessage:999",
+        "persona_id": "p",
+        "instance_id": "p",
+    }
+    engine = NarrativeEngine(
+        tmp_path / "life.sqlite3",
+        {
+            "mode": "narrative",
+            "persona_id": "p",
+            "narrative_sessions": [UMO],
+            "narrative_private_chat_enabled": True,
+            "contextual_care_sessions": [UMO, private_scope["umo"]],
+            "social_chat_sessions": [UMO, private_scope["umo"]],
+        },
+        model,
+        lambda: now[0],
+    )
+    try:
+        # 1) Low-signal ambient group chat.message explicitly marked directed_to_bot=False
+        #    skips narrative LLM cleanly, marks observed_only, and advances observed_until!
+        res = await engine.advance(
+            [
+                {
+                    "event_id": "amb-1",
+                    "type": "chat.message",
+                    "occurred_at": now[0],
+                    "received_at": now[0],
+                    "scope": SCOPE,
+                    "actor_id": "u1",
+                    "text": "哈哈哈今天天气不错",
+                    "data": {"directed_to_bot": False, "event_impact": "none"},
+                }
+            ]
+        )
+        assert res["status"] == "no_change"
+        assert len(calls) == 0
+        with engine._db(notify=False) as db:
+            st = db.execute("SELECT status FROM events WHERE event_id='amb-1'").fetchone()[0]
+        assert st == "observed_only"
+
+        # 2) Low-signal ambient group social_opportunity (dir=False, short filler) skips outreach LLM!
+        await engine.ingest_events(
+            [
+                {
+                    "event_id": "amb-soc",
+                    "type": "message.received",
+                    "occurred_at": now[0],
+                    "received_at": now[0],
+                    "scope": SCOPE,
+                    "actor_id": "u2",
+                    "text": "哈哈哈",
+                    "data": {"directed_to_bot": False, "social_opportunity": True},
+                }
+            ]
+        )
+        assert await engine.review_outreach() == []
+        assert len(calls) == 0
+
+        # 3) Bot-directed message with care/commitment signal STILL fires narrative LLM!
+        now[0] += 10
+        res_dir = await engine.advance(
+            [
+                {
+                    "event_id": "dir-1",
+                    "type": "message.received",
+                    "occurred_at": now[0],
+                    "received_at": now[0],
+                    "scope": SCOPE,
+                    "actor_id": "u1",
+                    "text": "我今天头疼先去睡会儿，晚点跟你报平安",
+                    "data": {"directed_to_bot": True},
+                }
+            ]
+        )
+        assert res_dir["status"] == "no_change"
+        assert len(calls) == 1
+
+        # 4) Bot-directed message in group STILL triggers outreach LLM immediately!
+        now[0] += 30
+        out_res = await engine.review_outreach()
+        assert out_res == [{"status": "ok", "candidates": 0}]
+        assert len(calls) == 2
+
+        # 5) Bot-only delivery.success after no_change does NOT trigger another wasted outreach call!
+        now[0] += 310
+        await engine.ingest_events(
+            [
+                {
+                    "event_id": "bot-reply-1",
+                    "type": "delivery.success",
+                    "occurred_at": now[0],
+                    "received_at": now[0],
+                    "scope": SCOPE,
+                    "actor_id": "bot",
+                    "text": "好好休息哦",
+                    "data": {"recipient_user_id": "u1"},
+                }
+            ]
+        )
+        assert await engine.review_outreach() == []
+        assert len(calls) == 2
+
+        # 6) Private chat message STILL triggers outreach LLM cleanly!
+        await engine.ingest_events(
+            [
+                {
+                    "event_id": "priv-1",
+                    "type": "message.received",
+                    "occurred_at": now[0],
+                    "received_at": now[0],
+                    "scope": private_scope,
+                    "actor_id": "999",
+                    "text": "我出门坐高铁啦，到了跟你说",
+                    "data": {"directed_to_bot": True},
+                }
+            ]
+        )
+        priv_out = await engine.review_outreach()
+        assert priv_out == [{"status": "ok", "candidates": 0}]
+        assert len(calls) == 3
+    finally:
+        await engine.close()
+
+
 
 

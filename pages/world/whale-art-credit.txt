@@ -1,0 +1,12 @@
+DeepSeek 鲸鱼娘海边小屋 · 角色挂画
+
+「AI娘化」初始女仆版立绘，Pixiv 作品 148186519，第 1 张。
+鲸鱼娘角色原型「溟月」：上善无形。DeepSeek 女仆版设计与本张立绘：ZipZipPipe。
+作者发布页 https://www.pixiv.net/artworks/148186519
+逐图档案 https://github.com/HABAI182/ai-girls-atlas/blob/main/characters/deepseek/README.md
+校验来源 https://raw.githubusercontent.com/shuaizenge/ai-girls/71defe761164407514c1db9bac582d74eab4cdac/characters/deepseek/adult/zipzippipe-pixiv-148186519-p00.jpg
+SHA-256 73264faff3511347b1b9668d5d937cbb3f2402f8bb03cc158fc8a81bfc2d077c
+
+素材许可 CC BY-NC-SA 4.0（署名、非商业性使用、相同方式共享）。
+https://creativecommons.org/licenses/by-nc-sa/4.0/
+本插件保留 JPEG 原始字节和 1152 × 2048 比例，在 3D 画框内缩放展示。该图单独适用上述许可。

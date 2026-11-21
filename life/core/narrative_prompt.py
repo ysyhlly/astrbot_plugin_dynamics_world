@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
+from typing import Any
 
 NARRATIVE_RULES = """你是受角色设定、既有状态、事件证据和时间连续性约束的叙事者。
 scene.projects 是持续创作项目，不是每天重建的日程文本。有兴趣或已有目标时可以自主开始文字项目；已有 active 项目优先根据 stage、outline_excerpt、parts、latest_excerpt 继续，不因换天或重启就另开同名项目。没有合适动机可以休息或 no_change，睡眠与已有行动仍优先。
@@ -102,6 +104,7 @@ daily_plan:[{start,end,activity}]（仅全局needs_daily_plan=true时允许，�
 daily_plan直接使用程序提供的plan_window数值，不自行计算日期、时区或午夜。
 每个条目满足plan_window.start <= start < end <= plan_window.end；end是区间的排除边界，允许等于给定午夜数值。
 距离午夜很近时仍给出就寝准备或安静歇息的短条目衔接睡眠，不返回空计划让角色呆站；不把明天的安排放进今天的daily_plan。
+manual_plan_regeneration=true 时仅重新生成今日剩余时段的 daily_plan（非空，可附带 state 与 next_check），不要返回 world_action、movement、agenda_changes 或 world_updates，不要返回 no_change=true；已有已完成经历不改写。
 daily_plan 是有依据的当日安排，时间在 plan_window 内且不重叠。允许留白、休息与改变主意，不为填满全天制造活动。
 把生活方方面面规划清楚，按角色性格、当前兴趣、天气与已有约定安排：夜间就寝与沉睡、晨起洗漱、三餐（早餐/午餐/晚餐及餐后闲歇）、阅读/写作/掌机游戏/散步等兴趣活动、家务整理、社交互动、休息与小憩。已有计划、约定或正在执行的行动优先沿用，不无故推翻。
 每条 activity 用一句话写清具体在做什么（如"翻看随身读物并随手批注""掌机解谜消遣""整理书桌、洗漱与准备就寝""深夜熟睡安歇"），不写空泛的"休息""待着""无所事事"；单条不超过120字。
@@ -345,10 +348,13 @@ def _order_projected_for_cache(projected: dict) -> dict:
             "outreach_only",
             "background_only",
             "needs_daily_plan",
+            "manual_plan_regeneration",
+            "regeneration_hint",
             "offline_catchup",
             "care_policy",
             "social_policy",
             "plan",
+            "background_actor_profiles",
             # Tier 1 -> 2 -> 3 structured snapshot
             "snapshot",
             # Tier 2: hourly / medium (includes dynamic actor busy_until / last_served)
@@ -370,107 +376,39 @@ def _order_projected_for_cache(projected: dict) -> dict:
     )
 
 
-def build_narrative_prompt_parts(request: dict, character: dict) -> tuple[str, str]:
-    """Split static narrative rules/character prefix from slow-to-fast volatile state & events."""
-    allowed = {key: character.get(key) for key in ("persona_id", "fingerprint", "core_prompt", "group_rules", "world_items")}
-    projected = copy.deepcopy(request)
-    # Background life can create experiences, not invoke image tools or sends.
-    snap_proj = projected.get("snapshot", {})
-    if isinstance(snap_proj, dict):
-        snap_proj.pop("visual_sharing", None)
-        snap_proj.pop("keepsakes", None)
-    static_world: dict = {}
-    if isinstance(snap_proj, dict) and not request.get("outreach_only"):
-        spatial_ref = snap_proj.get("spatial")
-        if isinstance(spatial_ref, dict) and spatial_ref.get("places"):
-            static_world["spatial_places"] = spatial_ref.pop("places")
-        scene_ref = snap_proj.get("scene")
-        if isinstance(scene_ref, dict):
-            if scene_ref.get("rooms"):
-                static_world["scene_rooms"] = scene_ref.pop("rooms")
-            if scene_ref.get("places"):
-                static_world["scene_places"] = scene_ref.pop("places")
-    bg_ref = projected.get("background_world")
-    if isinstance(bg_ref, dict) and not request.get("outreach_only"):
-        if bg_ref.get("places") and "spatial_places" not in static_world:
-            static_world["world_places"] = bg_ref.pop("places")
-        if isinstance(bg_ref.get("actors"), list):
-            actor_profiles = []
-            for actor in bg_ref["actors"]:
-                if isinstance(actor, dict) and actor.get("profile"):
-                    actor_profiles.append(
-                        {
-                            "id": actor.get("id"),
-                            "name": actor.get("name"),
-                            "profile": actor.pop("profile"),
-                        }
-                    )
-            if actor_profiles:
-                static_world["background_actor_profiles"] = actor_profiles
-    if isinstance(snap_proj.get("ecology"), dict):
-        eco = snap_proj["ecology"]
-        snap_proj["ecology"] = {
-            "season": (eco.get("season") or {}).get("solar_term"),
-            "pantry": eco.get("pantry"),
-            "flower_stage": (eco.get("flowerbed") or {}).get("stage"),
-            "veg_stage": (eco.get("veg_patch") or {}).get("stage"),
-            "recent_meals": (eco.get("recent_meals") or [])[-2:],
-            "vitality": {k: v for k, v in (eco.get("vitality") or {}).items() if k not in {"inspiration", "mood_warmth"}},
-        }
-    if isinstance(snap_proj.get("mailbox"), dict):
-        mb = snap_proj["mailbox"]
-        if request.get("scope", {}).get("umo"):
-            # Conversation prompt only sees opened reactions from this session or general count
-            snap_proj["mailbox"] = {"unopened_count": mb.get("unopened_count", 0)}
-        else:
-            snap_proj["mailbox"] = {
-                "unopened_count": mb.get("unopened_count", 0),
-                "recent_opened": [
-                    {"title": p.get("title"), "reaction": p.get("reaction")}
-                    for p in (mb.get("parcels") or [])[:2]
-                    if p.get("status") == "opened"
-                ],
-            }
-    if isinstance(snap_proj.get("world_space"), dict):
-        ws = snap_proj["world_space"]
-        snap_proj["world_space"] = {
-            "shared": ws.get("shared", False),
-            "recent_encounters": (ws.get("recent_encounters") or [])[:2],
-            "active_guest": ws.get("active_guest"),
-        }
-    causal=snap_proj.get("causal_life")
-    if isinstance(causal,dict):
-        causal["events"]=[{k:v for k,v in e.items() if k in {"id","kind","summary","occurred_at","source_ids"}} for e in causal.get("events",[])[:6]]
-        causal["agenda"]=[{k:v for k,v in a.items() if k in {"id","activity","status","start","end","reason"}} for a in causal.get("agenda",[])[-12:]]
-        causal.pop("residents",None)
-    environment=projected.get("snapshot",{}).get("environment")
-    if isinstance(environment,dict):
-        keep={"mode","source","fact_kind","status","location","timezone","available","stale","sunrise","sunset","sun_times_estimated"}
-        if environment.get("available") and not environment.get("stale"):
-            keep.update({"current","forecast"})
-        projected["snapshot"]["environment"]={k:v for k,v in environment.items() if k in keep}
-        if "forecast" in projected["snapshot"]["environment"]:
-            projected["snapshot"]["environment"]["forecast"]=environment["forecast"][::3][:8]
-    spatial = projected.get("snapshot", {}).get("spatial")
-    if isinstance(spatial, dict):
-        spatial.pop("position", None)
-        if isinstance(spatial.get("journey"), dict):
-            spatial["journey"].pop("path", None)
-    projected.pop("inference_call_id", None)
-    # Event scope is fixed by the batch. Transport source_ids are aliases of
-    # earlier records, not valid output citations; retain only event_id here.
-    # The complete canonical envelope remains in the engine and durable queue.
-    keys = {"recipient_user_id", "interaction_evidence", "message_origin", "directed_to_bot", "attention_basis",
-            "quoted_message_id", "effect_confirmed", "effect_kind", "commitment_id", "completed_commitment_ids",
-            "goal_id", "interest_id", "reminder_id", "resource_id", "intent_id", "text_truncated", "original_length", "trigger", "environment_change", "scene_receipt",
-            "target_user_id", "reason", "status", "completed", "care_activity_id", "social_opportunity", "private_social_opportunity"}
-    for event in projected.get("events", []):
-        event.pop("scope", None)
-        event.pop("source_ids", None)
-        if isinstance(event.get("data"), dict):
-            event["data"] = {k:v for k,v in event["data"].items() if k in keys}
-    projected["citation_rule"] = "本批每条event_id是唯一可用于输出source_ids的标识；历史状态的来源不得复制为本次新效果。"
-    projected = _order_projected_for_cache(projected)
+def _sanitize_world_items(items: Any) -> list[dict]:
+    """Strip per-scope/timestamp metadata from character world items for cross-group cache stability."""
+    if not isinstance(items, list):
+        return []
+    cleaned: list[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        cleaned.append(
+            {k: v for k, v in item.items() if k not in {"scope", "occurred_at"}}
+        )
+    cleaned.sort(
+        key=lambda x: (
+            str(x.get("source_id") or ""),
+            str(x.get("title") or ""),
+            str(x.get("text") or ""),
+        )
+    )
+    return cleaned
+
+
+def _sort_by_id(rows: Any) -> list:
+    if not isinstance(rows, list):
+        return []
+    return sorted(
+        rows,
+        key=lambda r: str(r.get("id") or r.get("source_id") or r.get("name") or "")
+        if isinstance(r, dict)
+        else str(r),
+    )
+
+
+def _select_narrative_rules(request: dict) -> str:
     rules = NARRATIVE_RULES
     if request.get("causal_revision") is not None:
         rules += """
@@ -495,6 +433,122 @@ social_policy.enabled时，chat_openers有两条彼此独立的路径，必须�
 新的兴趣/近期经历开场使用短窗口：not_before至少now+60秒且不晚于now+1800秒，expires_at>not_before且<=now+7200秒。旧共同话题开场保持至少30分钟等待且最多24小时有效。每个会话至多一个待发/已认领开场，至少两小时冷却，同一生活候选24小时不重复。care_waits原有规则不变。
 输出简洁要求：无明确满足条件的新候选时直接返回{"no_change":true}，不做冗长推敲；有候选时reason和waiting_for各用一句简短话说明，输出紧凑JSON。
 只返回JSON：{no_change:布尔,care_waits:[{subject_id,reason_kind,reason,waiting_for,evidence_quote,source_ids,not_before,expires_at}],chat_openers:[{subject_id,topic,topic_candidate_id,reason,evidence_quote,source_ids,not_before,expires_at}]}。禁用的字段省略。最多各2个。"""
+    return rules
+
+
+def _prepare_narrative_projection(request: dict, character: dict) -> tuple[str, dict, dict]:
+    """Build invariant system_prompt, projected payload, and extracted actor profiles."""
+    # Strip per-scope fingerprint and per-scope world_items metadata so all groups
+    # sharing one persona produce a 100% byte-identical system_prompt.
+    allowed = {
+        "persona_id": character.get("persona_id"),
+        "core_prompt": character.get("core_prompt"),
+        "group_rules": character.get("group_rules"),
+        "world_items": _sanitize_world_items(character.get("world_items")),
+    }
+    projected = copy.deepcopy(request)
+    # Background life can create experiences, not invoke image tools or sends.
+    snap_proj = projected.get("snapshot", {})
+    if isinstance(snap_proj, dict):
+        snap_proj.pop("visual_sharing", None)
+        snap_proj.pop("keepsakes", None)
+    static_world: dict = {}
+    if isinstance(snap_proj, dict) and not request.get("outreach_only"):
+        spatial_ref = snap_proj.get("spatial")
+        if isinstance(spatial_ref, dict) and spatial_ref.get("places"):
+            static_world["spatial_places"] = _sort_by_id(spatial_ref.pop("places"))
+    bg_ref = projected.get("background_world")
+    actor_profiles: list[dict] = []
+    if isinstance(bg_ref, dict) and not request.get("outreach_only"):
+        if bg_ref.get("places") and "spatial_places" not in static_world:
+            static_world["world_places"] = _sort_by_id(bg_ref.pop("places"))
+        if isinstance(bg_ref.get("actors"), list):
+            for actor in bg_ref["actors"]:
+                if isinstance(actor, dict) and actor.get("profile"):
+                    actor_profiles.append(
+                        {
+                            "id": actor.get("id"),
+                            "name": actor.get("name"),
+                            "profile": actor.pop("profile"),
+                        }
+                    )
+            actor_profiles = _sort_by_id(actor_profiles)
+    if isinstance(snap_proj, dict) and isinstance(snap_proj.get("ecology"), dict):
+        eco = snap_proj["ecology"]
+        snap_proj["ecology"] = {
+            "season": (eco.get("season") or {}).get("solar_term"),
+            "pantry": eco.get("pantry"),
+            "flower_stage": (eco.get("flowerbed") or {}).get("stage"),
+            "veg_stage": (eco.get("veg_patch") or {}).get("stage"),
+            "recent_meals": (eco.get("recent_meals") or [])[-2:],
+            "vitality": {k: v for k, v in (eco.get("vitality") or {}).items() if k not in {"inspiration", "mood_warmth"}},
+        }
+    if isinstance(snap_proj, dict) and isinstance(snap_proj.get("mailbox"), dict):
+        mb = snap_proj["mailbox"]
+        if request.get("scope", {}).get("umo"):
+            # Conversation prompt only sees opened reactions from this session or general count
+            snap_proj["mailbox"] = {"unopened_count": mb.get("unopened_count", 0)}
+        else:
+            snap_proj["mailbox"] = {
+                "unopened_count": mb.get("unopened_count", 0),
+                "recent_opened": [
+                    {"title": p.get("title"), "reaction": p.get("reaction")}
+                    for p in (mb.get("parcels") or [])[:2]
+                    if p.get("status") == "opened"
+                ],
+            }
+    if isinstance(snap_proj, dict) and isinstance(snap_proj.get("world_space"), dict):
+        ws = snap_proj["world_space"]
+        snap_proj["world_space"] = {
+            "shared": ws.get("shared", False),
+            "recent_encounters": (ws.get("recent_encounters") or [])[:2],
+            "active_guest": ws.get("active_guest"),
+        }
+    causal = snap_proj.get("causal_life") if isinstance(snap_proj, dict) else None
+    if isinstance(causal, dict):
+        causal["events"] = [
+            {k: v for k, v in e.items() if k in {"id", "kind", "summary", "occurred_at", "source_ids"}}
+            for e in causal.get("events", [])[:6]
+        ]
+        causal["agenda"] = [
+            {k: v for k, v in a.items() if k in {"id", "activity", "status", "start", "end", "reason"}}
+            for a in causal.get("agenda", [])[-12:]
+        ]
+        causal.pop("residents", None)
+    environment = snap_proj.get("environment") if isinstance(snap_proj, dict) else None
+    if isinstance(environment, dict):
+        keep = {
+            "mode", "source", "fact_kind", "status", "location", "timezone",
+            "available", "stale", "sunrise", "sunset", "sun_times_estimated",
+        }
+        if environment.get("available") and not environment.get("stale"):
+            keep.update({"current", "forecast"})
+        snap_proj["environment"] = {k: v for k, v in environment.items() if k in keep}
+        if "forecast" in snap_proj["environment"]:
+            snap_proj["environment"]["forecast"] = environment["forecast"][::3][:8]
+    spatial = snap_proj.get("spatial") if isinstance(snap_proj, dict) else None
+    if isinstance(spatial, dict):
+        spatial.pop("position", None)
+        if isinstance(spatial.get("journey"), dict):
+            spatial["journey"].pop("path", None)
+    projected.pop("inference_call_id", None)
+    # Event scope is fixed by the batch. Transport source_ids are aliases of
+    # earlier records, not valid output citations; retain only event_id here.
+    # The complete canonical envelope remains in the engine and durable queue.
+    keys = {
+        "recipient_user_id", "interaction_evidence", "message_origin", "directed_to_bot", "attention_basis",
+        "quoted_message_id", "effect_confirmed", "effect_kind", "commitment_id", "completed_commitment_ids",
+        "goal_id", "interest_id", "reminder_id", "resource_id", "intent_id", "text_truncated", "original_length",
+        "trigger", "environment_change", "scene_receipt", "target_user_id", "reason", "status", "completed",
+        "care_activity_id", "social_opportunity", "private_social_opportunity",
+    }
+    for event in projected.get("events", []):
+        event.pop("scope", None)
+        event.pop("source_ids", None)
+        if isinstance(event.get("data"), dict):
+            event["data"] = {k: v for k, v in event["data"].items() if k in keys}
+    projected["citation_rule"] = "本批每条event_id是唯一可用于输出source_ids的标识；历史状态的来源不得复制为本次新效果。"
+    rules = _select_narrative_rules(request)
     system_prompt = (
         rules
         + "\n角色资料：\n"
@@ -504,8 +558,172 @@ social_policy.enabled时，chat_openers有两条彼此独立的路径，必须�
         system_prompt += "\n静态世界基础信息：\n" + json.dumps(
             static_world, ensure_ascii=False, separators=(",", ":"), sort_keys=False
         )
+    return system_prompt, projected, {"background_actor_profiles": actor_profiles}
+
+
+def _extract_shared_tier1(projected: dict, extras: dict) -> tuple[dict, dict]:
+    """Partition global cross-group Tier 1 state (for contexts[0]) from per-scope/per-tick state."""
+    dyn = copy.deepcopy(projected)
+    shared: dict = {}
+    is_scoped = bool((dyn.get("scope") or {}).get("umo"))
+
+    for key in ("timezone", "local_date", "day_end", "plan"):
+        if key in dyn and dyn[key] not in (None, "", []):
+            shared[key] = dyn.pop(key)
+
+    actor_profiles = extras.get("background_actor_profiles") or []
+    if actor_profiles:
+        shared["background_actor_profiles"] = actor_profiles
+
+    snap = dyn.get("snapshot")
+    if isinstance(snap, dict):
+        shared_snap: dict = {}
+
+        if isinstance(snap.get("world_space"), dict) and snap["world_space"]:
+            shared_snap["world_space"] = snap.pop("world_space")
+
+        if snap.get("horizons_desk"):
+            shared_snap["horizons_desk"] = snap.pop("horizons_desk")
+
+        if isinstance(snap.get("ecology"), dict) and snap["ecology"]:
+            eco = snap["ecology"]
+            shared_eco = {
+                k: eco.pop(k)
+                for k in ("season", "pantry", "flower_stage", "veg_stage", "recent_meals")
+                if k in eco
+            }
+            if shared_eco:
+                shared_snap["ecology"] = shared_eco
+            if not eco:
+                snap.pop("ecology", None)
+
+        if isinstance(snap.get("environment"), dict) and snap["environment"]:
+            env = snap["environment"]
+            shared_env = {
+                k: env.pop(k)
+                for k in (
+                    "mode", "source", "fact_kind", "status", "location", "timezone",
+                    "available", "stale", "sunrise", "sunset", "sun_times_estimated", "forecast",
+                )
+                if k in env
+            }
+            if shared_env:
+                shared_snap["environment"] = shared_env
+            if not env:
+                snap.pop("environment", None)
+
+        if isinstance(snap.get("scene"), dict) and snap["scene"]:
+            scene = snap["scene"]
+            shared_scene = {
+                k: scene.pop(k)
+                for k in (
+                    "available", "fact_kind", "map_revision", "rooms", "places",
+                    "room_designs", "removed_items", "archived_items", "projects", "items",
+                )
+                if k in scene
+            }
+            if shared_scene:
+                shared_snap["scene"] = shared_scene
+            if not scene:
+                snap.pop("scene", None)
+
+        if isinstance(snap.get("causal_life"), dict) and snap["causal_life"]:
+            cl = snap["causal_life"]
+            shared_cl = {
+                k: cl.pop(k)
+                for k in ("viewer", "actor_id", "baseline", "paused", "growth", "agenda")
+                if k in cl
+            }
+            if shared_cl:
+                shared_snap["causal_life"] = shared_cl
+            if not cl:
+                snap.pop("causal_life", None)
+
+        # Only global/personal commitments & humanlike traits belong in shared contexts[0]
+        # so two different group scopes share 100% byte-identical contexts[0].
+        if not is_scoped and snap.get("commitments"):
+            shared_snap["commitments"] = snap.pop("commitments")
+
+        for top_key in ("goals", "interests", "relationships"):
+            if not is_scoped and snap.get(top_key):
+                shared_snap[top_key] = snap.pop(top_key)
+
+        if isinstance(snap.get("humanlike"), dict):
+            hl = snap["humanlike"]
+            shared_hl: dict = {}
+            for bucket_key in ("preferences", "interests", "goals"):
+                rows = hl.get(bucket_key)
+                if not isinstance(rows, list) or not rows:
+                    continue
+                personal = [
+                    r for r in rows
+                    if isinstance(r, dict)
+                    and (r.get("origin") == "personal" or (not is_scoped and r.get("origin") != "conversation"))
+                ]
+                local_only = [r for r in rows if r not in personal]
+                if personal:
+                    shared_hl[bucket_key] = _sort_by_id(personal)
+                    if local_only:
+                        hl[bucket_key] = local_only
+                    else:
+                        hl.pop(bucket_key, None)
+            if shared_hl:
+                shared_snap["humanlike"] = shared_hl
+            if not hl:
+                snap.pop("humanlike", None)
+
+        if shared_snap:
+            shared["snapshot"] = shared_snap
+
+    if shared:
+        citation = dyn.pop("citation_rule", None)
+        ordered_shared: dict = {}
+        if citation:
+            ordered_shared["citation_rule"] = citation
+        ordered_shared.update(shared)
+        shared = ordered_shared
+
+    return shared, _order_projected_for_cache(dyn)
+
+
+def build_narrative_prompt_segments(
+    request: dict, character: dict
+) -> tuple[str, str, str]:
+    """Split into (system_prompt, shared_context_block, dynamic_user_prompt) for cross-group prefix caching.
+
+    - ``system_prompt``: 100% invariant rules + character core + sorted map places.
+    - ``shared_context_block`` (``contexts[0]``): deterministic cache anchor + global Tier 1 snapshot.
+    - ``dynamic_user_prompt`` (``prompt``): per-scope / per-tick Tier 2 + Tier 3 state & events.
+    """
+    system_prompt, projected, extras = _prepare_narrative_projection(request, character)
+    shared_tier1, dynamic_projected = _extract_shared_tier1(projected, extras)
+    prefix_hash = hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()[:12]
+    anchor = f"[cache_anchor task=dynamics_world.narrative prefix={prefix_hash}]"
+    if shared_tier1:
+        shared_context_block = (
+            anchor
+            + "\n共享世界基础状态：\n"
+            + json.dumps(
+                shared_tier1, ensure_ascii=False, separators=(",", ":"), sort_keys=False
+            )
+        )
+    else:
+        shared_context_block = anchor
+    dynamic_user_prompt = "有类型与来源的状态和事件：\n" + json.dumps(
+        dynamic_projected, ensure_ascii=False, separators=(",", ":"), sort_keys=False
+    )
+    return system_prompt, shared_context_block, dynamic_user_prompt
+
+
+def build_narrative_prompt_parts(request: dict, character: dict) -> tuple[str, str]:
+    """Split static narrative rules/character prefix from slow-to-fast volatile state & events."""
+    system_prompt, projected, extras = _prepare_narrative_projection(request, character)
+    actor_profiles = extras.get("background_actor_profiles") or []
+    if actor_profiles:
+        projected["background_actor_profiles"] = actor_profiles
+    ordered_projected = _order_projected_for_cache(projected)
     user_prompt = "有类型与来源的状态和事件：\n" + json.dumps(
-        projected, ensure_ascii=False, separators=(",", ":"), sort_keys=False
+        ordered_projected, ensure_ascii=False, separators=(",", ":"), sort_keys=False
     )
     return system_prompt, user_prompt
 

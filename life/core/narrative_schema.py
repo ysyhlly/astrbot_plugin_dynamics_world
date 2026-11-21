@@ -35,6 +35,49 @@ def narrative_schema(request: dict) -> dict:
     sources = {"type": "array", "items": text(300), "minItems": 1, "maxItems": 50}
     basic = {"source_ids": sources}
     member = {**basic, "subject_id": text(100)}
+    if request.get("manual_plan_regeneration") and not scoped:
+        return obj(
+            {
+                "schema_version": {"type": "integer", "enum": [1]},
+                "no_change": {"type": "boolean"},
+                "source_ids": sources,
+                "state": obj(
+                    {
+                        "activity": text(80),
+                        "activity_code": choice(
+                            [
+                                "writing",
+                                "gaming",
+                                "resting",
+                                "sleeping",
+                                "eating",
+                                "reading",
+                                "walking",
+                                "chores",
+                                "unknown",
+                            ]
+                        ),
+                        "availability": choice(
+                            ["available", "busy", "asleep", "unknown"]
+                        ),
+                        "subjective_state": text(300),
+                        "summary": text(300),
+                        "valid_until": stamp(),
+                    }
+                ),
+                "daily_plan": {
+                    "type": "array",
+                    "items": obj(
+                        {"start": stamp(), "end": stamp(), "activity": text(120)},
+                        ("start", "end", "activity"),
+                    ),
+                    "minItems": 1,
+                    "maxItems": 12,
+                },
+                "next_check": stamp(),
+            },
+            ("schema_version", "no_change", "daily_plan"),
+        )
     if request.get("outreach_only"):
         props = {"no_change": {"type": "boolean"}}
         common = {
@@ -207,6 +250,8 @@ def narrative_schema(request: dict) -> dict:
         kinds += sorted(PROJECT_KINDS)
         from ...garden_ecology import ECOLOGY_KINDS
         kinds += sorted(ECOLOGY_KINDS) + ["open_mailbox"]
+        from ...cabin_life import ACTIVITIES as CABIN_ACTIVITIES
+        kinds += sorted(CABIN_ACTIVITIES)
         properties["world_action"] = obj(
             {
                 "operation": choice(["start", "cancel", "interrupt", "resume"]),

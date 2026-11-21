@@ -8,7 +8,7 @@ ensure_current(
     __package__,
     __name__,
     __file__,
-    version="v0.23.0-rc.6",
+    version="v0.23.0-rc.7",
     checks=[
         ("life.core.narrative", "NarrativeEngine", "_world_map_v1"),
         ("life.core.narrative", "NarrativeEngine", "_horizons_sync_v1"),
@@ -124,7 +124,7 @@ class Main(Star):
     def get_dynamics_capabilities(self):
         return {
             "schema_version": 1,
-            "version": "v0.23.0-rc.6",
+            "version": "v0.23.0-rc.7",
             "world_integration_version": 2,
             "provider_id": "astrbot_plugin_dynamics_world",
             "display_name": "群间世界",
@@ -186,6 +186,48 @@ class Main(Star):
             "scope_bound": bool(umo and umo in sessions) if sessions else bool(self.config.get("narrative_all_groups")),
             "visual_assets_dir": self.get_reference_assets_directory(),
         }
+
+    def get_series_summary(self) -> dict:
+        """Public synchronous summary hook for series_presence v2 badges and live pulse."""
+        from .series_hooks import build_series_summary
+
+        return build_series_summary(self)
+
+    def get_series_scope_status(self, umo: str) -> dict:
+        """Public synchronous read-only status for a group/session scope in series_matrix."""
+        from .series_hooks import build_series_scope_status
+
+        return build_series_scope_status(self, umo)
+
+    def series_search_items(
+        self, query: str, scope: str = "", limit: int = 8
+    ) -> list[dict]:
+        """Public synchronous read-only search hook for federated Ctrl+K search."""
+        from .series_hooks import search_world_items
+
+        return search_world_items(self, query, scope=scope, limit=limit)
+
+    def get_journal_events(
+        self,
+        persona: str = "",
+        scope: str = "",
+        date: str = "today",
+        limit: int = 20,
+        start_ts: float | None = None,
+        end_ts: float | None = None,
+    ) -> list[dict]:
+        """Public synchronous read-only hook returning World's own living journal events."""
+        from .series_hooks import collect_world_journal_events
+
+        return collect_world_journal_events(
+            self,
+            persona=persona,
+            scope=scope,
+            date=date,
+            limit=limit,
+            start_ts=start_ts,
+            end_ts=end_ts,
+        )
 
     def _require_runtime(self):
         if not self.runtime_allowed():

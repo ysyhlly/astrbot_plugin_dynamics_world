@@ -1,80 +1,63 @@
-// A shallow, layered landscape between the rear of the sash and its glazing.
-export function addWindowLandscape(THREE, windowGroup, daySky, nightSky, skyColor) {
-  const positions = [], colors = [];
-  const paint = new THREE.Color();
-  function triangle(a, b, c, tint) {
-    positions.push(...a, ...b, ...c);
-    paint.setHex(tint);
-    for (let i = 0; i < 3; i++) colors.push(paint.r, paint.g, paint.b);
-  }
-  function mount(parent, name, tint) {
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-    geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-    const material = new THREE.MeshBasicMaterial({vertexColors: true});
-    if (tint) material.color = tint;
-    const mesh = new THREE.Mesh(geometry, material);
-    mesh.name = name;
+/* Pixel valley mounted behind the window bars. The sky material still follows
+ * the weather and the solar-arc controller moves the sun independently. */
+export function addWindowLandscape(THREE, windowGroup, daySky, nightSky, skyColor, textures) {
+  function picture(parent, name, width, height, worldWidth, worldHeight, depth, draw, tint) {
+    const canvas=document.createElement('canvas');
+    canvas.width=width; canvas.height=height;
+    const ctx=canvas.getContext('2d');
+    const rect=(x,y,w,h,color)=>{ctx.fillStyle=color; ctx.fillRect(x,y,w,h);};
+    draw(rect);
+    const map=new THREE.CanvasTexture(canvas);
+    map.colorSpace=THREE.SRGBColorSpace;
+    map.magFilter=map.minFilter=THREE.NearestFilter;
+    map.generateMipmaps=false;
+    textures.push(map);
+    const material=new THREE.MeshBasicMaterial({map,alphaTest:.5});
+    if (tint) material.color=tint;
+    const mesh=new THREE.Mesh(new THREE.PlaneGeometry(worldWidth,worldHeight),material);
+    mesh.name=name;
+    mesh.position.z=depth;
+    mesh.userData.keepSeparate=true;
     parent.add(mesh);
-    positions.length = colors.length = 0;
     return mesh;
   }
-  function ridge(points, z, color) {
-    for (let i = 1; i < points.length; i++) {
-      const [x0, y0] = points[i - 1], [x1, y1] = points[i];
-      triangle([x0,-.745,z], [x1,-.745,z], [x1,y1,z], color);
-      triangle([x0,-.745,z], [x1,y1,z], [x0,y0,z], color);
-    }
-  }
-  ridge([[-.98,-.17],[-.76,-.02],[-.60,-.09],[-.31,.13],[-.12,.025],[.15,.23],[.39,.09],[.59,.14],[.98,-.08]], .117, 0x91aeb6);
-  triangle([.15,.23,.118], [-.12,.025,.118], [.05,.05,.118], 0xb6c8c6);
-  triangle([-.31,.13,.118], [-.60,-.09,.118], [-.38,-.04,.118], 0xb6c8c6);
-  ridge([[-.98,-.25],[-.71,-.13],[-.46,-.18],[-.18,-.26],[.12,-.20],[.43,-.04],[.62,-.11],[.98,-.02]], .122, 0x769b91);
-  ridge([[-.98,-.37],[-.70,-.30],[-.45,-.35],[-.19,-.44],[.13,-.42],[.52,-.32],[.98,-.37]], .126, 0x8ba87b);
-  // A stream winds out of the valley into the foreground.
-  const banks = [[-.11,-.42,.014],[-.26,-.49,.031],[-.14,-.56,.053],[.09,-.64,.074],[.03,-.745,.12]];
-  for (let i = 1; i < banks.length; i++) {
-    const [ax,ay,aw] = banks[i - 1], [bx,by,bw] = banks[i], z = .128;
-    triangle([ax-aw,ay,z], [bx-bw,by,z], [bx+bw,by,z], 0xa5c8c6);
-    triangle([ax-aw,ay,z], [bx+bw,by,z], [ax+aw,ay,z], 0xa5c8c6);
-  }
-  for (const [x, y, h] of [[-.87,-.62,.51],[-.72,-.58,.33],[-.57,-.53,.23],[.36,-.55,.21],[.50,-.57,.33],[.72,-.66,.55],[.89,-.61,.39]]) {
-    for (let i = 0; i < 3; i++) {
-      const base = y + i*h*.22, top = base + h*(.56-i*.04), w = h*(.27-i*.06);
-      triangle([x-w,base,.134], [x,base,.134], [x,top,.134], 0x466e65);
-      triangle([x,base,.134], [x+w,base,.134], [x,top,.134], 0x628677);
-    }
-  }
-  mount(windowGroup, 'Mountain valley and pines', skyColor);
 
-  function ellipse(cx, cy, rx, ry, z, color) {
-    for (let i = 0; i < 24; i++) {
-      const a = i * Math.PI / 12, b = (i + 1) * Math.PI / 12;
-      triangle([cx,cy,z], [cx+rx*Math.cos(a),cy+ry*Math.sin(a),z], [cx+rx*Math.cos(b),cy+ry*Math.sin(b),z], color);
+  picture(windowGroup,'Pine valley',56,42,1.96,1.49,.129,rect=>{
+    const peaks=[22,20,17,16,18,20,17,15,13,10,12,15,18,19,16,15,18,20,18,16,15,17,20,22,21,19,18,20];
+    for (let i=0;i<peaks.length;i++) {
+      const y=peaks[i];
+      rect(i*2,y,2,42-y,i>=9&&i<14?'#7399ac':'#94afae');
+      if (y<=15) rect(i*2,y,2,i===9?3:1,'#eff0d2');
+      const meadow=24+Math.round(2.3*Math.sin(i*.38));
+      rect(i*2,meadow,2,42-meadow,'#82a684');
     }
-  }
-  const z = .114;
-  for (const [x, y, s] of [[-.61,.38,1],[.46,.52,.74]]) {
-    ellipse(x,y,.23*s,.040*s,z,0xe3e9df);
-    ellipse(x-.04*s,y+.034*s,.09*s,.057*s,z+.0005,0xeef0e5);
-    ellipse(x+.065*s,y+.016*s,.086*s,.042*s,z+.0005,0xeef0e5);
-  }
-  mount(daySky, 'High clouds', skyColor);
-  ellipse(0,0,.125,.125,.110,0xffce8a);
-  const sun = mount(daySky, 'Sun');
-  sun.userData.keepSeparate = true;
-
-  // A crescent with open sky showing through the curved inner edge.
-  for (let i = 0; i < 18; i++) {
-    const edge = n => {
-      const a = Math.PI * n / 18, bulge = Math.sin(a);
-      const y = .39 + .15 * Math.cos(a), x = .61 - .16 * bulge;
-      return [[x,y,z],[x+.082*bulge,y,z]];
-    };
-    const [a,b] = edge(i), [c,d] = edge(i+1);
-    triangle(a,c,d,0xf2e9c8);
-    triangle(a,d,b,0xf2e9c8);
-  }
-  mount(nightSky, 'Crescent moon');
+    for (let y=28;y<42;y++) {
+      const x=26+Math.round(4*Math.sin((y-28)*.48)), width=1+Math.floor((y-28)*.53);
+      rect(x,y,width,1,'#aed4c1');
+      if (y%3===0) rect(x,y,Math.max(1,width-2),1,'#d1dfc3');
+    }
+    for (const [x,y,s] of [[2,22,2],[9,26,1],[15,24,1],[38,24,1],[45,22,2],[51,26,1]]) {
+      rect(x+2*s,y,1*s,3*s,'#395e69');
+      rect(x+s,y+2*s,3*s,3*s,'#477469');
+      rect(x,y+4*s,5*s,3*s,'#365e60');
+      rect(x+2*s,y+7*s,s,2*s,'#735447');
+    }
+    rect(15,31,5,4,'#e2b57b');rect(14,30,7,2,'#8b544e');rect(16,29,3,1,'#a46a53');rect(17,33,1,2,'#594b4c');
+  },skyColor);
+  picture(daySky,'Fair-weather clouds',56,42,1.96,1.49,.115,rect=>{
+    for (const [x,y] of [[5,8],[36,5],[43,10]]) {
+      rect(x,y,8,2,'#e3ead9');rect(x+2,y-2,4,2,'#f6edd9');
+    }
+  },skyColor);
+  const sun=picture(daySky,'Sun',9,9,.25,.25,.113,rect=>{
+    rect(2,0,5,9,'#ffd88a');rect(0,2,9,5,'#ffd88a');rect(1,1,7,7,'#ffd88a');
+    rect(2,1,3,2,'#ffedaa');
+  });
+  const moon=picture(nightSky,'Crescent',10,11,.29,.32,.115,rect=>{
+    for (const [y,x,w] of [[0,4,3],[1,3,2],[2,2,2],[3,1,2],[4,1,2],[5,1,2],[6,1,3],[7,2,3],[8,3,5],[9,4,5],[10,6,2]]) {
+      rect(x,y,w,1,'#f9e9b0');
+    }
+  });
+  moon.position.x=.61; moon.position.y=.39;
   return sun;
 }

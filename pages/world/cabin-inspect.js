@@ -461,7 +461,7 @@ export function createCabinInspector(stage,{onResetFocus,onOpenDrawer,onCycleTim
    row.append(
     makeBtn('实况拍立得','primary',()=>runQuick('postcard_capture')),
     makeBtn('切换角色换装','',()=>{hideCard();runQuick('open_wardrobe');}),
-    makeBtn('展开日常安排','',()=>{hideCard();onOpenDrawer?.('life');}),
+    makeBtn('生活控制与故事','',()=>{hideCard();onOpenDrawer?.('life');}),
    );
   }else if(key==='gate'){
    const places=Array.isArray(data.map?.places)?data.map.places:(Array.isArray(actor.places)?actor.places:[]);
@@ -541,7 +541,7 @@ export function createCabinInspector(stage,{onResetFocus,onOpenDrawer,onCycleTim
    const paused=Boolean(scene.paused||data.actor?.paused);
    row.append(
     makeBtn(paused?'恢复生活':'暂停生活','primary',()=>runQuick(paused?'resume_life':'pause_life'),!canWrite),
-    makeBtn('展开日常安排','',()=>{hideCard();onOpenDrawer?.('life');}),
+    makeBtn('生活控制与故事','',()=>{hideCard();onOpenDrawer?.('life');}),
    );
   }else if(key==='kitchen'){
    const pantry=eco.pantry||{};
@@ -568,8 +568,7 @@ export function createCabinInspector(stage,{onResetFocus,onOpenDrawer,onCycleTim
    );
   }else if(key==='cat'){
    row.append(
-    makeBtn('展开故事约定','primary',()=>{hideCard();onOpenDrawer?.('stories');}),
-    makeBtn('展开日常安排','',()=>{hideCard();onOpenDrawer?.('life');}),
+    makeBtn('生活与故事','primary',()=>{hideCard();onOpenDrawer?.('stories');}),
    );
   }else if(key==='shelf'){
    appendFurnitureArrange('shelf',data,canWrite);

@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from . import creative_projects, room_design
+from . import cabin_life, creative_projects, room_design
 from .garden_ecology import ECOLOGY_DURATIONS, ECOLOGY_KINDS, ECOLOGY_LABELS
 from .life.core.narrative import NarrativeValidationError
 from .mailbox_visitors import MailboxVisitorService
@@ -83,6 +83,8 @@ DURATION = {
 }
 
 KINDS.update(STUDY_KINDS)
+KINDS.update(cabin_life.ACTIVITIES)
+LABELS.update({kind: spec.label for kind, spec in cabin_life.ACTIVITIES.items()})
 LABELS.update(STUDY_LABELS)
 KINDS.update(room_design.KINDS)
 LABELS.update(room_design.LABELS)
@@ -122,6 +124,7 @@ class SceneService:
     def __init__(self, engine):
         self.engine = engine
         with engine._db() as db:
+            db.execute(cabin_life.DDL)
             db.executescript("""CREATE TABLE IF NOT EXISTS world_scene_state(identity TEXT PRIMARY KEY,revision INTEGER NOT NULL,state TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS world_scene_events(event_id TEXT PRIMARY KEY,identity TEXT NOT NULL,kind TEXT NOT NULL,occurred REAL NOT NULL,payload TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS world_scene_event_scope ON world_scene_events(identity,occurred);""")
@@ -294,6 +297,7 @@ class SceneService:
             if self.engine.environment
             else {}
         )
+        env["_cabin"] = cabin_life.preference(db, self.key(db, scope))
         v20 = {}
         if getattr(self.engine, "ecology", None) is not None:
             _, _, v20["eco"] = self.engine.ecology.load(db, scope)
@@ -318,6 +322,10 @@ class SceneService:
         item = state["items"].get(target)
         if item and item.get("retired"):
             raise SceneActionError("物品已停用，已保存记录仅供查阅")
+        if kind in cabin_life.ACTIVITIES:
+            if set(step) != {"kind"}:
+                raise SceneActionError("主题活动只接受已登记的设施动作")
+            return cabin_life.validate_station(kind, state, actor, env.get("_cabin", {}))
         if kind == "enter":
             room = state["rooms"].get(target)
             if not room or room["place_id"] != place:
@@ -532,6 +540,8 @@ class SceneService:
             if step["kind"] == "travel"
             else "chores"
         )
+        if step["kind"] in cabin_life.ACTIVITIES:
+            code = cabin_life.ACTIVITIES[step["kind"]].code
         flow["activity_code"] = code
         self.life_state(
             db, scope, "正在" + label, code, now, "正在执行行动流程，后续步骤尚未完成。"
@@ -666,7 +676,11 @@ class SceneService:
                     self.check_step(state, step, actor, env, now)
                 item = state["items"].get(target)
                 design_result = None
-                if kind in creative_projects.KINDS:
+                if kind in cabin_life.ACTIVITIES:
+                    spec = cabin_life.ACTIVITIES[kind]
+                    design_result = {"operation":kind, "style":spec.style, "station":spec.zone,
+                                     "room_id":state.get("room_id"), "summary":spec.record}
+                elif kind in creative_projects.KINDS:
                     design_result = creative_projects.apply(
                         state, step, now, flow.get("origin", "legacy_unknown")
                     )
@@ -747,7 +761,9 @@ class SceneService:
                         "wetness": round(state["wetness"], 1),
                     },
                 }
-                self.audit(db, key, "step.completed", now, receipt)
+                event_id = self.audit(db, key, "step.completed", now, receipt)
+                if kind in cabin_life.ACTIVITIES:
+                    cabin_life.record_completion(db,scope,kind,flow["id"],flow["index"],event_id,now)
                 flow["index"] += 1
                 changed = True
                 if getattr(self.engine, "keepsakes", None) is not None:
@@ -778,7 +794,8 @@ class SceneService:
                             "curtains": active_d.get("curtains") or "open",
                             "lighting": active_d.get("lighting") or "warm",
                             "furniture": active_d.get("furniture"),
-                            "location": "room" if state.get("room_id") else "garden",
+                            "cabin_style":env.get("_cabin",{}).get("style","cottage"),
+                            "location": cabin_life.ACTIVITIES[kind].zone if kind in cabin_life.ACTIVITIES else "room" if state.get("room_id") else "garden",
                             "place_name": actor.get("place_name") or "",
                             "pose": kind,
                         },
@@ -923,6 +940,9 @@ class SceneService:
             ),
             "available_actions": self.available_actions(state, actor, env, now),
             "room_designs": room_design.public(state),
+            "cabin_style": env.get("_cabin", {}).get("style", "cottage"),
+            "cabin_style_revision":env.get("_cabin",{}).get("revision",0),
+            "cabin_stations":cabin_life.stations(state,env.get("_cabin",{})),
             "projects": creative_projects.public(state, admin),
             "map_revision": actor.get("map_revision", 0),
             "position_revision": actor.get("revision", 0),
@@ -934,7 +954,7 @@ class SceneService:
         if state.get("flow"):
             return [{"operation": "cancel"}]
         candidates = [
-            {"kind": k} for k in ("leave", "rest", "dry", *sorted(V20_FREE_KINDS))
+            {"kind": k} for k in ("leave", "rest", "dry", *sorted(V20_FREE_KINDS), *cabin_life.ACTIVITIES)
         ]
         candidates += [
             {"kind": "enter", "target_id": r["id"]} for r in state["rooms"].values()
@@ -1040,6 +1060,10 @@ class SceneService:
                     raise SceneActionError("无效行动目标")
                 kind = step["kind"]
                 target = step.get("target_id")
+                if kind in cabin_life.ACTIVITIES:
+                    if set(step)!={"kind"} or cabin_life.ACTIVITIES[kind].style!=scene.get("cabin_style"):
+                        raise SceneActionError("行动与当前小屋设施不匹配")
+                    continue
                 if kind in creative_projects.KINDS:
                     try:
                         creative_projects.validate(step, scene)

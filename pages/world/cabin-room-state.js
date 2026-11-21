@@ -1,6 +1,7 @@
 /* Dynamic room_design layout, keepsakes, companion cues & smooth cat locomotion. */
 import {smoothCornerPathPoint, pathLength} from './world-avatar.js';
 import {BED_PLACEMENTS, DESK_PLACEMENTS, furniturePoint} from './cabin-layout.js';
+import {cabinPlan,relocatePoint,SHELF_PLACEMENTS} from './cabin-plans.js';
 
 export const SLOT_COORDS = {
   left_wall: [-4.25, .14, .4],
@@ -15,18 +16,11 @@ export const SLOT_COORDS = {
   entry_rack: [2.25, .14, 3.15],
 };
 
-const SHELF_PLACEMENTS = {
-  back_wall: [-2.52, 2.48, -3.37, 0],
-  left_wall: [-4.68, 2.42, .45, Math.PI / 2],
-  right_wall: [3.62, 2.42, -.25, -Math.PI / 2],
-  near_window: [1.68, 2.48, -3.37, 0],
-  center: [-2.52, 2.48, -3.37, 0],
-};
 
 export const CAT_SPOTS = {
   bed_nap: {pos: [-3.55, 1.058, 1.22], ry: -.35, offset: [3.4, 2.5, 4.3], zone: 'room'},
   window_sun: {pos: [.52, 1.44, -3.26], ry: .18, offset: [2.8, 2.1, 4.8], zone: 'room'},
-  pond_watch: {pos: [-2.35, -.21, 6.08], ry: -.75, offset: [3.6, 2.6, 4.4], zone: 'garden'},
+  pond_watch: {pos: [-2.35, -.21, 6.08], ry: -.75, offset: [.68, 4.30, 3.90], target: [-3.04, .05, 6.21], zone: 'garden'},
   garden_patrol: {pos: [1.52, -.21, 5.25], ry: .45, offset: [3.6, 2.6, 4.5], zone: 'garden'},
   gate_wait: {pos: [.62, -.21, 6.68], ry: .08, offset: [3.4, 2.5, 4.4], zone: 'garden'},
 };
@@ -76,6 +70,36 @@ export function createCabinRoomState({
   let roomDesignSig = '', keepsakesSig = '', companionsSig = '';
   let catBaseY = 1.058, catSpotKey = 'bed_nap', catZone = 'room', catHydrated = false, catTransit = null;
   let bedPlacement = BED_PLACEMENTS.left_wall;
+  let deskPlacement=DESK_PLACEMENTS.near_window.desk,shelfPlacement=SHELF_PLACEMENTS.back_wall;
+  let lastDesign=[],lastKeepsakes={},currentPlan=cabinPlan('cottage');
+  const original=cabinPlan('cottage');
+  const fixedTargets=[
+    [inspectPresets.kitchen,'kitchen'],[inspectPresets.window,'window'],
+    [portalPresets.visual,'wardrobe'],[portalPresets.chat,'table'],
+  ].map(([preset,kind])=>({preset,kind,anchor:[...preset.anchor],target:[...preset.target]}));
+  function positionFor(slot,point){
+    if(slot.startsWith('desk_'))return relocatePoint(original.desks.near_window.desk,deskPlacement,point);
+    if(slot.startsWith('shelf_')||slot==='bookshelf')return relocatePoint(original.shelves.back_wall,shelfPlacement,point);
+    if(slot==='near_window'||slot==='windowsill_vase')return relocatePoint(original.window,currentPlan.window,point);
+    if(slot==='table_snack')return relocatePoint(original.table,currentPlan.table,point);
+    if(slot==='bedside')return relocatePoint(original.beds.left_wall,bedPlacement,point);
+    return point;
+  }
+
+  function setCabinPlan(plan) {
+    currentPlan=plan;
+    world.placeFixedFurniture(plan);
+    for(const {preset,kind,anchor,target} of fixedTargets){
+      preset.anchor=relocatePoint(original[kind],plan[kind],anchor);
+      preset.target=relocatePoint(original[kind],plan[kind],target);
+    }
+    for(const [key,kind,point] of [['kitchen','kitchen',[-4.52,.98,2.75]],['kitchen:1','table',[2.82,.56,1.84]],['window','window',[.05,2.24,-3.42]]]){
+      syncInspectBox(key,...relocatePoint(original[kind],plan[kind],point),plan[kind][3]);
+    }
+    applyRoomDesignState(...lastDesign);
+    if(catSpotKey==='window_sun')placeCatImmediate(catSpotKey);
+    applyKeepsakesState(lastKeepsakes);
+  }
 
   function syncInspectBox(key, x, y, z, yaw = 0) {
     const proxy = proxyMap.get(key);
@@ -89,7 +113,8 @@ export function createCabinRoomState({
   function applyMainFurnitureTransforms(furniture) {
     const deskItem = furniture.find(f => f?.kind === 'desk' && f.movable && DESK_PLACEMENTS[f.position]);
     const deskSlot = deskItem ? deskItem.position : 'near_window';
-    const dCfg = DESK_PLACEMENTS[deskSlot] || DESK_PLACEMENTS.near_window;
+    const dCfg = currentPlan.desks[deskSlot] || currentPlan.desks.near_window;
+    deskPlacement=dCfg.desk;
     world.desk.position.set(dCfg.desk[0], dCfg.desk[1], dCfg.desk[2]);
     world.desk.rotation.y = dCfg.desk[3];
     world.chair.position.set(dCfg.chair[0], dCfg.chair[1], dCfg.chair[2]);
@@ -103,7 +128,8 @@ export function createCabinRoomState({
 
     const bedItem = furniture.find(f => f?.kind === 'bed' && f.movable && BED_PLACEMENTS[f.position]);
     const bedSlot = bedItem ? bedItem.position : 'left_wall';
-    const bCfg = BED_PLACEMENTS[bedSlot] || BED_PLACEMENTS.left_wall;
+    const bCfg = currentPlan.beds[bedSlot] || currentPlan.beds.left_wall;
+    world.bed.userData.slot = bedSlot;
     world.bed.position.set(bCfg[0], bCfg[1], bCfg[2]);
     world.bed.rotation.y = bCfg[3];
     if (bedPlacement !== bCfg) {
@@ -119,15 +145,20 @@ export function createCabinRoomState({
 
     const shelfItem = furniture.find(f => f?.kind === 'bookcase' && f.movable && SHELF_PLACEMENTS[f.position]);
     const shelfSlot = shelfItem ? shelfItem.position : 'back_wall';
-    const sCfg = SHELF_PLACEMENTS[shelfSlot] || SHELF_PLACEMENTS.back_wall;
+    const sCfg = currentPlan.shelves[shelfSlot] || currentPlan.shelves.back_wall;
+    shelfPlacement=sCfg;
     world.shelf.position.set(sCfg[0], sCfg[1], sCfg[2]);
     world.shelf.rotation.y = sCfg[3];
+    world.shelfStand.visible = shelfSlot === 'right_wall';
     inspectPresets.shelf.anchor = [sCfg[0], sCfg[1] + .14, sCfg[2]];
     inspectPresets.shelf.target = [sCfg[0], sCfg[1], sCfg[2]];
+    portalPresets.horizons.anchor = [...inspectPresets.shelf.anchor];
+    portalPresets.horizons.target = [...inspectPresets.shelf.target];
     syncInspectBox('shelf', sCfg[0], sCfg[1] + .14, sCfg[2], sCfg[3]);
   }
 
   function applyRoomDesignState(roomDesign = {}, items = [], srvTime = Date.now() / 1000) {
+    lastDesign=[roomDesign,items,srvTime];
     const rd = Array.isArray(roomDesign) ? (roomDesign[0] || {}) : (roomDesign || {});
     const nextCurtain = ['open', 'half', 'closed'].includes(rd?.curtains) ? rd.curtains : 'open';
     const rawLamp = rd?.lighting || rd?.desk_lamp;
@@ -153,7 +184,7 @@ export function createCabinRoomState({
       .filter(f => f?.movable && ['desk', 'bed', 'bookcase'].includes(f.kind))
       .map(f => [f.kind, f.position]);
 
-    const sig = JSON.stringify([nextCurtain, nextLamp, noteId, itemPlacements, movedAux, mainSlots]);
+    const sig = JSON.stringify([currentPlan.id,nextCurtain, nextLamp, noteId, itemPlacements, movedAux, mainSlots]);
     if (sig === roomDesignSig) return;
     roomDesignSig = sig;
     curtainMode = nextCurtain;
@@ -185,7 +216,7 @@ export function createCabinRoomState({
     world.displayNoteGroup.visible = Boolean(noteId);
     clearDynamicChildren(world.roomSlotsGroup);
     for (const pl of itemPlacements.slice(0, 6)) {
-      const [sx, sy, sz] = SLOT_COORDS[pl.slot];
+      const [sx, sy, sz] = positionFor(pl.slot,SLOT_COORDS[pl.slot]);
       const g = world.sub(world.roomSlotsGroup, sx, sy, sz); g.userData.keepSeparate = true;
       if (pl.kind === 'umbrella') {
         world.box(g, .035, .68, .035, 0, .34, 0, 0x58736a, {castShadow: false});
@@ -201,7 +232,7 @@ export function createCabinRoomState({
     }
     for (const mf of movedAux.slice(0, 4)) {
       if ((mf.kind === 'lamp' && (mf.slot === 'desk_right' || mf.slot === 'desk_left')) || mf.kind === 'chair') continue;
-      const [fx, fy, fz] = SLOT_COORDS[mf.slot];
+      const [fx, fy, fz] = positionFor(mf.slot,SLOT_COORDS[mf.slot]);
       const g = world.sub(world.roomSlotsGroup, fx + .24, fy, fz); g.userData.keepSeparate = true;
       if (mf.kind === 'lamp') {
         world.box(g, .12, .03, .12, 0, .015, 0, 0x8c6d46);
@@ -221,9 +252,10 @@ export function createCabinRoomState({
   }
 
   function applyKeepsakesState(keepsakes = {}) {
+    lastKeepsakes=keepsakes;
     const vols = Array.isArray(keepsakes?.bookshelf_volumes) ? keepsakes.bookshelf_volumes.slice(0, 12) : [];
     const slots = keepsakes?.slots && typeof keepsakes.slots === 'object' ? keepsakes.slots : {};
-    const sig = JSON.stringify([vols.map(v => [v.id, v.spine_color]), Object.entries(slots).map(([k, v]) => [k, v?.id, v?.color])]);
+    const sig = JSON.stringify([currentPlan.id,deskPlacement,shelfPlacement,vols.map(v => [v.id, v.spine_color]), Object.entries(slots).map(([k, v]) => [k, v?.id, v?.color])]);
     if (sig === keepsakesSig) return;
     keepsakesSig = sig;
     clearDynamicChildren(world.shelfVolumesGroup);
@@ -239,7 +271,7 @@ export function createCabinRoomState({
     for (const [slotName, coord] of Object.entries(KEEPSAKE_COORDS)) {
       const item = slots[slotName];
       if (!item) continue;
-      const g = world.sub(world.keepsakesGroup, coord[0], coord[1], coord[2]); g.userData.keepSeparate = true;
+      const g=world.sub(world.keepsakesGroup,...positionFor(slotName,coord));g.userData.keepSeparate=true;
       const col = item.color || '#d8b27c';
       if (slotName === 'windowsill_vase') {
         world.box(g, .11, .14, .11, 0, .07, 0, 0xe6dfd0);
@@ -260,7 +292,7 @@ export function createCabinRoomState({
     const cfg = CAT_SPOTS[spot] || CAT_SPOTS.bed_nap;
     return cfg === CAT_SPOTS.bed_nap
       ? {...cfg, pos: furniturePoint(bedPlacement, -.30, 1.058, 1.17), ry: cfg.ry + bedPlacement[3]}
-      : cfg;
+      : cfg===CAT_SPOTS.window_sun ? {...cfg,pos:relocatePoint(original.window,currentPlan.window,cfg.pos)} : cfg;
   }
 
   function placeCatImmediate(spot) {
@@ -271,7 +303,7 @@ export function createCabinRoomState({
     world.cat.position.set(cfg.pos[0], cfg.pos[1], cfg.pos[2]);
     world.cat.rotation.y = cfg.ry;
     inspectPresets.cat.anchor = [cfg.pos[0], cfg.pos[1] + .12, cfg.pos[2]];
-    inspectPresets.cat.target = [cfg.pos[0], cfg.pos[1] + .06, cfg.pos[2]];
+    inspectPresets.cat.target = cfg.target || [cfg.pos[0], cfg.pos[1] + .06, cfg.pos[2]];
     inspectPresets.cat.offset = [...cfg.offset];
     syncInspectBox('cat', cfg.pos[0], cfg.pos[1] + .12, cfg.pos[2]);
     onCatDoorAngle?.(0);
@@ -371,6 +403,7 @@ export function createCabinRoomState({
   }
 
   return {
+    setCabinPlan,
     applyRoomDesignState,
     applyKeepsakesState,
     applyCatState,

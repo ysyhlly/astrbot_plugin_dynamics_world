@@ -29,6 +29,8 @@ class WorldAPI(CausalAPIMixin):
 
         routes = [
             ("world", self.overview, ["GET"]),
+            ("cabin_style", self.cabin_style_get, ["GET"]),
+            ("cabin_style", self.cabin_style_post, ["POST"]),
             ("stream", self.stream_get, ["GET"]),
             ("life", self.life_get, ["GET"]),
             ("life", self.life_post, ["POST"]),
@@ -49,6 +51,7 @@ class WorldAPI(CausalAPIMixin):
         routes.append(("projects", self.projects_get, ["GET"]))
         routes.append(("projects", self.projects_post, ["POST"]))
         routes.append(("activity", self.activity_get, ["GET"]))
+        routes.append(("journal_feed", self.journal_feed_get, ["GET"]))
         routes.extend(
             [
                 ("avatar", self.avatar_get, ["GET"]),
@@ -70,6 +73,52 @@ class WorldAPI(CausalAPIMixin):
                 methods,
                 "群间世界管理",
             )
+
+    async def cabin_style_get(self):
+        from . import cabin_life
+        guard = self.guard("cabin_style")
+        if guard is not None:
+            return guard
+        try:
+            umo = _query("umo")
+            scope = (await self.scope(umo))[0] if umo else None
+            engine = self.plugin.life.narrative
+            with engine._db() as db:
+                key = engine.scenes.key(db, scope) if scope else cabin_life.PREVIEW
+                result = cabin_life.view(db, engine.scenes, scope, key)
+            result["can_write"] = self.plugin.world.web.settings.web_panel_allow_write
+            return _ok(result)
+        except (ValueError, TypeError) as exc:
+            return _err(str(exc))
+
+    async def cabin_style_post(self):
+        from . import cabin_life
+        async with self.plugin._migration_lock:
+            guard = self.guard("cabin_style", True)
+            if guard is not None:
+                return guard
+            body = await _body()
+            if set(body) != {"umo","style","expected_revision"} or not isinstance(body["umo"], str):
+                return _err("小屋外观字段无效")
+            try:
+                scope = (await self.scope(body["umo"]))[0] if body["umo"] else None
+                engine = self.plugin.life.narrative
+                binding = {}
+                if scope:
+                    with engine._db() as db:
+                        key = engine.scenes.key(db, scope)
+                    catalog = await asyncio.to_thread(self.avatar_library().catalog, key)
+                    binding = catalog["selection"]
+                with engine._db() as db:
+                    db.execute("BEGIN IMMEDIATE")
+                    if scope:
+                        engine._ensure(db, scope, engine.clock())
+                    result = cabin_life.select(db,engine.scenes,scope,body["style"],body["expected_revision"],binding,engine.clock())
+                self.bus.notify()
+                result["can_write"] = True
+                return _ok(result)
+            except (ValueError, TypeError) as exc:
+                return _err(str(exc), 409 if "已改变" in str(exc) else 400)
 
     def guard(self, endpoint, write=False):
         if self.plugin._migrating:
@@ -564,6 +613,11 @@ class WorldAPI(CausalAPIMixin):
                     key,
                     {k: v for k, v in body.items() if k != "umo"},
                 )
+                if "home_room_id" in body or "garden_room_id" in body:
+                    from . import cabin_life
+                    with engine._db() as db:
+                        db.execute("BEGIN IMMEDIATE")
+                        cabin_life.update_binding(db, key, res)
                 self.bus.notify()
                 return _ok(res)
             except (ValueError, TypeError) as exc:
@@ -691,6 +745,32 @@ class WorldAPI(CausalAPIMixin):
                     else None,
                 }
                 result["server_time"] = engine.clock()
+            return _ok(result)
+        except (ValueError, TypeError) as exc:
+            return _err(str(exc))
+
+    async def journal_feed_get(self):
+        guard = self.guard("journal_feed")
+        if guard is not None:
+            return guard
+        try:
+            from .series_hooks import aggregate_journal_feed
+
+            umo = _query("scope") or _query("umo")
+            persona = _query("persona")
+            date = _query("date") or "today"
+            raw_limit = _query("limit")
+            try:
+                limit = int(raw_limit) if raw_limit else 30
+            except (TypeError, ValueError):
+                limit = 30
+            result = await aggregate_journal_feed(
+                self.plugin,
+                persona=persona,
+                scope=umo,
+                date=date,
+                limit=limit,
+            )
             return _ok(result)
         except (ValueError, TypeError) as exc:
             return _err(str(exc))
@@ -844,11 +924,29 @@ class WorldAPI(CausalAPIMixin):
                 state, target_date = self.plugin.life._select_current_state(
                     self.plugin.life._now()
                 )
+                raw_state = self.plugin.life.data_mgr.get_by_date(str(target_date))
+                legacy_failed = bool(raw_state and raw_state.status == "failed")
                 data["legacy"] = {
                     "date": str(target_date),
                     "text": self.plugin.life._format_full_state(state)
                     if state
-                    else "当天尚未生成作息",
+                    else ("当天作息生成失败" if legacy_failed else "当天尚未生成作息"),
+                }
+                data["plan_status"] = {
+                    "today": str(target_date),
+                    "plan_date": str(target_date) if state else "",
+                    "is_today": bool(state),
+                    "status": "generating"
+                    if self.plugin.life.generator.is_generating
+                    else (
+                        "ready"
+                        if state
+                        else ("failed" if legacy_failed else "missing")
+                    ),
+                    "last_attempt_at": None,
+                    "last_attempt_status": "failed" if legacy_failed else "",
+                    "last_error": "legacy_generation_failed" if legacy_failed else "",
+                    "generating": bool(self.plugin.life.generator.is_generating),
                 }
             return _ok(data)
         except (ValueError, TypeError) as exc:
@@ -859,7 +957,7 @@ class WorldAPI(CausalAPIMixin):
         if guard is not None:
             return guard
         body = await _body()
-        if set(body) - {"action", "umo", "patch", "intent_id"}:
+        if set(body) - {"action", "umo", "patch", "intent_id", "extra"}:
             return _err("请求包含未知字段")
         try:
             scope, _ = await self.scope(body.get("umo", ""))
@@ -872,6 +970,16 @@ class WorldAPI(CausalAPIMixin):
                 )
             elif action == "correct":
                 result = await life.correct_state(scope, body.get("patch", {}))
+            elif action == "regenerate_plan":
+                extra = str(body.get("extra") or "").strip()[:200]
+                result = await life.regenerate_plan(scope, extra=extra)
+                self.bus.notify()
+                if result.get("status") != "regenerated":
+                    code = 409 if result.get("status") in {"paused", "generating", "stale"} else 502
+                    return _err(
+                        str(result.get("message") or "日程重新生成失败，请稍后重试。"),
+                        code,
+                    )
             elif action == "cancel_intent":
                 intent = await life.get_intent(body.get("intent_id", ""))
                 actual_scope = (intent.get("item") or {}).get("scope", {})

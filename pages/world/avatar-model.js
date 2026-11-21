@@ -1,12 +1,14 @@
 import {compileMolangVector} from './molang.js';
+import {measureBedBody} from './cabin-bed.js';
 
 const AVATAR_HEIGHT = 1.7;
 const RADIANS = Math.PI / 180;
 const TAU = 2 * Math.PI;
 const ZERO = [0, 0, 0];
 const POSES = ['idle', 'walk', 'read', 'write', 'rest', 'sit', 'sit_read', 'sit_write', 'sleep',
-  'cook', 'wash', 'sweep', 'water', 'sit_eat', 'sit_game'];
+  'cook', 'wash', 'sweep', 'water', 'sit_eat', 'sit_game','survey','weigh'];
 const CLIP_NAMES = {
+  survey:['spyglass','survey'], weigh:['weighevidence','weigh'],
   idle: ['idle', 'stand', 'standing', 'breathe'],
   walk: ['walk', 'walking', 'move', 'locomotion'],
   read: ['read', 'reading', 'readbook', 'readingbook'],
@@ -24,9 +26,9 @@ const CLIP_NAMES = {
   sit_game: ['sitgame', 'sit_game', 'game', 'gaming', 'play', 'handheld'],
 };
 // Which held prop each pose shows (study props plus everyday household tools).
-const POSE_PROPS = {read: ['book'], sit_read: ['book'], write: ['notebook', 'pen'], sit_write: ['notebook', 'pen'],
+const POSE_PROPS = {survey:['spyglass'],weigh:['weight'],read: ['book'], sit_read: ['book'], write: ['notebook', 'pen'], sit_write: ['notebook', 'pen'],
   sweep: ['broom'], water: ['can'], sit_eat: ['bowl', 'spoon'], sit_game: ['handheld'], cook: ['ladle'], wash: ['brush']};
-const PROP_NAMES = ['book', 'notebook', 'pen', 'broom', 'can', 'bowl', 'spoon', 'handheld', 'ladle', 'brush'];
+const PROP_NAMES = ['book', 'notebook', 'pen', 'broom', 'can', 'bowl', 'spoon', 'handheld', 'ladle', 'brush','spyglass','weight'];
 const BONE_NAMES = {
   body: ['body', 'torso', 'chest', 'upperbody', 'bipedbody'],
   head: ['head', 'bipedhead'],
@@ -148,7 +150,13 @@ function createStudyProps(THREE, parent, box) {
   brush.rotation.z = 1.35;
   box(brush, 0x8fd0b0, [.022, .13, .022], [0, 0, 0]);
   box(brush, 0xf4efdc, [.03, .035, .03], [0, .07, .012]);
-  return {book, notebook, pen, broom, can, drops, bowl, spoon, handheld, ladle, brush};
+  const spyglass=hidden('spyglass',0,1.37,.24),weight=hidden('weight',-.12,.91,.24);
+  box(spyglass,0x405a83,[.090,.090,.31],[0,0,.08]);
+  box(spyglass,0xd6a65e,[.13,.13,.076],[0,0,.24]);
+  box(spyglass,0x9bd3d9,[.088,.088,.016],[0,0,.281]);
+  box(weight,0xbb955a,[.12,.10,.11],[0,-.035,0]);
+  box(weight,0xe5c487,[.058,.052,.061],[0,.038,0]);
+  return {book, notebook, pen, broom, can, drops, bowl, spoon, handheld, ladle, brush,spyglass,weight};
 }
 
 function createBuiltin(THREE, rig, geometries, materials) {
@@ -399,7 +407,7 @@ function placeHeldProps(props, pose, seconds) {
   const {book, notebook, pen} = props;
   const parent = book.parent;
   for (const {bone, local, point} of props.hands) parent.worldToLocal(bone.localToWorld(point.copy(local)));
-  for (const name of ['broom', 'can', 'ladle', 'brush', 'spoon']) if (props[name].visible) props[name].position.copy(right.point);
+  for (const name of ['broom', 'can', 'ladle', 'brush', 'spoon','weight','spyglass']) if (props[name].visible) props[name].position.copy(right.point);
   if (props.bowl.visible) props.bowl.position.copy(left.point);
   if (props.handheld.visible) props.handheld.position.copy(left.point).lerp(right.point, .5);
   if (pose === 'read' || pose === 'sit_read') {
@@ -622,7 +630,13 @@ function applyProcedural(roles, motion, pose, seconds) {
     rotate(rightKnee, 1.32);
   };
   const breath = Math.sin(seconds * 2.4);
-  if (pose === 'cook') {
+  if(pose==='survey'){
+    rotate(head,-.08,Math.sin(seconds*.57)*.12);rotate(body,-.025);
+    limb(rightArm,rightElbow,-1.32,-1.28);limb(leftArm,leftElbow,-1.02,-.82);
+  }else if(pose==='weigh'){
+    rotate(head,.22);rotate(body,.06);
+    limb(rightArm,rightElbow,-.85-Math.sin(seconds*1.55)*.24,-.66);limb(leftArm,leftElbow,-.48,-.32);
+  }else if (pose === 'cook') {
     // Stirring the pot: right hand circles the ladle, left steadies the handle.
     const stir = Math.sin(seconds * 3.6);
     motion.position.y = Math.abs(breath) * .008;
@@ -766,7 +780,7 @@ export function createAvatar(THREE, model = null, textureIndex = 0, options = {}
   const actions = {};
   const selectedClips = {};
   const clipSample = [0, 0, 0];
-  const molangVars = Object.create(null);
+  let molangVars = Object.create(null);
   let bases = [], character = null, texture = null, disposed = false, boneCount = 0;
   let status = builtin ? 'ready' : 'loading';
   let currentPose = 'idle', currentPhase = 0, error = null;
@@ -792,7 +806,7 @@ export function createAvatar(THREE, model = null, textureIndex = 0, options = {}
     }
     const study = Boolean(arms && character.props);
     const procedural = {idle: Boolean(roles.body || roles.head || arms), walk: legs, read: study, write: study, rest: legs, sit: legs, sit_read: legs && study, sit_write: legs && study, sleep: Boolean(roles.body || roles.head),
-      cook: arms, wash: arms, sweep: arms, water: arms, sit_eat: legs && arms, sit_game: legs && arms};
+      cook: arms, wash: arms, sweep: arms, water: arms, survey:arms, weigh:arms, sit_eat: legs && arms, sit_game: legs && arms};
     for (const pose of POSES) {
       const clip = chooseClip(clips, pose);
       if (clip) selectedClips[pose] = clip;
@@ -1003,7 +1017,21 @@ export function createAvatar(THREE, model = null, textureIndex = 0, options = {}
     };
   }
 
-  return {group, ready, capturePose, setPose, dispose, diagnostics};
+  function bedBody() {
+    const pose=currentPose, phase=currentPhase, liveVars=molangVars;
+    // Sampling the sitting and sleeping clips must not advance a real model's
+    // persistent Molang variables before its first displayed animation frame.
+    molangVars=Object.assign(Object.create(null),liveVars);
+    try {
+      return measureBedBody(THREE,{group,setPose});
+    } finally {
+      molangVars=Object.assign(Object.create(null),liveVars);
+      setPose(pose,phase);
+      molangVars=liveVars;
+    }
+  }
+
+  return {group, ready, capturePose, setPose, bedBody, dispose, diagnostics};
 }
 
 const OUTFIT_SYNONYMS = [

@@ -1,6 +1,6 @@
 (() => {
   // The host's sandboxed iframe gives a classic script an opaque origin.
-  const entry = new URL("./app.js?v=cabin.2", document.currentScript.src);
+  const entry = new URL("./app.js?v=wb-iso.1", document.currentScript.src);
   const timeout = setTimeout(() => showError(new Error("页面组件加载超时")), 15000);
   let settled = false;
 

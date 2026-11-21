@@ -45,6 +45,23 @@ class NarrativeOutreachMixin:
 
     _outreach_settings = {"care_wait": "contextual_care", "social_chat": "social_chat"}
 
+    _OUTREACH_PLACEHOLDER_RE = re.compile(
+        r"\[(?:图片|表情|语音|视频|文件|动画表情|At:[^\]]*)\]",
+        re.IGNORECASE,
+    )
+    _OUTREACH_FILLER_RE = re.compile(
+        r"^(?:哈+|呵+|嘻+|嘿+|嗯+|哦+|噢+|啊+|好+|行+|对+|是+|早+|晚安|收到|好的|可以|ok|okay|yes|no|lol|6+|233+|草+|典+|乐+|绷+|\?+|？+|!+|！+|\.+|。+|~+|～+|\s+)+$",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _is_substantive_group_opportunity_text(cls, text: str) -> bool:
+        cleaned = cls._OUTREACH_PLACEHOLDER_RE.sub("", str(text or "")).strip()
+        if not cleaned or cls._OUTREACH_FILLER_RE.fullmatch(cleaned):
+            return False
+        meaningful = re.sub(r"[\s\W_]+", "", cleaned, flags=re.UNICODE)
+        return len(meaningful) >= 8
+
     def _outreach_sessions(self, kind: str) -> list | tuple | None:
         setting = self._outreach_settings[kind]
         if self.config.get(setting + "_enabled", True) is not True:
@@ -644,6 +661,97 @@ class NarrativeOutreachMixin:
                         and now - marker.get("last_at", 0) < cache_ttl
                     ):
                         continue
+                    if self._group_scope(umo):
+                        directed_msgs = [
+                            e
+                            for e in events
+                            if e["type"] in {"message.received", "chat.message"}
+                            and e.get("data", {}).get("directed_to_bot") is True
+                        ]
+                        substantive_opp = [
+                            e
+                            for e in events
+                            if e["type"] in {"message.received", "chat.message"}
+                            and self._has_social_opportunity(e, peer)
+                            and now - 900 <= e.get("occurred_at", 0) <= now
+                            and self._contact_allowed(db, scope, e["actor_id"])
+                            and self._is_substantive_group_opportunity_text(
+                                e.get("text", "")
+                            )
+                        ]
+                        social_slot_open = (
+                            self._social_slot_available(db, scope, now, "")
+                            if social_enabled
+                            else False
+                        )
+                        has_viable_care = care_enabled and bool(directed_msgs)
+                        has_viable_grounded = (
+                            social_enabled
+                            and social_slot_open
+                            and bool(substantive_opp)
+                            and bool(topic_candidates)
+                        )
+                        has_viable_shared = (
+                            social_enabled
+                            and social_slot_open
+                            and bool(quiet)
+                            and bool(directed_msgs)
+                            and any(e["type"] == "delivery.success" for e in events)
+                        )
+                        # Also skip if previous run already returned no_change and the ONLY new
+                        # events since last_at are bot replies or non-substantive ambient messages
+                        # (while no new quiet member became eligible).
+                        prev_last = float(marker.get("last_at", 0) or 0)
+                        prev_quiet = set(marker.get("quiet_members") or [])
+                        new_user_signals = any(
+                            e["type"] in {"message.received", "chat.message"}
+                            and e.get("occurred_at", 0) > prev_last
+                            and (
+                                e.get("data", {}).get("directed_to_bot") is True
+                                or (
+                                    has_viable_grounded
+                                    and e in substantive_opp
+                                )
+                            )
+                            for e in events
+                        )
+                        only_low_signal_delta = (
+                            marker.get("fingerprint") != fingerprint
+                            and marker.get("status") == "ok"
+                            and int(marker.get("candidates", 0)) == 0
+                            and marker.get("policy_key") == policy_key
+                            and marker.get("is_asleep") == is_asleep
+                            and set(quiet) <= prev_quiet
+                            and not new_user_signals
+                            and prev_last > 0
+                        )
+                        if not (
+                            has_viable_care or has_viable_grounded or has_viable_shared
+                        ) or only_low_signal_delta:
+                            db.execute(
+                                "INSERT INTO metadata VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                                (
+                                    key,
+                                    _json(
+                                        {
+                                            "last_at": now,
+                                            "next_at": now,
+                                            "fingerprint": fingerprint,
+                                            "status": "ok",
+                                            "candidates": 0,
+                                            "rejected": 0,
+                                            "no_change_streak": max(
+                                                1, int(marker.get("no_change_streak", 0))
+                                            ),
+                                            "quiet_members": quiet,
+                                            "is_asleep": is_asleep,
+                                            "policy_key": policy_key,
+                                            "evidence_key": evidence_key,
+                                        }
+                                    ),
+                                ),
+                            )
+                            continue
                     recent_intents = [
                         dict(json.loads(r["payload"]), status=r["status"])
                         for r in db.execute(
@@ -845,6 +953,8 @@ class NarrativeOutreachMixin:
                                     "candidates": added,
                                     "rejected": len(rejected),
                                     "no_change_streak": next_no_change_streak,
+                                    "quiet_members": quiet,
+                                    "is_asleep": is_asleep,
                                     "policy_key": policy_key,
                                     "evidence_key": evidence_key,
                                 }

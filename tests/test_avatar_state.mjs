@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {projectAvatar} from '../pages/world/avatar-state.js';
+import {projectAvatar,projectAmbientMicro,resolveFurnitureLayout} from '../pages/world/avatar-state.js';
+import {BED_PLACEMENTS,furniturePoint} from '../pages/world/cabin-layout.js';
+import {BED_FRAME,DEFAULT_BODY,avoidBed,crossesBed} from '../pages/world/cabin-bed.js';
 
 const sampleAt = 1_800_000_000_000;
 const serverTime = 1_790_000_000;
@@ -39,7 +41,7 @@ test('only the current step controls the avatar, using the original action and r
   assert.equal(view.visible, true);
   assert.equal(view.location, 'room');
   assert.equal(view.pose, 'read');
-  assert.deepEqual(view.position, [-1.75, 0.13, 0.75]);
+  assert.deepEqual(view.position, [-3.25+(BED_FRAME.halfWidth+DEFAULT_BODY.radius), 0.13, 0.75]);
   assert.equal(view.positionBasis, 'action_anchor');
   assert.equal(view.label, '翻阅旧笔记');
   assert.equal(view.locationLabel, '住所 · 小屋');
@@ -52,7 +54,7 @@ test('real reading, writing and rest steps use room and garden anchors', () => {
     read: 'read', read_notes: 'read', write_note: 'write', project_start: 'write',
     project_write: 'write', project_revise: 'write', rest: 'rest',
   };
-  const roomPoints = {read: [-1.75, 0.13, 0.75], write: [0, 0.38, 0.22], rest: [-2.13, 0.49, 0.8]};
+  const roomPoints = {read: [-3.25+(BED_FRAME.halfWidth+DEFAULT_BODY.radius), 0.13, 0.75], write: [0, 0.38, 0.22], rest: [-2.13, 0.49, 0.8]};
   const gardenPoints = {read: [3.4, 0.12, 5.1], write: [3.4, 0.12, 5.1], rest: [3.4, 0.12, 5.1]};
   for (const [kind, pose] of Object.entries(poses)) {
     for (const [location, points] of [['room', roomPoints], ['garden', gardenPoints]]) {
@@ -212,4 +214,45 @@ test('without a receive time the server epoch provides the local clock reference
   const view = projectAvatar(data, selection, (serverTime + 5) * 1000);
   assert.equal(view.progress, 0.5);
   assert.equal(view.animate, true);
+});
+
+test('watching the cat keeps the whole body beside each rendered bed, including old snapshots', () => {
+  const body={...DEFAULT_BODY,radius:.59};
+  for(const [slot,bed] of Object.entries(BED_PLACEMENTS)){
+    const data=snapshot({room_designs:[],room_design:{furniture:[{kind:'bed',position:slot,movable:true}]}});
+    const layout=resolveFurnitureLayout(data,body);
+    const base=projectAvatar(data,selection,sampleAt,layout);
+    let cat;
+    for(let i=0;i<6;i++){
+      const spot=projectAmbientMicro(data,base,sampleAt+i*90000,layout);
+      if(spot.id==='cat_check'){cat=spot;break;}
+    }
+    assert.ok(cat,slot);
+    const [x,y,z]=cat.position, dx=x-bed[0], dz=z-bed[2];
+    const localX=dx*Math.cos(bed[3])-dz*Math.sin(bed[3]);
+    assert.ok(localX>BED_FRAME.halfWidth+body.radius,slot);
+    assert.equal(y,.13);
+    assert.equal(cat.rotationY,bed[3]-Math.PI/2);
+    assert.equal(layout.bedSlot,slot);
+  }
+});
+
+test('a central bed leaves a walkable route from the threshold to the cat', () => {
+  const data=snapshot({room_design:{furniture:[{kind:'bed',position:'center',movable:true}]}});
+  const layout=resolveFurnitureLayout(data,{...DEFAULT_BODY,radius:.62});
+  const threshold=[1.15,.13,3.55];
+  assert.ok(crossesBed(threshold,layout.catWatch,layout.obstacle));
+  const route=avoidBed([threshold,layout.catWatch],layout.obstacle);
+  assert.deepEqual(route[0],threshold);
+  assert.deepEqual(route.at(-1),layout.catWatch);
+  assert.ok(route.length>2);
+  for(let i=1;i<route.length;i++)assert.equal(crossesBed(route[i-1],route[i],layout.obstacle),false);
+});
+
+test('a live bed move takes precedence over the previously received furniture slot', () => {
+  const data=snapshot({room_design:{furniture:[{kind:'bed',position:'left_wall',movable:true}]}});
+  const body={...DEFAULT_BODY,rest:.81,game:.73,sleep:1.32};
+  const layout=resolveFurnitureLayout(data,body,'back_wall');
+  assert.deepEqual(layout.anchors.room.rest,furniturePoint(BED_PLACEMENTS.back_wall,1.12,.81,.75));
+  assert.deepEqual(layout.anchors.room.sleep,furniturePoint(BED_PLACEMENTS.back_wall,.47,1.32,.42));
 });
