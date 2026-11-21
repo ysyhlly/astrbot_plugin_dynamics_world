@@ -40,6 +40,8 @@ def build(root, output):
         ".git",
         "__pycache__",
         ".pytest_cache",
+        ".ruff_cache",
+        ".mypy_cache",
         "node_modules",
         "tests",
         "data",
