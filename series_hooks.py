@@ -8,6 +8,8 @@ import math
 import time
 from datetime import datetime, timedelta, timezone
 
+from .series_panels import is_series_group_excluded, resolve_series_timezone
+
 _TZ_SHANGHAI = timezone(timedelta(hours=8))
 _INVALID_BOUNDS = object()
 _UNBOUND_PERSONA_SENTINELS = frozenset({"__none__", "[%None]"})
@@ -40,20 +42,28 @@ _JOURNAL_SIBLINGS = (
 )
 
 
-def _iso_from_ts(ts: float | int | None) -> str:
+def _plugin_tz(plugin):
+    cfg = getattr(plugin, "config", None)
+    explicit = str(cfg.get("timezone", "") or "") if isinstance(cfg, dict) or hasattr(cfg, "get") else ""
+    return resolve_series_timezone(getattr(plugin, "context", None), explicit_tz=explicit)
+
+
+def _iso_from_ts(ts: float | int | None, *, tz=None) -> str:
+    zone = tz or _TZ_SHANGHAI
     try:
         val = float(ts) if ts is not None else time.time()
-        return datetime.fromtimestamp(val, tz=_TZ_SHANGHAI).isoformat(
+        return datetime.fromtimestamp(val, tz=zone).isoformat(
             timespec="seconds"
         )
     except (OSError, OverflowError, TypeError, ValueError):
-        return datetime.now(tz=_TZ_SHANGHAI).isoformat(timespec="seconds")
+        return datetime.now(tz=zone).isoformat(timespec="seconds")
 
 
-def _parse_occurred_at(raw, fallback_ts: float) -> tuple[float, str, str]:
+def _parse_occurred_at(raw, fallback_ts: float, *, tz=None) -> tuple[float, str, str]:
+    zone = tz or _TZ_SHANGHAI
     if isinstance(raw, (int, float)) and not isinstance(raw, bool):
         ts = float(raw)
-        dt = datetime.fromtimestamp(ts, tz=_TZ_SHANGHAI)
+        dt = datetime.fromtimestamp(ts, tz=zone)
         return ts, dt.isoformat(timespec="seconds"), dt.strftime("%H:%M")
     if isinstance(raw, str) and raw.strip():
         text = raw.strip()
@@ -61,8 +71,8 @@ def _parse_occurred_at(raw, fallback_ts: float) -> tuple[float, str, str]:
             normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
             dt = datetime.fromisoformat(normalized)
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=_TZ_SHANGHAI)
-            dt_local = dt.astimezone(_TZ_SHANGHAI)
+                dt = dt.replace(tzinfo=zone)
+            dt_local = dt.astimezone(zone)
             return (
                 dt_local.timestamp(),
                 dt_local.isoformat(timespec="seconds"),
@@ -71,11 +81,11 @@ def _parse_occurred_at(raw, fallback_ts: float) -> tuple[float, str, str]:
         except ValueError:
             try:
                 ts = float(text)
-                dt = datetime.fromtimestamp(ts, tz=_TZ_SHANGHAI)
+                dt = datetime.fromtimestamp(ts, tz=zone)
                 return ts, dt.isoformat(timespec="seconds"), dt.strftime("%H:%M")
             except (OSError, OverflowError, ValueError):
                 pass
-    dt = datetime.fromtimestamp(fallback_ts, tz=_TZ_SHANGHAI)
+    dt = datetime.fromtimestamp(fallback_ts, tz=zone)
     return fallback_ts, dt.isoformat(timespec="seconds"), dt.strftime("%H:%M")
 
 
@@ -99,25 +109,26 @@ def _coerce_explicit_bounds(
     return start, end
 
 
-def _day_bounds(date_spec: str, now_ts: float) -> tuple[float, float] | None:
+def _day_bounds(date_spec: str, now_ts: float, *, tz=None) -> tuple[float, float] | None:
+    zone = tz or _TZ_SHANGHAI
     clean = str(date_spec or "today").strip().lower()
     if clean in {"all", "*"}:
         return None
     if clean in {"", "today"}:
-        now_dt = datetime.fromtimestamp(now_ts, tz=_TZ_SHANGHAI)
+        now_dt = datetime.fromtimestamp(now_ts, tz=zone)
         start = now_dt.replace(hour=0, minute=0, second=0, microsecond=0)
         end = start + timedelta(days=1)
         return start.timestamp(), end.timestamp()
     if clean == "yesterday":
-        now_dt = datetime.fromtimestamp(now_ts, tz=_TZ_SHANGHAI)
+        now_dt = datetime.fromtimestamp(now_ts, tz=zone)
         end = now_dt.replace(hour=0, minute=0, second=0, microsecond=0)
         start = end - timedelta(days=1)
         return start.timestamp(), end.timestamp()
     try:
-        parsed = datetime.strptime(clean[:10], "%Y-%m-%d").replace(tzinfo=_TZ_SHANGHAI)
+        parsed = datetime.strptime(clean[:10], "%Y-%m-%d").replace(tzinfo=zone)
         return parsed.timestamp(), (parsed + timedelta(days=1)).timestamp()
     except ValueError:
-        now_dt = datetime.fromtimestamp(now_ts, tz=_TZ_SHANGHAI)
+        now_dt = datetime.fromtimestamp(now_ts, tz=zone)
         start = now_dt.replace(hour=0, minute=0, second=0, microsecond=0)
         return start.timestamp(), (start + timedelta(days=1)).timestamp()
 
@@ -247,7 +258,8 @@ def _now_ts(plugin) -> float:
 def build_series_summary(plugin) -> dict:
     """Public synchronous summary for series_presence v2 badges and live pulse."""
     now = _now_ts(plugin)
-    updated_at = _iso_from_ts(now)
+    tz = _plugin_tz(plugin)
+    updated_at = _iso_from_ts(now, tz=tz)
     try:
         conflicts = list(plugin.conflicts()) if callable(getattr(plugin, "conflicts", None)) else []
         ready = bool(plugin.runtime_allowed()) if callable(getattr(plugin, "runtime_allowed", None)) else False
@@ -379,16 +391,27 @@ def build_series_scope_status(plugin, umo: str) -> dict:
                 persona_id = card_persona
     in_scope = bool(clean_umo and not unbound and (all_groups or clean_umo in sessions))
     ready = bool(plugin.runtime_allowed()) if callable(getattr(plugin, "runtime_allowed", None)) else False
-    enabled = bool(ready and in_scope)
+    excluded_by_core = bool(
+        clean_umo and is_series_group_excluded(getattr(plugin, "context", None), umo=clean_umo)
+    )
+    enabled = bool(ready and in_scope and not excluded_by_core)
 
     activity_today: int | None = None
-    summary = "已接入持续生活" if enabled else ("该会话已解绑角色" if unbound else "未绑定持续生活")
+    if excluded_by_core:
+        summary = "主控排除"
+    elif enabled:
+        summary = "已接入持续生活"
+    elif unbound:
+        summary = "该会话已解绑角色"
+    else:
+        summary = "未绑定持续生活"
     narrative = getattr(getattr(plugin, "life", None), "narrative", None)
     scope = _resolve_sync_scope(plugin, umo=clean_umo)
     if narrative is not None and scope is not None:
         try:
             now = _now_ts(plugin)
-            bounds = _day_bounds("today", now)
+            tz = _plugin_tz(plugin)
+            bounds = _day_bounds("today", now, tz=tz)
             start_ts = bounds[0] if bounds else 0.0
             from .spatial import identity as spatial_identity
 
@@ -429,6 +452,7 @@ def build_series_scope_status(plugin, umo: str) -> dict:
     return {
         "enabled": enabled,
         "supported": False,
+        "excluded_by_core": excluded_by_core,
         "persona_id": persona_id,
         "activity_today": activity_today,
         "summary": summary,
@@ -561,7 +585,7 @@ def search_world_items(
                                     {
                                         "kind": "world_diary",
                                         "title": text[:48],
-                                        "subtitle": f"生活故事 · {_iso_from_ts(row['occurred'])[:16]}",
+                                        "subtitle": f"生活故事 · {_iso_from_ts(row['occurred'], tz=_plugin_tz(plugin))[:16]}",
                                         "plugin_id": plugin_id,
                                         "page": "world",
                                         "deep_link": {
@@ -605,7 +629,8 @@ def collect_world_journal_events(
         return []
 
     now = _now_ts(plugin)
-    bounds = explicit if explicit is not None else _day_bounds(date, now)
+    tz = _plugin_tz(plugin)
+    bounds = explicit if explicit is not None else _day_bounds(date, now, tz=tz)
     events: list[dict] = []
     plugin_id = "astrbot_plugin_dynamics_world"
 
@@ -619,7 +644,7 @@ def collect_world_journal_events(
             try:
                 feed = feed_page(narrative, db, resolved, limit=min(50, cap * 2), category="all")
                 for row in feed.get("events") or []:
-                    ts, iso_str, hhmm = _parse_occurred_at(row.get("occurred_at"), now)
+                    ts, iso_str, hhmm = _parse_occurred_at(row.get("occurred_at"), now, tz=tz)
                     if bounds is not None and not (bounds[0] <= ts < bounds[1]):
                         continue
                     status = str(row.get("status") or "completed")
@@ -660,7 +685,7 @@ def collect_world_journal_events(
                     (ident, umo_val),
                 ).fetchall()
                 for row in rows:
-                    ts, iso_str, hhmm = _parse_occurred_at(row["occurred"], now)
+                    ts, iso_str, hhmm = _parse_occurred_at(row["occurred"], now, tz=tz)
                     if bounds is not None and not (bounds[0] <= ts < bounds[1]):
                         continue
                     text = str(row["text"] or "").strip()
@@ -700,13 +725,14 @@ def _normalize_journal_item(
     default_tone: str,
     default_route: str,
     now_ts: float,
+    tz=None,
 ) -> dict | None:
     if not isinstance(raw, dict):
         return None
     title = str(raw.get("title") or "").strip()
     if not title:
         return None
-    ts, iso_str, hhmm = _parse_occurred_at(raw.get("occurred_at"), now_ts)
+    ts, iso_str, hhmm = _parse_occurred_at(raw.get("occurred_at"), now_ts, tz=tz)
     category = str(raw.get("category") or default_category).strip().lower()
     if category not in _VALID_CATEGORIES:
         category = default_category
@@ -779,6 +805,7 @@ async def _query_sibling_journal(
     limit: int,
     now_ts: float,
     bounds: tuple[float, float] | None,
+    tz=None,
 ) -> tuple[str, dict, list[dict]]:
     hook = getattr(owner, "get_journal_events", None)
     if not callable(hook):
@@ -817,6 +844,7 @@ async def _query_sibling_journal(
             default_tone=tone,
             default_route=default_route,
             now_ts=now_ts,
+            tz=tz,
         )
         if normalized is None:
             continue
@@ -856,7 +884,8 @@ async def aggregate_journal_feed(
             "sources": {"world": {"available": True, "count": 0}},
             "server_time": now,
         }
-    bounds = explicit if explicit is not None else _day_bounds(clean_date, now)
+    tz = _plugin_tz(plugin)
+    bounds = explicit if explicit is not None else _day_bounds(clean_date, now, tz=tz)
 
     # Resolve effective group scope and bound persona ONCE before querying World
     # or any sibling plugin so persona switches never leak prior-persona records
@@ -928,6 +957,7 @@ async def aggregate_journal_feed(
                 limit=per_sibling,
                 now_ts=now,
                 bounds=bounds,
+                tz=tz,
             )
         )
 

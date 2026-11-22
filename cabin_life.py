@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
+from .series_panels import resolve_series_timezone
 from .spatial import encode, identity
 
 ZONE = ZoneInfo("Asia/Shanghai")
@@ -229,13 +230,22 @@ def validate_station(kind, state, actor, config):
     return spec.seconds
 
 
-def _project_daily(db, scope, agenda, now):
+def _resolve_zone(scenes=None):
+    engine = getattr(scenes, "engine", None)
+    tz_fn = getattr(engine, "_timezone", None)
+    if callable(tz_fn):
+        return tz_fn()
+    return resolve_series_timezone(getattr(engine, "host_context", None))
+
+
+def _project_daily(db, scope, agenda, now, *, tz=None):
+    zone = tz or ZONE
     owner = identity(scope)
     row = db.execute("SELECT state FROM lives WHERE identity=?", (owner,)).fetchone()
     if not row:
         return
     life = json.loads(row[0])
-    date = datetime.fromtimestamp(now, ZONE).date()
+    date = datetime.fromtimestamp(now, zone).date()
     original = life.get("plan", [])
     plan = [p for p in original if not str(p.get("id", "")).startswith("cabin:")]
     plan.extend(
@@ -243,7 +253,7 @@ def _project_daily(db, scope, agenda, now):
         for a in agenda
         if a.get("cabin_operation")
         and a["status"] in PENDING | {"running", "completed"}
-        and datetime.fromtimestamp(a["start"], ZONE).date() == date
+        and datetime.fromtimestamp(a["start"], zone).date() == date
     )
     plan.sort(key=lambda p: p["start"])
     if plan != original:
@@ -264,6 +274,7 @@ def _free(start, duration, busy):
 
 
 def reconcile(db, scenes, scope, key, pref, state, now):
+    zone = _resolve_zone(scenes)
     causal = scenes.engine.causal
     rev, doc = causal.load(db, scope)
     agenda = doc["agenda"]
@@ -292,9 +303,9 @@ def reconcile(db, scenes, scope, key, pref, state, now):
         and scenes.engine._allowed(scope)
         and not scenes.engine._paused(db, scope)
     ):
-        today = datetime.fromtimestamp(now, ZONE).date()
+        today = datetime.fromtimestamp(now, zone).date()
         end_of_day = datetime.combine(
-            today + timedelta(days=1), time(), ZONE
+            today + timedelta(days=1), time(), zone
         ).timestamp()
         ordinary = [
             (a["start"], a["end"])
@@ -345,7 +356,7 @@ def reconcile(db, scenes, scope, key, pref, state, now):
                 and a["id"] != pid
                 and a["status"] in PENDING | {"running"}
             ]
-            desired = datetime.combine(today, time(spec.hour, 15), ZONE).timestamp()
+            desired = datetime.combine(today, time(spec.hour, 15), zone).timestamp()
             earliest = math.ceil((now + 180) / 60) * 60
             start = _free(max(desired, earliest), duration, busy)
             if start + duration > end_of_day:
@@ -387,14 +398,14 @@ def reconcile(db, scenes, scope, key, pref, state, now):
                     and a["status"] in PENDING | {"running"}
                 ]
                 start = _free(
-                    datetime.combine(tomorrow, time(spec.hour, 15), ZONE).timestamp(),
+                    datetime.combine(tomorrow, time(spec.hour, 15), zone).timestamp(),
                     duration,
                     busy,
                 )
                 if (
                     start + duration
                     > datetime.combine(
-                        tomorrow + timedelta(days=1), time(), ZONE
+                        tomorrow + timedelta(days=1), time(), zone
                     ).timestamp()
                 ):
                     continue
@@ -431,7 +442,7 @@ def reconcile(db, scenes, scope, key, pref, state, now):
             changed = True
     if changed:
         causal.save(db, scope, rev, doc)
-    _project_daily(db, scope, agenda, now)
+    _project_daily(db, scope, agenda, now, tz=zone)
     return next(
         (
             a

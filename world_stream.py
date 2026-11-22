@@ -12,6 +12,7 @@ from threading import Lock
 from typing import Any
 
 from .life.core.narrative_io import WorldIO, WorldIOBusy, WorldIOClosed
+from .series_panels import resolve_series_timezone_name
 from .spatial import identity
 
 try:
@@ -651,7 +652,14 @@ def _read_world_projection(api, services, scope, character, key, can_write):
                 "ambient",
                 amb_summary,
                 {
-                    "timezone": (environment or {}).get("timezone", "Asia/Shanghai"),
+                    "timezone": (environment or {}).get("timezone")
+                    or (
+                        engine._timezone_name()
+                        if hasattr(engine, "_timezone_name")
+                        else resolve_series_timezone_name(
+                            getattr(engine, "host_context", None)
+                        )
+                    ),
                     "weather": cur_env.get("effect", "clear"),
                     "weather_label": cur_env.get("label", "晴"),
                     "temperature": cur_env.get("temperature"),

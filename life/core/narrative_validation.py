@@ -243,9 +243,10 @@ class NarrativeValidationMixin:
                 if not isinstance(row, dict):
                     raise NarrativeValidationError("invalid_plan", "Invalid plan")
                 start, end = _timestamp(row.get("start")), _timestamp(row.get("end"))
-                day = dt.datetime.fromtimestamp(now, CHINA).date()
+                tz = self._timezone() if hasattr(self, "_timezone") else CHINA
+                day = dt.datetime.fromtimestamp(now, tz).date()
                 day_end = dt.datetime.combine(
-                    day + dt.timedelta(days=1), dt.time(), CHINA
+                    day + dt.timedelta(days=1), dt.time(), tz
                 ).timestamp()
                 if not now <= start < end <= day_end:
                     raise NarrativeValidationError(

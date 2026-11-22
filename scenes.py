@@ -13,6 +13,7 @@ from . import cabin_life, creative_projects, room_design
 from .garden_ecology import ECOLOGY_DURATIONS, ECOLOGY_KINDS, ECOLOGY_LABELS
 from .life.core.narrative import NarrativeValidationError
 from .mailbox_visitors import MailboxVisitorService
+from .series_panels import resolve_series_timezone_name
 from .spatial import encode, identity
 from .study_items import (
     MODES,
@@ -337,7 +338,10 @@ class SceneService:
             if not room["accessible"] or not self.opened(
                 state["places"].get(place, {}),
                 now,
-                env.get("timezone", "Asia/Shanghai"),
+                env.get("timezone")
+                or resolve_series_timezone_name(
+                    getattr(self.engine, "host_context", None)
+                ),
             ):
                 raise SceneActionError("地点或房间当前不允许进入")
         elif kind == "leave":
@@ -787,7 +791,10 @@ class SceneService:
                         "step." + kind,
                         LABELS.get(kind, kind),
                         {
-                            "timezone": (env or {}).get("timezone", "Asia/Shanghai"),
+                            "timezone": (env or {}).get("timezone")
+                            or resolve_series_timezone_name(
+                                getattr(self.engine, "host_context", None)
+                            ),
                             "weather": cur.get("effect", "clear"),
                             "weather_label": cur.get("label", "晴"),
                             "temperature": cur.get("temperature"),
@@ -1799,7 +1806,10 @@ class SceneService:
                     {
                         "operation": last_c["operation"],
                         "room_id": last_c["room_id"],
-                        "timezone": (env_now or {}).get("timezone", "Asia/Shanghai"),
+                        "timezone": (env_now or {}).get("timezone")
+                        or resolve_series_timezone_name(
+                            getattr(self.engine, "host_context", None)
+                        ),
                         "weather": cur_now.get("effect", "clear"),
                         "weather_label": cur_now.get("label", "晴"),
                         "temperature": cur_now.get("temperature"),

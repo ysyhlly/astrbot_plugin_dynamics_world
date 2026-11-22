@@ -5,6 +5,7 @@ import copy
 import json
 import uuid
 
+from .series_panels import resolve_series_timezone_name
 from .spatial import encode, identity
 from .vitality import cat_state_for, compute_vitality, season_for
 
@@ -322,7 +323,9 @@ class EcologyService:
         recent_mail_at: float = 0.0,
     ) -> dict:
         key, rev, eco = self.load(db, scope)
-        tz = (env or {}).get("timezone") or "Asia/Shanghai"
+        tz = (env or {}).get("timezone") or resolve_series_timezone_name(
+            getattr(self.engine, "host_context", None)
+        )
         season = season_for(now, tz)
         weather_effect = str(((env or {}).get("current") or {}).get("effect") or "clear")
         home_places = {r["place_id"] for r in (scene_state or {}).get("rooms", {}).values()}

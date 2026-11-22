@@ -1,4 +1,10 @@
-# astrbot_plugin_dynamics_world v0.23.0-rc.7
+# astrbot_plugin_dynamics_world v0.23.0-rc.8
+
+## v0.23.0-rc.8 — 2026-11-22
+
+- 接入全系列共享 `ProviderBudget` 并发池与遥测统计（`life/service.py` 与 `life/core/generator.py` 走 `series_llm_call`，繁忙时延后不计入自动失败）。
+- 全面下沉主控共享配置（SSOT）：替换全部 13 处硬编码 `Asia/Shanghai` 为共享时区解析；支持 `reply_provider` 兜底、`exclude_groups` 运行时排除护栏与总控矩阵「主控排除」展示，以及 `quiet_hours` 主动外联自动抑制。
+- 同步按语言拆包的 `series-messages.js` 轻加载器（完全兼容 `Object.assign(messages, ...)`）及统一 `series_panels.py`。
 
 ## v0.23.0-rc.7 — 2026-11-21
 

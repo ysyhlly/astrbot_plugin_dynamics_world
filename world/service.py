@@ -26,6 +26,7 @@ try:
 except Exception:  # pragma: no cover
     GreedyStr = str  # type: ignore
 
+from ..series_panels import is_series_group_excluded
 from .core.character import (
     CharacterCard,
     character_book_to_worldbook,
@@ -1512,6 +1513,8 @@ class WorldService:
             if not self.inject_enabled_global:
                 return
             sid = self._session_id(event)
+            if is_series_group_excluded(self.context, umo=sid):
+                return
             state = self.store.get_session(sid)
             if not state.enabled:
                 return

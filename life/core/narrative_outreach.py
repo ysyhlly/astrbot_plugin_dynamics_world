@@ -11,6 +11,7 @@ import time
 import uuid
 
 if __package__:
+    from ...series_panels import is_series_in_quiet_hours
     from .narrative_types import (
         CHINA,
         NarrativeValidationError,
@@ -38,6 +39,9 @@ else:
     _text = _types_mod._text
     _timestamp = _types_mod._timestamp
     normalize_scope = _types_mod.normalize_scope
+
+    def is_series_in_quiet_hours(context) -> bool:
+        return False
 
 
 class NarrativeOutreachMixin:
@@ -529,6 +533,7 @@ class NarrativeOutreachMixin:
             or self.config.get("mode") != "narrative"
             or not self.config.get("persona_id")
             or not self._has_targets()
+            or is_series_in_quiet_hours(getattr(self, "host_context", None))
             or all(self._outreach_sessions(kind) is None for kind in self._outreach_settings)
         ):
             return []
@@ -556,11 +561,12 @@ class NarrativeOutreachMixin:
                 identity = _identity(scope)
                 peer = self._private_peer(umo)
                 key = "outreach_review:" + _json([identity, umo])
+                tz = self._timezone() if hasattr(self, "_timezone") else CHINA
                 policy_key = hashlib.sha256(_json([
                     care_enabled,
                     social_enabled,
                     self.config.get("narrative_provider_id",""),
-                    dt.datetime.fromtimestamp(now,CHINA).hour >= 8,
+                    dt.datetime.fromtimestamp(now, tz).hour >= 8,
                 ]).encode()).hexdigest()
                 with self._db() as db:
                     if self._paused(db, scope) or self._outreach_paused(db, scope):
@@ -808,7 +814,7 @@ class NarrativeOutreachMixin:
                         }
                         for i in recent_intents
                     ],
-                    "local_datetime": dt.datetime.fromtimestamp(now, CHINA).isoformat(),
+                    "local_datetime": dt.datetime.fromtimestamp(now, tz).isoformat(),
                     "inference_call_id": str(uuid.uuid4()),
                 }
                 started = time.monotonic()

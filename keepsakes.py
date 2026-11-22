@@ -6,8 +6,8 @@ import hashlib
 import json
 import uuid
 from datetime import datetime
-from zoneinfo import ZoneInfo
 
+from .series_panels import resolve_series_timezone
 from .spatial import encode, identity
 
 KEEPSAKE_SLOTS = (
@@ -225,11 +225,10 @@ class KeepsakeTimelineService:
             elif latest["kind"] == kind and same_signature and elapsed < 120:
                 return None
 
-        tz_name = str(cues.get("timezone") or "Asia/Shanghai")
-        try:
-            tz = ZoneInfo(tz_name)
-        except Exception:
-            tz = ZoneInfo("Asia/Shanghai")
+        tz = resolve_series_timezone(
+            getattr(self.engine, "host_context", None),
+            explicit_tz=str(cues.get("timezone") or ""),
+        )
         local = datetime.fromtimestamp(float(now), tz)
         payload = {
             "hour": round(local.hour + local.minute / 60.0, 2),

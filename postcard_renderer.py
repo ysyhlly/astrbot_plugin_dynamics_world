@@ -8,9 +8,10 @@ import time
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 from PIL import Image, ImageDraw, ImageFont
+
+from .series_panels import resolve_series_timezone
 
 CHROMIUM_ARGS = [
     "--no-sandbox",
@@ -182,16 +183,21 @@ def _load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     return ImageFont.load_default()
 
 
+def _postcard_local_time(snapshot: dict, env: dict, now: float) -> datetime:
+    tz_name = str(env.get("timezone") or snapshot.get("timezone") or "")
+    tz = resolve_series_timezone(None, explicit_tz=tz_name)
+    try:
+        return datetime.fromtimestamp(now, tz)
+    except Exception:
+        return datetime.fromtimestamp(now)
+
+
 def _draw_pixel_cabin_artwork(snapshot: dict, width: int = 720, height: int = 460) -> Image.Image:
     """Crisp cozy pixel-art cabin & garden scene reflecting live hour, weather, curtains, lamp & cat."""
     env = snapshot.get("environment") or {}
     cur = env.get("current") or {}
-    tz_name = str(env.get("timezone") or "Asia/Shanghai")
     now = float(snapshot.get("server_time") or 0) or datetime.now().timestamp()
-    try:
-        local = datetime.fromtimestamp(now, ZoneInfo(tz_name))
-    except Exception:
-        local = datetime.fromtimestamp(now)
+    local = _postcard_local_time(snapshot, env, now)
     hour = local.hour + local.minute / 60.0
     effect = str(cur.get("effect") or "clear")
     is_night = hour < 6.0 or hour >= 19.2
@@ -317,12 +323,8 @@ def compose_polaroid(art: Image.Image, snapshot: dict, note_override: str = "") 
 
     env = snapshot.get("environment") or {}
     cur = env.get("current") or {}
-    tz_name = str(env.get("timezone") or "Asia/Shanghai")
     now = float(snapshot.get("server_time") or 0) or datetime.now().timestamp()
-    try:
-        local = datetime.fromtimestamp(now, ZoneInfo(tz_name))
-    except Exception:
-        local = datetime.fromtimestamp(now)
+    local = _postcard_local_time(snapshot, env, now)
 
     char_name = str(((snapshot.get("character") or {}).get("name")) or "小屋主人")
     scene = snapshot.get("scene") or {}
@@ -522,12 +524,8 @@ class PostcardRenderer:
 
             env = snapshot.get("environment") or {}
             cur = env.get("current") or {}
-            tz_name = str(env.get("timezone") or "Asia/Shanghai")
             now = float(snapshot.get("server_time") or 0) or datetime.now().timestamp()
-            try:
-                local = datetime.fromtimestamp(now, ZoneInfo(tz_name))
-            except Exception:
-                local = datetime.fromtimestamp(now)
+            local = _postcard_local_time(snapshot, env, now)
             hour = local.hour + local.minute / 60.0
             effect = str(cur.get("effect") or "clear")
             eco = snapshot.get("ecology") or {}

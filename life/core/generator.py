@@ -11,9 +11,14 @@ from astrbot.api import logger
 from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.star.context import Context
 
-from ...series_panels import get_series_defaults, inherit_provider
+from ...series_panels import (
+    get_series_defaults,
+    is_provider_budget_busy_error,
+    resolve_series_provider,
+    resolve_series_timezone,
+    series_llm_call,
+)
 from .state import (
-    CHINA_TIMEZONE,
     MAX_HISTORY_DAYS,
     OPTIONAL_TIMELINE_FIELDS,
     DataManager,
@@ -207,9 +212,11 @@ class Generator:
             debug = bool(self.config.get("debug_mode", False))
 
             try:
+                tz = self._tz()
+                tz_label = getattr(tz, "key", None) or str(tz)
                 logger.info(
                     f"[DynamicLifeState] Generating life state for {date} "
-                    f"in {CHINA_TIMEZONE.key}"
+                    f"in {tz_label}"
                 )
 
                 self.data_mgr.archive_before_generation(date)
@@ -274,15 +281,22 @@ class Generator:
                 if not provider:
                     raise RuntimeError("No LLM provider is available")
 
+                resolved_provider_id = self._provider_id_of(provider)
                 sid = f"dynamic_life_state_gen_{date}"
-                resp = await provider.text_chat(prompt, session_id=sid)
+                resp = await series_llm_call(
+                    self.context,
+                    resolved_provider_id,
+                    "astrbot_plugin_dynamics_world",
+                    "daily_life_generate",
+                    lambda: provider.text_chat(prompt, session_id=sid),
+                )
                 text = self._extract_completion_text(resp)
 
                 if debug:
                     logger.info(f"[DynamicLifeState] Raw model response:\n{text}")
 
                 payload = self._extract_json(text)
-                generated_at = datetime.datetime.now(CHINA_TIMEZONE).isoformat()
+                generated_at = datetime.datetime.now(self._tz()).isoformat()
                 state = self._validate_and_build(
                     payload,
                     target_date,
@@ -291,6 +305,16 @@ class Generator:
                 )
 
             except Exception as e:
+                if is_provider_budget_busy_error(e):
+                    logger.warning(
+                        f"[DynamicLifeState] Shared provider budget busy for {date} "
+                        f"({getattr(e, 'reason', 'busy')}); deferring"
+                    )
+                    return self._failure_result(
+                        date,
+                        e,
+                        count_auto_failure=False,
+                    )
                 logger.error(f"[DynamicLifeState] Generation failed for {date}: {e}")
                 return self._failure_result(
                     date,
@@ -395,15 +419,40 @@ class Generator:
         except Exception:
             return ""
 
-    # ---------- provider ----------
+    # ---------- timezone & provider ----------
+
+    def _tz(self):
+        return resolve_series_timezone(
+            self.context,
+            explicit_tz=str(self.config.get("timezone", "") or ""),
+        )
+
+    def _provider_id_of(self, provider) -> str:
+        provider_cfg = getattr(provider, "provider_config", None)
+        if isinstance(provider_cfg, dict) and provider_cfg.get("id"):
+            return str(provider_cfg["id"]).strip()
+        pid = getattr(provider, "id", None)
+        if isinstance(pid, str) and pid.strip():
+            return pid.strip()
+        return (
+            resolve_series_provider(
+                self.context,
+                self.config.get("llm_provider_id", ""),
+                role="reply",
+            )
+            or "default"
+        )
 
     async def _get_provider(self):
         """返回配置的或当前活跃的 LLM provider。"""
-        provider_id = inherit_provider(
-            self.config.get("llm_provider_id", ""), self.context, role="reply"
+        explicit_id = str(self.config.get("llm_provider_id", "") or "").strip()
+        provider_id = resolve_series_provider(
+            self.context, explicit_id, role="reply"
         )
         if provider_id:
-            return self.context.get_provider_by_id(provider_id)
+            provider = self.context.get_provider_by_id(provider_id)
+            if provider is not None or explicit_id:
+                return provider
         return self.context.get_using_provider()
 
     # ---------- LLM ----------

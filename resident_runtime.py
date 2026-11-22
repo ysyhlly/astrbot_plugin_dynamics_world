@@ -10,8 +10,8 @@ import math
 import time
 import uuid
 from datetime import datetime
-from zoneinfo import ZoneInfo
 
+from .series_panels import resolve_series_timezone
 from .spatial import encode, identity
 
 OPERATIONS = ["wait", "rest", "observe", "travel", "invite", "respond", "speak"]
@@ -446,11 +446,16 @@ class ResidentRunner:
                 if not manual and hasattr(engine, "record_background_tick"):
                     engine.record_background_tick(kind="resident", now=now)
                 public, context = self.context(db, scope, actor_id, now)
+                tz = (
+                    engine._timezone()
+                    if hasattr(engine, "_timezone")
+                    else resolve_series_timezone(getattr(self.life, "context", None))
+                )
                 request = {
                     "scope": scope,
                     "now": now,
                     "local_datetime": datetime.fromtimestamp(
-                        now, ZoneInfo("Asia/Shanghai")
+                        now, tz
                     ).isoformat(),
                     "resident_isolated": True,
                     "resident_context": public,

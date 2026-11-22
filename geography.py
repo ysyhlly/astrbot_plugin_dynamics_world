@@ -5,6 +5,8 @@ import hashlib
 import math
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from .series_panels import resolve_series_timezone_name
+
 
 def coordinate(value, limit, name):
     if (
@@ -157,7 +159,10 @@ def configure_real(spatial, scope, body):
     label = body.get("name", "")
     if not isinstance(label, str) or not label.strip() or len(label) > 60:
         raise ValueError("请填写地点名称")
-    zone = timezone(body.get("timezone", "Asia/Shanghai"))
+    default_tz = resolve_series_timezone_name(
+        getattr(getattr(spatial, "engine", None), "host_context", None)
+    )
+    zone = timezone(body.get("timezone", default_tz))
     speed = body.get("walking_kmh", 4.5)
     if type(speed) not in (int, float) or not 1 <= speed <= 15:
         raise ValueError("步行速度需在 1–15 km/h")

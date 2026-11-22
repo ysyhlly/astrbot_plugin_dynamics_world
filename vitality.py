@@ -4,7 +4,8 @@ from __future__ import annotations
 import hashlib
 import math
 from datetime import datetime
-from zoneinfo import ZoneInfo
+
+from .series_panels import resolve_series_timezone
 
 SEASON_PALETTES = {
     "spring": {
@@ -57,16 +58,13 @@ SOLAR_TERMS = (
 )
 
 
-def _safe_zone(timezone: str | None) -> ZoneInfo:
-    try:
-        return ZoneInfo(str(timezone or "Asia/Shanghai"))
-    except Exception:
-        return ZoneInfo("Asia/Shanghai")
+def _safe_zone(timezone: str | None, context=None):
+    return resolve_series_timezone(context, explicit_tz=str(timezone or ""))
 
 
-def season_for(now: float, timezone: str = "Asia/Shanghai") -> dict:
+def season_for(now: float, timezone: str = "", *, context=None) -> dict:
     """Resolve current season, solar term and 3D vegetation palette without network/LLM."""
-    local = datetime.fromtimestamp(float(now), _safe_zone(timezone))
+    local = datetime.fromtimestamp(float(now), _safe_zone(timezone, context=context))
     month, day = local.month, local.day
     if month in (3, 4, 5):
         season = "spring"
@@ -88,7 +86,7 @@ def season_for(now: float, timezone: str = "Asia/Shanghai") -> dict:
 
 def cat_state_for(
     now: float,
-    timezone: str = "Asia/Shanghai",
+    timezone: str = "",
     weather_effect: str = "clear",
     actor_away: bool = False,
     actor_pose: str = "idle",
@@ -185,7 +183,7 @@ def compute_vitality(
     scene_state = scene_state or {}
     env = env or {}
     ecology_state = ecology_state or {}
-    tz = env.get("timezone") or "Asia/Shanghai"
+    tz = env.get("timezone") or ""
     local = datetime.fromtimestamp(float(now), _safe_zone(tz))
     hour = local.hour + local.minute / 60.0
 

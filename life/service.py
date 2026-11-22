@@ -19,6 +19,13 @@ from astrbot.core.agent.message import TextPart
 from astrbot.core.provider.entities import ProviderRequest
 
 from .. import creative_projects
+from ..series_panels import (
+    is_provider_budget_busy_error,
+    is_series_group_excluded,
+    is_series_in_quiet_hours,
+    resolve_series_timezone,
+    series_llm_call,
+)
 from .core.generator import Generator
 from .core.injector import (
     AUTO_LIFE_GUIDANCE,
@@ -33,7 +40,6 @@ from .core.narrative_prompt import (
 )
 from .core.narrative_types import AVAILABILITIES, _identity
 from .core.state import (
-    CHINA_TIMEZONE,
     NATURAL_SLOT_NAMES,
     OPTIONAL_TIMELINE_FIELDS,
     DataManager,
@@ -106,6 +112,7 @@ class LifeService:
             self.config,
             self._narrative_model,
             owner_active=self.is_active,
+            host_context=self.context,
         )
         from ..world_spaces import WorldSpaceService
 
@@ -239,7 +246,9 @@ class LifeService:
         """Slow contact inference must not hold up the world's clock."""
         while True:
             try:
-                if self.is_active():
+                if self.is_active() and not is_series_in_quiet_hours(
+                    getattr(self, "context", None)
+                ):
                     await self.narrative.review_outreach()
             except asyncio.CancelledError:
                 raise
@@ -383,7 +392,28 @@ class LifeService:
                     "schema": narrative_schema(request),
                 },
             }
-        response = await text_chat(prompt=prompt, **kwargs)
+        resolved_provider_id = (
+            selected_provider_id or self.generator._provider_id_of(provider)
+        )
+        purpose = (
+            "resident_narrative"
+            if request.get("resident_isolated")
+            else str(request.get("purpose") or request.get("kind") or "narrative")
+        )
+        try:
+            response = await series_llm_call(
+                self.context,
+                resolved_provider_id,
+                "astrbot_plugin_dynamics_world",
+                purpose,
+                lambda: text_chat(prompt=prompt, **kwargs),
+            )
+        except Exception as exc:
+            if is_provider_budget_busy_error(exc):
+                raise NarrativeProviderUnavailable(
+                    f"Shared provider budget busy ({getattr(exc, 'reason', 'busy')})"
+                ) from exc
+            raise
         current = await self._character(request["scope"])
         if not self.is_active() or current.get("fingerprint") != character.get(
             "fingerprint"
@@ -602,6 +632,8 @@ class LifeService:
 
     async def list_due_intents(self, now: float | None = None) -> list[dict]:
         """Offer motivations to Chat Dynamics; this plugin never sends them itself."""
+        if is_series_in_quiet_hours(getattr(self, "context", None)):
+            return []
         return await self.narrative.list_due_intents(now)
 
     async def observe_member_activity(
@@ -652,15 +684,21 @@ class LifeService:
     # Scheduler
     # =========================
 
+    def _tz(self):
+        return resolve_series_timezone(
+            getattr(self, "context", None),
+            explicit_tz=str(self.config.get("timezone", "") or ""),
+        )
+
     def _now(self) -> datetime.datetime:
-        """返回中国标准时间的当前日期时间。"""
-        return datetime.datetime.now(CHINA_TIMEZONE)
+        """返回系列配置时区的当前日期时间。"""
+        return datetime.datetime.now(self._tz())
 
     def _current_date(
         self,
         now: datetime.datetime | None = None,
     ) -> datetime.date:
-        """返回中国标准时间的日期。
+        """返回系列配置时区的日期。
 
         Args:
             now: 可选的时间，由调用方或测试提供。
@@ -668,18 +706,19 @@ class LifeService:
         Returns:
             本地日期。
         """
+        tz = self._tz()
         value = now or self._now()
         if value.tzinfo is None:
-            value = value.replace(tzinfo=CHINA_TIMEZONE)
+            value = value.replace(tzinfo=tz)
         else:
-            value = value.astimezone(CHINA_TIMEZONE)
+            value = value.astimezone(tz)
         return value.date()
 
     def _select_current_state(
         self,
         now: datetime.datetime,
     ) -> tuple[LifeState | None, datetime.date]:
-        """为当前北京时间选取一个成功生成的状态。
+        """为当前本地日期选取一个成功生成的状态。
 
         Args:
             now: 当前日期时间。
@@ -696,8 +735,10 @@ class LifeService:
     def _start_scheduler(self) -> None:
         """启动固定的本地午夜定时调度器。"""
         try:
+            tz = self._tz()
+            tz_label = getattr(tz, "key", None) or str(tz)
             self._scheduler = AsyncIOScheduler(
-                timezone=CHINA_TIMEZONE,
+                timezone=tz,
                 executors={"default": AsyncIOExecutor()},
                 job_defaults={
                     "coalesce": True,
@@ -715,7 +756,7 @@ class LifeService:
             self._scheduler.start()
             logger.info(
                 f"[DynamicLifeState] Scheduler started for daily generation "
-                f"at 00:00 in {CHINA_TIMEZONE.key}"
+                f"at 00:00 in {tz_label}"
             )
         except Exception as e:
             logger.error(f"[DynamicLifeState] Scheduler startup failed: {e}")
@@ -768,6 +809,11 @@ class LifeService:
             else False
         )
         if marker or internal:
+            return
+        if is_series_group_excluded(
+            getattr(self, "context", None),
+            umo=str(getattr(event, "unified_msg_origin", "") or ""),
+        ):
             return
         get_extra = getattr(event, "get_extra", None)
         blocking_context = (
@@ -880,6 +926,10 @@ class LifeService:
         Returns:
             会话是否通过配置的列表模式检查。
         """
+        if is_series_group_excluded(
+            getattr(self, "context", None), umo=str(unified_msg_origin or "")
+        ):
+            return False
         mode = str(self.config.get("session_list_mode", "whitelist")).strip()
         session_list: list[str] = list(self.config.get("session_list", []) or [])
 
@@ -1213,7 +1263,7 @@ class LifeService:
         query_datetime = datetime.datetime.combine(
             target_date,
             datetime.time(query_hour, query_minute_part),
-            tzinfo=CHINA_TIMEZONE,
+            tzinfo=self._tz(),
         )
         match = select_current_slot(data.timeline, query_minute)
         if match is None:
@@ -1258,11 +1308,12 @@ class LifeService:
                 except ValueError:
                     yield event.plain_result("日期格式错误，请使用 YYYY-MM-DD 格式。")
                     return
+                tz = self._tz()
                 entries = [
                     row
                     for row in entries
                     if datetime.datetime.fromtimestamp(
-                        row["occurred"], CHINA_TIMEZONE
+                        row["occurred"], tz
                     ).date()
                     == wanted
                 ]
@@ -1370,12 +1421,13 @@ class LifeService:
             lines = [
                 f"今日日程重新生成完成（{res.get('plan_date')}，共 {res.get('count', 0)} 项）："
             ]
+            tz = self._tz()
             for item in (res.get("daily_plan") or [])[:12]:
                 start_dt = datetime.datetime.fromtimestamp(
-                    item["start"], CHINA_TIMEZONE
+                    item["start"], tz
                 ).strftime("%H:%M")
                 end_dt = datetime.datetime.fromtimestamp(
-                    item["end"], CHINA_TIMEZONE
+                    item["end"], tz
                 ).strftime("%H:%M")
                 lines.append(f"- {start_dt}–{end_dt}：{item['activity']}")
             yield event.plain_result("\n".join(lines))

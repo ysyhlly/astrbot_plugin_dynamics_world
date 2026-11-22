@@ -24,6 +24,12 @@ from typing import Any
 from astrbot.api import logger
 
 if __package__:
+    from ...series_panels import (
+        is_series_group_excluded,
+        is_series_in_quiet_hours,
+        resolve_series_timezone,
+        resolve_series_timezone_name,
+    )
     from .narrative_ddl import NarrativeSchemaMixin
     from .narrative_io import WorldIO, WorldIOClosed
     from .narrative_outreach import NarrativeOutreachMixin
@@ -78,6 +84,22 @@ else:
     _timestamp = _types_mod._timestamp
     normalize_scope = _types_mod.normalize_scope
     _identity = _types_mod._identity
+
+    def is_series_group_excluded(context, umo: str = "", group_id: str = "") -> bool:
+        return False
+
+    def is_series_in_quiet_hours(context) -> bool:
+        return False
+
+    def resolve_series_timezone_name(
+        context, explicit_tz: str = "", default_tz: str = "Asia/Shanghai"
+    ) -> str:
+        return str(explicit_tz or default_tz or "Asia/Shanghai").strip() or "Asia/Shanghai"
+
+    def resolve_series_timezone(
+        context, explicit_tz: str = "", default_tz: str = "Asia/Shanghai"
+    ):
+        return CHINA
     NarrativeOutreachMixin = _outreach_mod.NarrativeOutreachMixin
     NarrativeSchemaMixin = _schema_mod.NarrativeSchemaMixin
     NarrativeValidationMixin = _validation_mod.NarrativeValidationMixin
@@ -159,6 +181,7 @@ class NarrativeEngine(
         clock: Callable[[], float] = time.time,
         *,
         owner_active: Callable[[], bool] | None = None,
+        host_context: Any = None,
     ):
         self.path, self.config, self.model, self.clock = (
             Path(path),
@@ -166,6 +189,7 @@ class NarrativeEngine(
             model,
             clock,
         )
+        self.host_context = host_context
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._locks: dict[str, asyncio.Lock] = {}
         self._plan_regens: set[str] = set()
@@ -321,6 +345,20 @@ class NarrativeEngine(
                 "generation": self._context_generation,
             }
 
+    def _timezone_name(self, explicit_tz: str = "") -> str:
+        cfg_tz = str(self.config.get("timezone", "") or "") if isinstance(self.config, dict) or hasattr(self.config, "get") else ""
+        return resolve_series_timezone_name(
+            getattr(self, "host_context", None),
+            explicit_tz=str(explicit_tz or cfg_tz or ""),
+        )
+
+    def _timezone(self, explicit_tz: str = ""):
+        cfg_tz = str(self.config.get("timezone", "") or "") if isinstance(self.config, dict) or hasattr(self.config, "get") else ""
+        return resolve_series_timezone(
+            getattr(self, "host_context", None),
+            explicit_tz=str(explicit_tz or cfg_tz or ""),
+        )
+
     def is_managed(self, scope: dict) -> bool:
         """Return whether the concrete persona manages this full UMO."""
         try:
@@ -334,6 +372,8 @@ class NarrativeEngine(
         ):
             return False
         umo = scope["umo"]
+        if is_series_group_excluded(getattr(self, "host_context", None), umo=umo):
+            return False
         if self._private_peer(umo):
             return (
                 self.config.get("narrative_private_chat_enabled", False) is True
@@ -512,7 +552,8 @@ class NarrativeEngine(
                     else state.get("activity", "")
                 ),
                 {
-                    "timezone": (environment or {}).get("timezone", "Asia/Shanghai"),
+                    "timezone": (environment or {}).get("timezone")
+                    or self._timezone_name(),
                     "weather": cur.get("effect", "clear"),
                     "weather_label": cur.get("label", "晴"),
                     "temperature": cur.get("temperature"),
@@ -1626,24 +1667,26 @@ class NarrativeEngine(
                     )
                     if json.loads(r["payload"]).get("kind") == "care_wait"
                 ]
-            china_date = dt.datetime.fromtimestamp(now, CHINA).date()
+            tz = self._timezone()
+            tz_name = self._timezone_name()
+            local_date = dt.datetime.fromtimestamp(now, tz).date()
             day_end = dt.datetime.combine(
-                china_date + dt.timedelta(days=1), dt.time(), CHINA
+                local_date + dt.timedelta(days=1), dt.time(), tz
             ).timestamp()
             request = {
                 "schema_version": 1,
                 "scope": scope,
                 "now": now,
                 "day_end": day_end,
-                "local_datetime": dt.datetime.fromtimestamp(now, CHINA).isoformat(),
-                "timezone": "Asia/Shanghai",
-                "local_date": china_date.isoformat(),
+                "local_datetime": dt.datetime.fromtimestamp(now, tz).isoformat(),
+                "timezone": tz_name,
+                "local_date": local_date.isoformat(),
                 "plan_window": {"start": now, "end": day_end},
                 "snapshot": snapshot,
                 "events": pending,
                 "recent_diary": diary,
                 "plan": life["plan"],
-                "needs_daily_plan": life["plan_date"] != china_date.isoformat(),
+                "needs_daily_plan": life["plan_date"] != local_date.isoformat(),
                 "weather_reassessment": not scope["umo"]
                 and any(
                     e["type"] == "life.tick"
@@ -2026,7 +2069,7 @@ class NarrativeEngine(
             life["plan"] = change["daily_plan"]
             if self.causal is not None:
                 self.causal.sync_plan(db, scope, life["plan"], now)
-            life["plan_date"] = dt.datetime.fromtimestamp(now, CHINA).date().isoformat()
+            life["plan_date"] = dt.datetime.fromtimestamp(now, self._timezone()).date().isoformat()
         db.execute(
             "UPDATE lives SET revision=?,state=?,updated=? WHERE identity=?",
             (revision, _json(life), now, identity),
@@ -2120,6 +2163,8 @@ class NarrativeEngine(
     async def list_due_intents(self, now: float | None = None) -> list[dict]:
         """Return current pending motivations; caller must claim before sending."""
         now = self.clock() if now is None else _timestamp(now)
+        if is_series_in_quiet_hours(getattr(self, "host_context", None)):
+            return []
         result = []
         with self._db() as db:
             db.execute(
@@ -2501,9 +2546,10 @@ class NarrativeEngine(
         generating: bool | None = None,
     ) -> dict:
         identity = _identity(scope)
-        china_date = dt.datetime.fromtimestamp(now, CHINA).date()
-        today = china_date.isoformat()
-        midnight = dt.datetime.combine(china_date, dt.time(), CHINA).timestamp()
+        tz = self._timezone()
+        local_date = dt.datetime.fromtimestamp(now, tz).date()
+        today = local_date.isoformat()
+        midnight = dt.datetime.combine(local_date, dt.time(), tz).timestamp()
         plan_date = str(life.get("plan_date") or "")
         plan_items = life.get("plan") if isinstance(life.get("plan"), list) else []
         is_today = bool(plan_date == today and len(plan_items) > 0)
@@ -2658,18 +2704,20 @@ class NarrativeEngine(
                         if self.causal is not None
                         else None
                     )
-                china_date = dt.datetime.fromtimestamp(now, CHINA).date()
+                tz = self._timezone()
+                tz_name = self._timezone_name()
+                local_date = dt.datetime.fromtimestamp(now, tz).date()
                 day_end = dt.datetime.combine(
-                    china_date + dt.timedelta(days=1), dt.time(), CHINA
+                    local_date + dt.timedelta(days=1), dt.time(), tz
                 ).timestamp()
                 request = {
                     "schema_version": 1,
                     "scope": global_scope,
                     "now": now,
                     "day_end": day_end,
-                    "local_datetime": dt.datetime.fromtimestamp(now, CHINA).isoformat(),
-                    "timezone": "Asia/Shanghai",
-                    "local_date": china_date.isoformat(),
+                    "local_datetime": dt.datetime.fromtimestamp(now, tz).isoformat(),
+                    "timezone": tz_name,
+                    "local_date": local_date.isoformat(),
                     "plan_window": {"start": now, "end": day_end},
                     "trigger": "admin_regenerate_plan",
                     "snapshot": dict(
@@ -2889,7 +2937,7 @@ class NarrativeEngine(
                 return {
                     "schema_version": 1,
                     "status": "regenerated",
-                    "plan_date": updated_life.get("plan_date", china_date.isoformat()),
+                    "plan_date": updated_life.get("plan_date", local_date.isoformat()),
                     "count": len(updated_life.get("plan", [])),
                     "daily_plan": updated_life.get("plan", []),
                     "snapshot": result_snap,

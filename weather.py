@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 import aiohttp
 
 from .geography import coordinate, timezone
+from .series_panels import resolve_series_timezone_name
 from .spatial import encode, identity
 from .weather_sources import (
     SOURCES,
@@ -267,6 +268,12 @@ class EnvironmentService:
             CREATE TABLE IF NOT EXISTS world_weather_limits(service TEXT PRIMARY KEY,retry_at REAL NOT NULL,error TEXT NOT NULL);
             """)
 
+    def _defaults(self) -> dict:
+        tz_name = resolve_series_timezone_name(
+            getattr(self.engine, "host_context", None)
+        )
+        return dict(DEFAULTS, timezone=tz_name)
+
     def settings(self, db, key):
         ws = getattr(self.engine, "world_spaces", None)
         lookup_key = ws.map_owner_key(db, key) if ws is not None else key
@@ -279,17 +286,19 @@ class EnvironmentService:
                 "SELECT revision,settings FROM world_environment WHERE identity=?",
                 (key,),
             ).fetchone()
+        defaults = self._defaults()
         return (
-            (row["revision"], dict(DEFAULTS, **json.loads(row["settings"])))
+            (row["revision"], dict(defaults, **json.loads(row["settings"])))
             if row
-            else (0, dict(DEFAULTS))
+            else (0, defaults)
         )
 
     def configure(self, scope, body):
         incoming = body.get("settings")
-        if not isinstance(incoming, dict) or set(incoming) - set(DEFAULTS):
+        defaults = self._defaults()
+        if not isinstance(incoming, dict) or set(incoming) - set(defaults):
             raise ValueError("未知天气设置")
-        settings = dict(DEFAULTS, **incoming)
+        settings = dict(defaults, **incoming)
         if settings["mode"] not in {"auto", "real", "simulated", "off"}:
             raise ValueError("未知天气模式")
         if settings["climate"] not in CLIMATES:
