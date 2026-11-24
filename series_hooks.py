@@ -5,10 +5,43 @@ from __future__ import annotations
 import asyncio
 import inspect
 import math
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
-from .series_panels import is_series_group_excluded, resolve_series_timezone
+from astrbot.api import logger
+
+from .series_panels import (
+    find_provider_silently,
+    is_series_group_excluded,
+    resolve_series_provider,
+    resolve_series_timezone,
+)
+
+_HOOK_DIAG_LOCK = threading.Lock()
+_HOOK_DIAGNOSTICS: dict[str, dict[str, object]] = {}
+
+
+def _record_hook_error(hook: str, exc: Exception) -> None:
+    err_type = type(exc).__name__
+    logger.debug("[DynamicsWorld] series_hooks.%s failed (%s): %s", hook, err_type, exc)
+    with _HOOK_DIAG_LOCK:
+        entry = _HOOK_DIAGNOSTICS.get(hook) or {
+            "count": 0,
+            "last_error": "",
+            "last_at": 0.0,
+        }
+        _HOOK_DIAGNOSTICS[hook] = {
+            "count": int(entry.get("count", 0)) + 1,
+            "last_error": f"{err_type}: {str(exc)[:120]}" if str(exc) else err_type,
+            "last_at": round(time.time(), 3),
+        }
+
+
+def get_hook_diagnostics() -> dict[str, dict[str, object]]:
+    """Return a shallow snapshot of recorded non-fatal hook errors."""
+    with _HOOK_DIAG_LOCK:
+        return {k: dict(v) for k, v in _HOOK_DIAGNOSTICS.items()}
 
 _TZ_SHANGHAI = timezone(timedelta(hours=8))
 _INVALID_BOUNDS = object()
@@ -147,8 +180,8 @@ def _read_session_and_card(store, clean_umo: str):
                 or getattr(state, "card_id", "") == "__none__"
             )
             return state, card, disabled
-        except Exception:
-            pass
+        except Exception as exc:
+            _record_hook_error("read_session_snapshot", exc)
     try:
         raw_sessions = getattr(getattr(store, "_store", None), "sessions", None)
         sess = (
@@ -169,7 +202,8 @@ def _read_session_and_card(store, clean_umo: str):
             if default_id:
                 card = store.get_card(default_id)
         return sess, card, False
-    except Exception:
+    except Exception as exc:
+        _record_hook_error("read_session_and_card", exc)
         return None, None, False
 
 
@@ -214,7 +248,8 @@ def _resolve_sync_scope(
             cards = store.list_cards()
             if cards:
                 card = cards[0]
-        except Exception:
+        except Exception as exc:
+            _record_hook_error("resolve_sync_scope.list_cards", exc)
             card = None
     card_persona = _card_persona_id(card)
     if strict:
@@ -250,8 +285,8 @@ def _now_ts(plugin) -> float:
     if callable(clock):
         try:
             return float(clock())
-        except Exception:
-            pass
+        except Exception as exc:
+            _record_hook_error("now_ts", exc)
     return time.time()
 
 
@@ -305,7 +340,8 @@ def build_series_summary(plugin) -> dict:
                                 (ident, now),
                             ).fetchone()[0]
                         )
-                    except Exception:
+                    except Exception as exc:
+                        _record_hook_error("summary.pending_outreach", exc)
                         pending_outreach = 0
                     try:
                         scene = narrative.scenes.snapshot(db, scope, now)
@@ -317,8 +353,8 @@ def build_series_summary(plugin) -> dict:
                             action = scene.get("action")
                             if isinstance(action, dict) and action.get("label"):
                                 activity_label = str(action["label"]).strip()
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        _record_hook_error("summary.scene", exc)
                     try:
                         actor = narrative.spatial.snapshot(db, scope, now)
                         env = narrative.environment.snapshot(db, scope, now, actor)
@@ -328,10 +364,10 @@ def build_series_summary(plugin) -> dict:
                             weather_label = str(cur.get("label")) + (
                                 f" {temp}°C" if isinstance(temp, (int, float)) else ""
                             )
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+                    except Exception as exc:
+                        _record_hook_error("summary.environment", exc)
+            except Exception as exc:
+                _record_hook_error("summary.db", exc)
 
         if not ready:
             headline = f"编辑模式 · {card_count} 张角色卡 · {len(sessions)} 个会话"
@@ -364,7 +400,8 @@ def build_series_summary(plugin) -> dict:
             "badge": {"count": 0, "tone": "accent", "label": short_label},
             "pulse": {"headline": headline, "updated_at": updated_at},
         }
-    except Exception:
+    except Exception as exc:
+        _record_hook_error("build_series_summary", exc)
         return {
             "badge": {"count": 0, "tone": "muted", "label": "状态读取中"},
             "pulse": {"headline": "群间世界", "updated_at": updated_at},
@@ -438,15 +475,16 @@ def build_series_scope_status(plugin, umo: str) -> dict:
                         summary = "持续生活已暂停"
                     elif place:
                         summary = f"已接入 · {place}"
-        except Exception:
-            pass
+        except Exception as exc:
+            _record_hook_error("scope_status.db", exc)
 
     version = "0"
     onboarding = getattr(plugin, "onboarding", None)
     if onboarding is not None and callable(getattr(onboarding, "revision", None)):
         try:
             version = str(onboarding.revision())
-        except Exception:
+        except Exception as exc:
+            _record_hook_error("scope_status.revision", exc)
             version = "0"
 
     return {
@@ -496,8 +534,8 @@ def search_world_items(
                             "deep_link": {"view": "cards", "id": card.id},
                         }
                     )
-        except Exception:
-            pass
+        except Exception as exc:
+            _record_hook_error("search.cards", exc)
 
         try:
             for book in store.list_books():
@@ -537,8 +575,8 @@ def search_world_items(
                                 },
                             }
                         )
-        except Exception:
-            pass
+        except Exception as exc:
+            _record_hook_error("search.books", exc)
 
     if len(results) < cap:
         narrative = getattr(getattr(plugin, "life", None), "narrative", None)
@@ -594,8 +632,8 @@ def search_world_items(
                                         },
                                     }
                                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                _record_hook_error("search.narrative", exc)
 
     return results[:cap]
 
@@ -674,8 +712,8 @@ def collect_world_journal_events(
                             "target_id": str(row.get("project_id") or row.get("id") or ""),
                         }
                     )
-            except Exception:
-                pass
+            except Exception as exc:
+                _record_hook_error("world_journal.feed", exc)
 
             # 2. Committed diary entries for the day
             try:
@@ -707,9 +745,10 @@ def collect_world_journal_events(
                             "target_id": str(row["rowid"]),
                         }
                     )
-            except Exception:
-                pass
-    except Exception:
+            except Exception as exc:
+                _record_hook_error("world_journal.diary", exc)
+    except Exception as exc:
+        _record_hook_error("collect_world_journal_events", exc)
         return []
 
     events.sort(key=lambda item: item.get("timestamp", 0.0), reverse=True)
@@ -825,11 +864,19 @@ async def _query_sibling_journal(
                 timeout=0.35,
             )
         else:
-            raw_items = hook(**call_kwargs)
+            raw_items = await asyncio.wait_for(
+                asyncio.to_thread(hook, **call_kwargs),
+                timeout=0.35,
+            )
             if inspect.isawaitable(raw_items):
                 raw_items = await asyncio.wait_for(raw_items, timeout=0.35)
-    except Exception:
-        return category, {"available": False, "count": 0}, []
+    except Exception as exc:
+        _record_hook_error(f"sibling_journal:{plugin_id}", exc)
+        return (
+            category,
+            {"available": False, "count": 0, "error": type(exc).__name__},
+            [],
+        )
 
     if not isinstance(raw_items, (list, tuple)):
         return category, {"available": True, "count": 0}, []
@@ -919,18 +966,32 @@ async def aggregate_journal_feed(
     effective_scope = resolved["umo"]
     effective_persona = resolved["persona_id"]
 
-    world_events = collect_world_journal_events(
-        plugin,
-        persona=effective_persona,
-        scope=effective_scope,
-        date=clean_date,
-        limit=cap,
-        start_ts=bounds[0] if bounds is not None else None,
-        end_ts=bounds[1] if bounds is not None else None,
-        _resolved=resolved,
-    )
+    world_error = ""
+    try:
+        world_events = await asyncio.wait_for(
+            asyncio.to_thread(
+                collect_world_journal_events,
+                plugin,
+                persona=effective_persona,
+                scope=effective_scope,
+                date=clean_date,
+                limit=cap,
+                start_ts=bounds[0] if bounds is not None else None,
+                end_ts=bounds[1] if bounds is not None else None,
+                _resolved=resolved,
+            ),
+            timeout=0.35,
+        )
+    except Exception as exc:
+        _record_hook_error("aggregate_journal_feed.world", exc)
+        world_events = []
+        world_error = type(exc).__name__
     sources: dict[str, dict] = {
-        "world": {"available": True, "count": len(world_events)}
+        "world": (
+            {"available": False, "count": 0, "error": world_error}
+            if world_error
+            else {"available": True, "count": len(world_events)}
+        )
     }
     combined: list[dict] = list(world_events)
 
@@ -991,4 +1052,114 @@ async def aggregate_journal_feed(
         "scope": effective_scope,
         "sources": sources,
         "server_time": now,
+    }
+
+
+def build_series_health(plugin) -> dict:
+    """Synchronous, read-only health diagnostics conforming to series_panels.read_plugin_health."""
+    cfg = getattr(plugin, "config", None) or {}
+    context = getattr(plugin, "context", None)
+    ready = bool(plugin.runtime_allowed()) if callable(getattr(plugin, "runtime_allowed", None)) else False
+    runtime_enabled = bool(cfg.get("runtime_enabled") is True)
+    mode = str(cfg.get("mode", "legacy") or "legacy")
+    persona_id = str(cfg.get("persona_id") or "").strip()
+    sessions = [str(s).strip() for s in (cfg.get("narrative_sessions") or []) if s]
+    all_groups = bool(cfg.get("narrative_all_groups") is True)
+
+    issues: list[str] = []
+    providers: list[dict[str, str]] = []
+
+    try:
+        conflicts = list(plugin.conflicts()) if callable(getattr(plugin, "conflicts", None)) else []
+    except Exception as exc:
+        _record_hook_error("health.conflicts", exc)
+        conflicts = []
+    for name in conflicts:
+        issues.append(f"legacy_conflict:{name}")
+
+    if runtime_enabled and not ready and not conflicts:
+        issues.append("runtime_not_ready")
+
+    if runtime_enabled and mode == "narrative" and not persona_id:
+        issues.append("missing_persona_id")
+
+    explicit_narrative = str(cfg.get("narrative_provider_id") or "").strip()
+    explicit_llm = str(cfg.get("llm_provider_id") or "").strip()
+    resolved_narrative = resolve_series_provider(
+        context, explicit_narrative, explicit_llm, role="summary"
+    )
+    resolved_daily = resolve_series_provider(context, explicit_llm, role="reply")
+
+    for role, pid in (
+        ("narrative", resolved_narrative),
+        ("daily_life", resolved_daily),
+    ):
+        if not pid:
+            providers.append(
+                {
+                    "role": role,
+                    "provider_id": "",
+                    "status": "default",
+                    "detail": "using host default provider",
+                }
+            )
+            continue
+        inst = find_provider_silently(context, pid, allow_fallback=False)
+        if inst is not None:
+            providers.append(
+                {
+                    "role": role,
+                    "provider_id": pid,
+                    "status": "ok",
+                    "detail": "provider loaded",
+                }
+            )
+        else:
+            providers.append(
+                {
+                    "role": role,
+                    "provider_id": pid,
+                    "status": "missing",
+                    "detail": "provider not loaded",
+                }
+            )
+            issues.append(f"provider_missing:{role}:{pid}")
+
+    card_count = 0
+    store = getattr(getattr(plugin, "world", None), "store", None)
+    if store is not None and callable(getattr(store, "list_cards", None)):
+        try:
+            card_count = len(store.list_cards())
+        except Exception as exc:
+            _record_hook_error("health.cards", exc)
+
+    bg_alive = 0
+    life = getattr(plugin, "life", None)
+    for task_attr in ("_narrative_task", "_outreach_task", "_resident_task"):
+        task = getattr(life, task_attr, None) if life is not None else None
+        if task is None:
+            continue
+        if callable(getattr(task, "done", None)) and not task.done():
+            bg_alive += 1
+        elif ready and mode == "narrative":
+            issues.append(f"background_task_stopped:{task_attr.lstrip('_')}")
+
+    diag = get_hook_diagnostics()
+    hook_error_count = sum(int(entry.get("count", 0)) for entry in diag.values())
+
+    return {
+        "ready": ready,
+        "degraded": bool(issues),
+        "providers": providers,
+        "issues": issues,
+        "metrics": {
+            "runtime_enabled": runtime_enabled,
+            "mode": mode,
+            "persona_id": persona_id,
+            "card_count": card_count,
+            "active_sessions": len(sessions),
+            "all_groups": all_groups,
+            "background_tasks_alive": bg_alive,
+            "hook_error_count": hook_error_count,
+        },
     }

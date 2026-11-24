@@ -26,9 +26,7 @@ class NarrativeTests(unittest.IsolatedAsyncioTestCase):
     """Exercise persistence, truthful evidence and real concurrency boundaries."""
 
     def setUp(self):
-        scratch = Path(__file__).parent / ".tmp"
-        scratch.mkdir(exist_ok=True)
-        self.temp = tempfile.TemporaryDirectory(dir=scratch)
+        self.temp = tempfile.TemporaryDirectory()
         self.path = Path(self.temp.name) / "narrative.sqlite3"
         self.now = dt.datetime(2026, 10, 10, 10, tzinfo=CHINA).timestamp()
         self.scope = {"platform": "qq", "umo": "qq:GroupMessage:a", "persona_id": "anan", "instance_id": "anan"}
@@ -325,51 +323,41 @@ class NarrativeTests(unittest.IsolatedAsyncioTestCase):
             open_db.assert_not_called()
 
     async def test_snapshot_rechecks_permissions_after_waiting_for_sqlite_writer(self):
-        loop = asyncio.get_running_loop()
         owner_active = True
         self.engine._owner_active = lambda: owner_active
         raw_db = self.engine._db
-        read_projection = self.engine._snapshot
         scope = MODULE.normalize_scope(self.scope)
         notifications = []
+        statements = []
         self.engine.on_db_write = lambda: notifications.append("committed")
-
-        def project(db, scope, now):
-            db.execute("INSERT INTO metadata VALUES('snapshot_effect','settled')")
-            return read_projection(db, scope, now)
-
-        def observe_begin(statement):
-            if statement == "BEGIN IMMEDIATE":
-                loop.call_soon_threadsafe(begun.set)
 
         @contextmanager
         def tracked_db(**kwargs):
             with raw_db(**kwargs) as db:
-                db.set_trace_callback(observe_begin)
+                db.set_trace_callback(statements.append)
                 yield db
 
-        self.engine._snapshot = project
         self.engine._db = tracked_db
         for revoke in ("owner", "allowlist"):
             with self.subTest(revoke=revoke):
-                begun = asyncio.Event()
+                statements.clear()
                 with closing(sqlite3.connect(self.path)) as writer:
                     writer.execute("BEGIN IMMEDIATE")
-                    request = asyncio.create_task(self.engine.get_snapshot(scope))
-                    await asyncio.wait_for(begun.wait(), 2)
-                    self.assertFalse(request.done())
+                    # Read-only snapshot must NOT issue BEGIN IMMEDIATE or block on writers.
+                    snap = await asyncio.wait_for(self.engine.get_snapshot(scope), 2)
+                    self.assertTrue(snap["managed"])
+                    self.assertFalse(any("BEGIN IMMEDIATE" in s.upper() for s in statements))
                     if revoke == "owner":
                         owner_active = False
                     else:
                         self.config["narrative_sessions"] = []
-                    writer.commit()
                     self.assertEqual(
-                        await asyncio.wait_for(request, 2),
+                        await asyncio.wait_for(self.engine.get_snapshot(scope), 2),
                         {"schema_version": 1, "managed": False, "scope": scope},
                     )
+                    writer.commit()
                 self.assertEqual(self.query("SELECT * FROM lives"), [])
                 self.assertEqual(self.query("SELECT * FROM scopes"), [])
-                self.assertEqual(self.query("SELECT * FROM metadata WHERE key='snapshot_effect'"), [])
                 self.assertEqual(notifications, [])
                 owner_active = True
                 self.config["narrative_sessions"] = [self.scope["umo"], self.other["umo"]]
@@ -407,17 +395,23 @@ class NarrativeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_snapshot_admitted_after_a_committed_pause_reads_the_pause(self):
         loop = asyncio.get_running_loop()
-        committed = asyncio.Event()
+        sealed = asyncio.Event()
         release = threading.Event()
+        orig_seal = self.engine._snapshot_io.seal_current
+        first_call = True
 
-        def block_write_notification():
-            loop.call_soon_threadsafe(committed.set)
-            release.wait(5)
+        def pause_after_seal():
+            nonlocal first_call
+            orig_seal()
+            if first_call:
+                first_call = False
+                loop.call_soon_threadsafe(sealed.set)
+                release.wait(5)
 
-        self.engine.on_db_write = block_write_notification
+        self.engine._snapshot_io.seal_current = pause_after_seal
         first = asyncio.create_task(self.engine.get_snapshot(self.scope))
         try:
-            await asyncio.wait_for(committed.wait(), 2)
+            await asyncio.wait_for(sealed.wait(), 2)
             self.assertFalse(first.done())
             with self.engine._db(notify=False) as db:
                 db.execute("INSERT INTO metadata VALUES('paused','true')")
@@ -429,15 +423,6 @@ class NarrativeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((await first)["paused"])
 
     async def test_snapshot_reads_committed_state_after_sqlite_writer_releases(self):
-        loop = asyncio.get_running_loop()
-        entered = asyncio.Event()
-        read = self.engine._read_snapshot
-
-        def read_while_locked(scope):
-            loop.call_soon_threadsafe(entered.set)
-            return read(scope)
-
-        self.engine._read_snapshot = read_while_locked
         scope = MODULE.normalize_scope(self.scope)
         identity = MODULE._identity(scope)
         with closing(sqlite3.connect(self.path)) as writer:
@@ -446,12 +431,11 @@ class NarrativeTests(unittest.IsolatedAsyncioTestCase):
             row = writer.execute("SELECT state FROM lives WHERE identity=?", (identity,)).fetchone()
             changed = dict(json.loads(row[0]), summary="committed", valid_until=self.now + 300)
             writer.execute("UPDATE lives SET state=? WHERE identity=?", (json.dumps(changed), identity))
-            task = asyncio.create_task(self.engine.get_snapshot(scope))
-            await asyncio.wait_for(entered.wait(), 2)
-            await asyncio.sleep(0.05)
-            self.assertFalse(task.done())
+            # WAL read-only snapshot does NOT block on uncommitted writer and sees prior committed state.
+            during = await asyncio.wait_for(self.engine.get_snapshot(scope), 2)
+            self.assertEqual(during["summary"], "")
             writer.commit()
-            self.assertEqual((await asyncio.wait_for(task, 2))["summary"], "committed")
+            self.assertEqual((await asyncio.wait_for(self.engine.get_snapshot(scope), 2))["summary"], "committed")
 
     async def test_snapshot_rolls_back_scope_initialization_if_projection_fails(self):
         notifications = []

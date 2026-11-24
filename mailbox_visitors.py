@@ -360,9 +360,9 @@ class MailboxVisitorService:
         row = db.execute("SELECT MAX(opened_at) FROM world_mailbox WHERE identity=? AND status='opened'", (key,)).fetchone()
         return float(row[0] or 0.0) if row else 0.0
 
-    def snapshot(self, db, scope: dict, now: float, character_context: dict | None = None) -> dict:
+    def snapshot(self, db, scope: dict, now: float, character_context: dict | None = None, *, read_only: bool = False) -> dict:
         key = identity(scope)
-        if db.execute("SELECT 1 FROM world_garden_visitors WHERE departs_at<=? LIMIT 1", (now,)).fetchone():
+        if not read_only and db.execute("SELECT 1 FROM world_garden_visitors WHERE departs_at<=? LIMIT 1", (now,)).fetchone():
             db.execute("DELETE FROM world_garden_visitors WHERE departs_at<=?", (now,))
         mode = self.policy_for(db, scope, character_context)
         unopened_count = db.execute(

@@ -522,6 +522,444 @@ class NarrativeOutreachMixin:
         }
         return item
 
+    def _outreach_list_sessions_sync(self, now: float) -> list[str]:
+        with self._db() as db:
+            return [
+                row[0]
+                for row in db.execute(
+                    "SELECT DISTINCT umo FROM events WHERE identity=? AND umo<>'' "
+                    "AND occurred BETWEEN ? AND ? AND status!='blocked_policy' "
+                    "AND json_extract(payload,'$.type') IN ('message.received','chat.message') "
+                    "AND (json_extract(payload,'$.data.directed_to_bot')=1 "
+                    "OR json_extract(payload,'$.data.social_opportunity')=1) ORDER BY umo",
+                    (_identity(self._global_scope()), now - 86400, now),
+                )
+            ]
+
+    def _outreach_snapshot(self, db, scope: dict, now: float) -> dict:
+        """Lightweight read-only projection for outreach: ONLY availability, humanlike, scope_revision."""
+        identity = _identity(scope)
+        row = db.execute("SELECT state, revision FROM lives WHERE identity=?", (identity,)).fetchone()
+        local = db.execute(
+            "SELECT state, revision FROM scopes WHERE identity=? AND umo=?",
+            (identity, scope["umo"]),
+        ).fetchone()
+        state = json.loads(row["state"]) if row else self._default_life_state(now)
+        scoped = (
+            json.loads(local["state"])
+            if local
+            else {"subjective_state": "", "summary": "", "source_ids": []}
+        )
+        local_revision = int(local["revision"]) if local else 0
+        expired = float(state.get("valid_until", 0) or 0) <= now
+        availability = state.get("availability", "unknown") if not expired else "unknown"
+        humanlike = {
+            key: []
+            for key in (
+                "preferences",
+                "goals",
+                "moods",
+                "nicknames",
+                "corrections",
+                "interests",
+            )
+        }
+        for owner, saved in (("personal", state), ("conversation", scoped)):
+            if owner == "conversation" and not scope["umo"]:
+                continue
+            for key in humanlike:
+                for item in saved.get("humanlike", {}).get(key, {}).values():
+                    if key in {"goals", "moods"} and (
+                        item.get("expires_at", 0) <= now
+                        or item.get("status") == "settled"
+                    ):
+                        continue
+                    presentation = dict(item, origin=owner)
+                    if key == "moods":
+                        presentation["strength"] = round(
+                            2 ** (-max(0, now - item["updated_at"]) / 600), 3
+                        )
+                    humanlike[key].append(presentation)
+        return {
+            "availability": availability,
+            "humanlike": humanlike,
+            "scope_revision": local_revision,
+        }
+
+    def _outreach_prepare_session_sync(
+        self,
+        scope: dict,
+        umo: str,
+        identity: str,
+        peer: str,
+        key: str,
+        policy_key: str,
+        care_enabled: bool,
+        social_enabled: bool,
+        now: float,
+    ) -> tuple[str, dict | None]:
+        with self._db() as db:
+            if self._paused(db, scope) or self._outreach_paused(db, scope):
+                return "skip", None
+            saved = db.execute(
+                "SELECT value FROM metadata WHERE key=?", (key,)
+            ).fetchone()
+            marker = json.loads(saved[0]) if saved else {}
+            if marker.get("next_at", 0) > now and marker.get("policy_key") == policy_key:
+                return "skip", None
+            rows = db.execute(
+                "SELECT payload FROM events WHERE identity=? AND umo=? AND occurred>=? AND occurred<=? "
+                "AND status!='blocked_policy' AND (json_extract(payload,'$.type')='delivery.success' OR "
+                "(json_extract(payload,'$.type') IN ('message.received','chat.message') AND "
+                "(json_extract(payload,'$.data.directed_to_bot')=1 OR json_extract(payload,'$.data.social_opportunity')=1))) "
+                "ORDER BY occurred DESC,event_id DESC LIMIT 80",
+                (identity, umo, now - 86400, now),
+            ).fetchall()
+            events, size = [], 0
+            for row in rows:
+                e = json.loads(row[0])
+                target = (
+                    e.get("data", {}).get("recipient_user_id")
+                    if e["type"] == "delivery.success"
+                    else e.get("actor_id")
+                )
+                if peer and target != peer:
+                    continue
+                if target and not self._contact_allowed(db, scope, target):
+                    continue
+                length = len(e.get("text", ""))
+                if len(events) >= 40 or size + length > 16000:
+                    break
+                events.append(e)
+                size += length
+            events.reverse()
+            members = {
+                e["actor_id"]
+                for e in events
+                if e["type"] in {"message.received", "chat.message"}
+                and e["actor_id"] not in {"", "bot", "system"}
+            }
+            if not members:
+                return "skip", None
+            quiet = [
+                uid
+                for uid in sorted(members)
+                if max(e["occurred_at"] for e in events if e.get("actor_id") == uid)
+                <= now - 1800
+            ]
+            snapshot = self._outreach_snapshot(db, scope, now)
+            topic_candidates = (
+                self._grounded_topic_candidates(db, scope, now, snapshot)
+                if social_enabled
+                else []
+            )
+            opportunity_members = sorted(
+                {
+                    e["actor_id"]
+                    for e in events
+                    if e["type"] in {"message.received", "chat.message"}
+                    and e["actor_id"] not in {"", "bot", "system"}
+                    and self._has_social_opportunity(e, peer)
+                    and now - 900 <= e.get("occurred_at", 0) <= now
+                    and self._contact_allowed(db, scope, e["actor_id"])
+                }
+            )
+            evidence_key = hashlib.sha256(
+                _json([e["event_id"] for e in events]).encode()
+            ).hexdigest()
+            if (
+                marker.get("status") == "policy_refusal"
+                and marker.get("evidence_key") == evidence_key
+            ):
+                return "skip", None
+            is_asleep = snapshot.get("availability") == "asleep"
+            if (
+                is_asleep
+                and not opportunity_members
+                and marker.get("status") == "ok"
+                and marker.get("evidence_key") == evidence_key
+            ):
+                return "skip", None
+            active_topic_candidates = (
+                [
+                    [c["topic_candidate_id"], c["source_fingerprint"]]
+                    for c in topic_candidates
+                ]
+                if opportunity_members
+                else []
+            )
+            fingerprint = hashlib.sha256(
+                _json(
+                    [
+                        [e["event_id"] for e in events],
+                        quiet,
+                        policy_key,
+                        opportunity_members,
+                        active_topic_candidates,
+                        is_asleep,
+                        snapshot.get("scope_revision"),
+                    ]
+                ).encode()
+            ).hexdigest()
+            no_change_streak = int(marker.get("no_change_streak", 0))
+            # Progressive quiet backoff on identical no_change evidence:
+            # 30m (first re-check) -> 2h -> 4h; resets immediately on any new input/change.
+            cache_ttl = (
+                1800
+                if no_change_streak <= 1
+                else 7200
+                if no_change_streak == 2
+                else 14400
+            )
+            if (
+                marker.get("fingerprint") == fingerprint
+                and marker.get("status") == "ok"
+                and now - marker.get("last_at", 0) < cache_ttl
+            ):
+                return "skip", None
+            if self._group_scope(umo):
+                directed_msgs = [
+                    e
+                    for e in events
+                    if e["type"] in {"message.received", "chat.message"}
+                    and e.get("data", {}).get("directed_to_bot") is True
+                ]
+                substantive_opp = [
+                    e
+                    for e in events
+                    if e["type"] in {"message.received", "chat.message"}
+                    and self._has_social_opportunity(e, peer)
+                    and now - 900 <= e.get("occurred_at", 0) <= now
+                    and self._contact_allowed(db, scope, e["actor_id"])
+                    and self._is_substantive_group_opportunity_text(e.get("text", ""))
+                ]
+                social_slot_open = (
+                    self._social_slot_available(db, scope, now, "")
+                    if social_enabled
+                    else False
+                )
+                has_viable_care = care_enabled and bool(directed_msgs)
+                has_viable_grounded = (
+                    social_enabled
+                    and social_slot_open
+                    and bool(substantive_opp)
+                    and bool(topic_candidates)
+                )
+                has_viable_shared = (
+                    social_enabled
+                    and social_slot_open
+                    and bool(quiet)
+                    and bool(directed_msgs)
+                    and any(e["type"] == "delivery.success" for e in events)
+                )
+                # Also skip if previous run already returned no_change and the ONLY new
+                # events since last_at are bot replies or non-substantive ambient messages
+                # (while no new quiet member became eligible).
+                prev_last = float(marker.get("last_at", 0) or 0)
+                prev_quiet = set(marker.get("quiet_members") or [])
+                new_user_signals = any(
+                    e["type"] in {"message.received", "chat.message"}
+                    and e.get("occurred_at", 0) > prev_last
+                    and (
+                        e.get("data", {}).get("directed_to_bot") is True
+                        or (has_viable_grounded and e in substantive_opp)
+                    )
+                    for e in events
+                )
+                only_low_signal_delta = (
+                    marker.get("fingerprint") != fingerprint
+                    and marker.get("status") == "ok"
+                    and int(marker.get("candidates", 0)) == 0
+                    and marker.get("policy_key") == policy_key
+                    and marker.get("is_asleep") == is_asleep
+                    and set(quiet) <= prev_quiet
+                    and not new_user_signals
+                    and prev_last > 0
+                )
+                if not (
+                    has_viable_care or has_viable_grounded or has_viable_shared
+                ) or only_low_signal_delta:
+                    db.execute(
+                        "INSERT INTO metadata VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        (
+                            key,
+                            _json(
+                                {
+                                    "last_at": now,
+                                    "next_at": now,
+                                    "fingerprint": fingerprint,
+                                    "status": "ok",
+                                    "candidates": 0,
+                                    "rejected": 0,
+                                    "no_change_streak": max(
+                                        1, int(marker.get("no_change_streak", 0))
+                                    ),
+                                    "quiet_members": quiet,
+                                    "is_asleep": is_asleep,
+                                    "policy_key": policy_key,
+                                    "evidence_key": evidence_key,
+                                }
+                            ),
+                        ),
+                    )
+                    return "skip", None
+            if not self._reserve(db, identity, "outreach", now, umo=umo):
+                return "budget_exhausted", None
+            recent_intents = [
+                dict(json.loads(r["payload"]), status=r["status"])
+                for r in db.execute(
+                    "SELECT payload,status FROM intents WHERE identity=? AND umo=? AND updated>?",
+                    (identity, umo, now - 86400),
+                )
+            ]
+            db.execute(
+                "INSERT INTO metadata VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (
+                    key,
+                    _json(
+                        {
+                            "last_at": now,
+                            "next_at": now + 900,
+                            "fingerprint": fingerprint,
+                            "status": "running",
+                            "policy_key": policy_key,
+                            "evidence_key": evidence_key,
+                        }
+                    ),
+                ),
+            )
+            return "ready", {
+                "marker": marker,
+                "events": events,
+                "quiet": quiet,
+                "snapshot": snapshot,
+                "topic_candidates": topic_candidates,
+                "opportunity_members": opportunity_members,
+                "evidence_key": evidence_key,
+                "is_asleep": is_asleep,
+                "fingerprint": fingerprint,
+                "recent_intents": recent_intents,
+            }
+
+    def _outreach_commit_intents_sync(
+        self,
+        scope: dict,
+        identity: str,
+        umo: str,
+        intents: list[dict],
+        rejected: list[str],
+        sources: dict,
+        now: float,
+    ) -> tuple[bool, int]:
+        added = 0
+        with self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if (
+                not self.is_managed(scope)
+                or self._paused(db, scope)
+                or self._outreach_paused(db, scope)
+            ):
+                return False, 0
+            for code in rejected:
+                db.execute(
+                    "INSERT INTO validation_failures VALUES(?,?,?,?)",
+                    (
+                        str(uuid.uuid4()),
+                        _json(list(sources)),
+                        "outreach." + str(code)[:80],
+                        now,
+                    ),
+                )
+            for item in intents:
+                if not self._care_current(db, item):
+                    continue
+                if item.get(
+                    "kind"
+                ) == "social_chat" and not self._social_slot_available(
+                    db, scope, now, item.get("topic_candidate_id", "")
+                ):
+                    continue
+                previous = [
+                    dict(json.loads(r["payload"]), status=r["status"])
+                    for r in db.execute(
+                        "SELECT payload,status FROM intents WHERE identity=? AND umo=? "
+                        "AND (status IN ('pending','claimed') OR updated>?)",
+                        (identity, umo, now - 86400),
+                    )
+                ]
+                if any(
+                    old.get("source_ids") == item["source_ids"]
+                    or (
+                        old.get("recipient_user_id") == item["recipient_user_id"]
+                        and (
+                            old["status"] in {"pending", "claimed"}
+                            or (
+                                item["kind"] == "social_chat"
+                                and old.get("created_at", 0) > now - 86400
+                            )
+                        )
+                    )
+                    for old in previous
+                ):
+                    continue
+                added += db.execute(
+                    "INSERT OR IGNORE INTO intents VALUES(?,?,?,?,?,?,?,?)",
+                    (
+                        item["intent_id"],
+                        identity,
+                        umo,
+                        _json(item),
+                        "pending",
+                        item["not_before"],
+                        item["expires_at"],
+                        now,
+                    ),
+                ).rowcount
+        return True, added
+
+    def _outreach_record_failure_sync(
+        self, sources: dict, error: str, now: float
+    ) -> None:
+        with self._db() as db:
+            db.execute(
+                "INSERT INTO validation_failures VALUES(?,?,?,?)",
+                (
+                    str(uuid.uuid4()),
+                    _json(list(sources)),
+                    "outreach." + str(error)[:80],
+                    now,
+                ),
+            )
+
+    def _outreach_finalize_sync(
+        self,
+        key: str,
+        payload: dict,
+        call_id: str,
+        identity: str,
+        umo: str,
+        now: float,
+        started: float,
+        status: str,
+    ) -> None:
+        with self._db() as db:
+            db.execute(
+                "INSERT INTO metadata VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, _json(payload)),
+            )
+            db.execute(
+                "INSERT INTO calls VALUES(?,?,?,?,?,?,?)",
+                (
+                    call_id,
+                    identity,
+                    umo,
+                    now,
+                    max(0.0, time.monotonic() - started),
+                    status,
+                    "outreach",
+                ),
+            )
+
     async def review_outreach(self):
         """Inspect fresh evidence independently of the life FIFO and its budget.
 
@@ -540,17 +978,7 @@ class NarrativeOutreachMixin:
         results = []
         async with self._outreach_lock:
             now = self.clock()
-            with self._db() as db:
-                sessions = [
-                    row[0] for row in db.execute(
-                        "SELECT DISTINCT umo FROM events WHERE identity=? AND umo<>'' "
-                        "AND occurred BETWEEN ? AND ? AND status!='blocked_policy' "
-                        "AND json_extract(payload,'$.type') IN ('message.received','chat.message') "
-                        "AND (json_extract(payload,'$.data.directed_to_bot')=1 "
-                        "OR json_extract(payload,'$.data.social_opportunity')=1) ORDER BY umo",
-                        (_identity(self._global_scope()), now - 86400, now),
-                    )
-                ]
+            sessions = await asyncio.to_thread(self._outreach_list_sessions_sync, now)
             for umo in sessions:
                 scope = self._outreach_scope(umo)
                 care_enabled = self._outreach_enabled("care_wait", scope)
@@ -568,219 +996,33 @@ class NarrativeOutreachMixin:
                     self.config.get("narrative_provider_id",""),
                     dt.datetime.fromtimestamp(now, tz).hour >= 8,
                 ]).encode()).hexdigest()
-                with self._db() as db:
-                    if self._paused(db, scope) or self._outreach_paused(db, scope):
-                        continue
-                    saved = db.execute(
-                        "SELECT value FROM metadata WHERE key=?", (key,)
-                    ).fetchone()
-                    marker = json.loads(saved[0]) if saved else {}
-                    if marker.get("next_at", 0) > now and marker.get("policy_key") == policy_key:
-                        continue
-                    rows = db.execute(
-                        "SELECT payload FROM events WHERE identity=? AND umo=? AND occurred>=? AND occurred<=? "
-                        "AND status!='blocked_policy' AND (json_extract(payload,'$.type')='delivery.success' OR "
-                        "(json_extract(payload,'$.type') IN ('message.received','chat.message') AND "
-                        "(json_extract(payload,'$.data.directed_to_bot')=1 OR json_extract(payload,'$.data.social_opportunity')=1))) "
-                        "ORDER BY occurred DESC,event_id DESC LIMIT 80",
-                        (identity, umo, now - 86400, now),
-                    ).fetchall()
-                    events, size = [], 0
-                    for row in rows:
-                        e = json.loads(row[0])
-                        target = (e.get("data",{}).get("recipient_user_id") if e["type"]=="delivery.success"
-                                  else e.get("actor_id"))
-                        if peer and target != peer:
-                            continue
-                        if target and not self._contact_allowed(db,scope,target):
-                            continue
-                        length = len(e.get("text", ""))
-                        if len(events) >= 40 or size + length > 16000:
-                            break
-                        events.append(e)
-                        size += length
-                    events.reverse()
-                    members = {
-                        e["actor_id"]
-                        for e in events
-                        if e["type"] in {"message.received", "chat.message"}
-                        and e["actor_id"] not in {"", "bot", "system"}
-                    }
-                    if not members:
-                        continue
-                    quiet = [
-                        uid
-                        for uid in sorted(members)
-                        if max(e["occurred_at"] for e in events if e.get("actor_id") == uid)
-                        <= now - 1800
-                    ]
-                    snapshot = self._snapshot(db, scope, now)
-                    topic_candidates = (
-                        self._grounded_topic_candidates(db, scope, now, snapshot)
-                        if social_enabled else []
-                    )
-                    opportunity_members = sorted({
-                        e["actor_id"] for e in events
-                        if e["type"] in {"message.received", "chat.message"}
-                        and e["actor_id"] not in {"", "bot", "system"}
-                        and self._has_social_opportunity(e, peer)
-                        and now - 900 <= e.get("occurred_at", 0) <= now
-                        and self._contact_allowed(db, scope, e["actor_id"])
-                    })
-                    evidence_key = hashlib.sha256(_json([e["event_id"] for e in events]).encode()).hexdigest()
-                    if marker.get("status") == "policy_refusal" and marker.get("evidence_key") == evidence_key:
-                        continue
-                    is_asleep = snapshot.get("availability") == "asleep"
-                    if (
-                        is_asleep
-                        and not opportunity_members
-                        and marker.get("status") == "ok"
-                        and marker.get("evidence_key") == evidence_key
-                    ):
-                        continue
-                    active_topic_candidates = (
-                        [
-                            [c["topic_candidate_id"], c["source_fingerprint"]]
-                            for c in topic_candidates
-                        ]
-                        if opportunity_members
-                        else []
-                    )
-                    fingerprint = hashlib.sha256(_json([
-                        [e["event_id"] for e in events], quiet, policy_key,
-                        opportunity_members, active_topic_candidates,
-                        is_asleep, snapshot.get("scope_revision"),
-                    ]).encode()).hexdigest()
-                    no_change_streak = int(marker.get("no_change_streak", 0))
-                    # Progressive quiet backoff on identical no_change evidence:
-                    # 30m (first re-check) -> 2h -> 4h; resets immediately on any new input/change.
-                    cache_ttl = (
-                        1800
-                        if no_change_streak <= 1
-                        else 7200
-                        if no_change_streak == 2
-                        else 14400
-                    )
-                    if (
-                        marker.get("fingerprint") == fingerprint
-                        and marker.get("status") == "ok"
-                        and now - marker.get("last_at", 0) < cache_ttl
-                    ):
-                        continue
-                    if self._group_scope(umo):
-                        directed_msgs = [
-                            e
-                            for e in events
-                            if e["type"] in {"message.received", "chat.message"}
-                            and e.get("data", {}).get("directed_to_bot") is True
-                        ]
-                        substantive_opp = [
-                            e
-                            for e in events
-                            if e["type"] in {"message.received", "chat.message"}
-                            and self._has_social_opportunity(e, peer)
-                            and now - 900 <= e.get("occurred_at", 0) <= now
-                            and self._contact_allowed(db, scope, e["actor_id"])
-                            and self._is_substantive_group_opportunity_text(
-                                e.get("text", "")
-                            )
-                        ]
-                        social_slot_open = (
-                            self._social_slot_available(db, scope, now, "")
-                            if social_enabled
-                            else False
-                        )
-                        has_viable_care = care_enabled and bool(directed_msgs)
-                        has_viable_grounded = (
-                            social_enabled
-                            and social_slot_open
-                            and bool(substantive_opp)
-                            and bool(topic_candidates)
-                        )
-                        has_viable_shared = (
-                            social_enabled
-                            and social_slot_open
-                            and bool(quiet)
-                            and bool(directed_msgs)
-                            and any(e["type"] == "delivery.success" for e in events)
-                        )
-                        # Also skip if previous run already returned no_change and the ONLY new
-                        # events since last_at are bot replies or non-substantive ambient messages
-                        # (while no new quiet member became eligible).
-                        prev_last = float(marker.get("last_at", 0) or 0)
-                        prev_quiet = set(marker.get("quiet_members") or [])
-                        new_user_signals = any(
-                            e["type"] in {"message.received", "chat.message"}
-                            and e.get("occurred_at", 0) > prev_last
-                            and (
-                                e.get("data", {}).get("directed_to_bot") is True
-                                or (
-                                    has_viable_grounded
-                                    and e in substantive_opp
-                                )
-                            )
-                            for e in events
-                        )
-                        only_low_signal_delta = (
-                            marker.get("fingerprint") != fingerprint
-                            and marker.get("status") == "ok"
-                            and int(marker.get("candidates", 0)) == 0
-                            and marker.get("policy_key") == policy_key
-                            and marker.get("is_asleep") == is_asleep
-                            and set(quiet) <= prev_quiet
-                            and not new_user_signals
-                            and prev_last > 0
-                        )
-                        if not (
-                            has_viable_care or has_viable_grounded or has_viable_shared
-                        ) or only_low_signal_delta:
-                            db.execute(
-                                "INSERT INTO metadata VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                                (
-                                    key,
-                                    _json(
-                                        {
-                                            "last_at": now,
-                                            "next_at": now,
-                                            "fingerprint": fingerprint,
-                                            "status": "ok",
-                                            "candidates": 0,
-                                            "rejected": 0,
-                                            "no_change_streak": max(
-                                                1, int(marker.get("no_change_streak", 0))
-                                            ),
-                                            "quiet_members": quiet,
-                                            "is_asleep": is_asleep,
-                                            "policy_key": policy_key,
-                                            "evidence_key": evidence_key,
-                                        }
-                                    ),
-                                ),
-                            )
-                            continue
-                    recent_intents = [
-                        dict(json.loads(r["payload"]), status=r["status"])
-                        for r in db.execute(
-                            "SELECT payload,status FROM intents WHERE identity=? AND umo=? AND updated>?",
-                            (identity, umo, now - 86400),
-                        )
-                    ]
-                    db.execute(
-                        "INSERT INTO metadata VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                        (
-                            key,
-                            _json(
-                                {
-                                    "last_at": now,
-                                    "next_at": now + 900,
-                                    "fingerprint": fingerprint,
-                                    "status": "running",
-                                    "policy_key": policy_key,
-                                    "evidence_key": evidence_key,
-                                }
-                            ),
-                        ),
-                    )
+                prep_status, prep = await asyncio.to_thread(
+                    self._outreach_prepare_session_sync,
+                    scope,
+                    umo,
+                    identity,
+                    peer,
+                    key,
+                    policy_key,
+                    care_enabled,
+                    social_enabled,
+                    now,
+                )
+                if prep_status == "skip":
+                    continue
+                if prep_status == "budget_exhausted":
+                    results.append({"status": "budget_exhausted", "candidates": 0})
+                    continue
+                marker = prep["marker"]
+                events = prep["events"]
+                quiet = prep["quiet"]
+                snapshot = prep["snapshot"]
+                topic_candidates = prep["topic_candidates"]
+                opportunity_members = prep["opportunity_members"]
+                evidence_key = prep["evidence_key"]
+                is_asleep = prep["is_asleep"]
+                fingerprint = prep["fingerprint"]
+                recent_intents = prep["recent_intents"]
                 request = {
                     "schema_version": 1,
                     "scope": scope,
@@ -861,61 +1103,18 @@ class NarrativeOutreachMixin:
                         )
                     if rejected:
                         status = "partial" if intents else "invalid"
-                    with self._db() as db:
-                        db.execute("BEGIN IMMEDIATE")
-                        if (
-                            not self.is_managed(scope)
-                            or self._paused(db, scope)
-                            or self._outreach_paused(db, scope)
-                        ):
-                            continue
-                        for code in rejected:
-                            db.execute("INSERT INTO validation_failures VALUES(?,?,?,?)",
-                                (str(uuid.uuid4()),_json(list(sources)),"outreach."+str(code)[:80],now))
-                        for item in intents:
-                            if not self._care_current(db, item):
-                                continue
-                            if (item.get("kind") == "social_chat"
-                                    and not self._social_slot_available(
-                                        db, scope, now, item.get("topic_candidate_id", "")
-                                    )):
-                                continue
-                            previous = [
-                                dict(json.loads(r["payload"]), status=r["status"])
-                                for r in db.execute(
-                                    "SELECT payload,status FROM intents WHERE identity=? AND umo=?",
-                                    (identity, umo),
-                                )
-                            ]
-                            if any(
-                                old.get("source_ids") == item["source_ids"]
-                                or (
-                                    old.get("recipient_user_id")
-                                    == item["recipient_user_id"]
-                                    and (
-                                        old["status"] in {"pending", "claimed"}
-                                        or (
-                                            item["kind"] == "social_chat"
-                                            and old.get("created_at", 0) > now - 86400
-                                        )
-                                    )
-                                )
-                                for old in previous
-                            ):
-                                continue
-                            added += db.execute(
-                                "INSERT OR IGNORE INTO intents VALUES(?,?,?,?,?,?,?,?)",
-                                (
-                                    item["intent_id"],
-                                    identity,
-                                    umo,
-                                    _json(item),
-                                    "pending",
-                                    item["not_before"],
-                                    item["expires_at"],
-                                    now,
-                                ),
-                            ).rowcount
+                    committed, added = await asyncio.to_thread(
+                        self._outreach_commit_intents_sync,
+                        scope,
+                        identity,
+                        umo,
+                        intents,
+                        rejected,
+                        sources,
+                        now,
+                    )
+                    if not committed:
+                        continue
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
@@ -923,16 +1122,9 @@ class NarrativeOutreachMixin:
                     if self._is_policy_refusal(exc):
                         status = "policy_refusal"
                     error = getattr(exc, "code", type(exc).__name__)
-                    with self._db() as db:
-                        db.execute(
-                            "INSERT INTO validation_failures VALUES(?,?,?,?)",
-                            (
-                                str(uuid.uuid4()),
-                                _json(list(sources)),
-                                "outreach." + str(error)[:80],
-                                now,
-                            ),
-                        )
+                    await asyncio.to_thread(
+                        self._outreach_record_failure_sync, sources, str(error), now
+                    )
                 next_no_change_streak = (
                     (
                         int(marker.get("no_change_streak", 0)) + 1
@@ -943,38 +1135,29 @@ class NarrativeOutreachMixin:
                     if status in {"ok", "partial"} and added == 0
                     else 0
                 )
-                with self._db() as db:
-                    db.execute(
-                        "INSERT INTO metadata VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                        (
-                            key,
-                            _json(
-                                {
-                                    "last_at": now,
-                                    "next_at": now + (300 if status in {"ok","partial"} else 900),
-                                    "fingerprint": fingerprint,
-                                    "status": "ok"
-                                    if status == "partial"
-                                    else status,
-                                    "candidates": added,
-                                    "rejected": len(rejected),
-                                    "no_change_streak": next_no_change_streak,
-                                    "quiet_members": quiet,
-                                    "is_asleep": is_asleep,
-                                    "policy_key": policy_key,
-                                    "evidence_key": evidence_key,
-                                }
-                            ),
-                        ),
-                    )
-                self._call(
+                marker_payload = {
+                    "last_at": now,
+                    "next_at": now + (300 if status in {"ok", "partial"} else 900),
+                    "fingerprint": fingerprint,
+                    "status": "ok" if status == "partial" else status,
+                    "candidates": added,
+                    "rejected": len(rejected),
+                    "no_change_streak": next_no_change_streak,
+                    "quiet_members": quiet,
+                    "is_asleep": is_asleep,
+                    "policy_key": policy_key,
+                    "evidence_key": evidence_key,
+                }
+                await asyncio.to_thread(
+                    self._outreach_finalize_sync,
+                    key,
+                    marker_payload,
                     request["inference_call_id"],
                     identity,
                     umo,
                     now,
                     started,
                     status,
-                    "outreach",
                 )
                 results.append({"status": status, "candidates": added})
         return results

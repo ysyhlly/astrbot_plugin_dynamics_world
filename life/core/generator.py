@@ -283,12 +283,20 @@ class Generator:
 
                 resolved_provider_id = self._provider_id_of(provider)
                 sid = f"dynamic_life_state_gen_{date}"
-                resp = await series_llm_call(
-                    self.context,
-                    resolved_provider_id,
-                    "astrbot_plugin_dynamics_world",
-                    "daily_life_generate",
-                    lambda: provider.text_chat(prompt, session_id=sid),
+                try:
+                    raw_timeout = self.config.get("narrative_timeout_seconds", 90)
+                    timeout = max(1.0, min(float(raw_timeout if raw_timeout is not None else 90), 180.0))
+                except (TypeError, ValueError):
+                    timeout = 90.0
+                resp = await asyncio.wait_for(
+                    series_llm_call(
+                        self.context,
+                        resolved_provider_id,
+                        "astrbot_plugin_dynamics_world",
+                        "daily_life_generate",
+                        lambda: provider.text_chat(prompt, session_id=sid),
+                    ),
+                    timeout=timeout,
                 )
                 text = self._extract_completion_text(resp)
 

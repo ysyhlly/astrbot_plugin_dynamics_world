@@ -78,6 +78,11 @@ class NarrativeSchemaMixin:
 
     def _initialize(self) -> None:
         with self._db() as db:
+            has_tables = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1"
+            ).fetchone()
+            if has_tables is None:
+                db.execute("PRAGMA auto_vacuum=INCREMENTAL")
             db.execute("PRAGMA journal_mode=WAL")
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -96,6 +101,7 @@ class NarrativeSchemaMixin:
                 CREATE INDEX IF NOT EXISTS event_fifo ON events(identity,umo,status,occurred,received,event_id);
                 CREATE INDEX IF NOT EXISTS event_recent_scopes ON events(identity,occurred,umo);
                 CREATE INDEX IF NOT EXISTS event_pending_identity ON events(identity,status) WHERE status='pending';
+                CREATE INDEX IF NOT EXISTS event_status_created ON events(status,created);
                 CREATE INDEX IF NOT EXISTS event_outreach_window ON events(identity,occurred,umo) WHERE umo<>'' AND status!='blocked_policy';
                 CREATE INDEX IF NOT EXISTS event_outreach_type ON events(identity,json_extract(payload,'$.type'),occurred) WHERE umo<>'' AND status!='blocked_policy';
                 CREATE TABLE IF NOT EXISTS validation_failures(
@@ -111,6 +117,8 @@ class NarrativeSchemaMixin:
                     umo TEXT NOT NULL,payload TEXT NOT NULL,status TEXT NOT NULL,
                     not_before REAL NOT NULL,expires REAL NOT NULL,updated REAL NOT NULL);
                 CREATE INDEX IF NOT EXISTS intent_due ON intents(status,not_before,expires);
+                CREATE INDEX IF NOT EXISTS intent_scope_status_updated ON intents(identity,umo,status,updated);
+                CREATE INDEX IF NOT EXISTS intent_status_updated ON intents(status,updated);
                 CREATE TABLE IF NOT EXISTS outreach_preferences(
                     identity TEXT NOT NULL,umo TEXT NOT NULL,user_id TEXT NOT NULL,
                     allowed INTEGER NOT NULL,occurred REAL NOT NULL,event_id TEXT NOT NULL,
@@ -122,6 +130,7 @@ class NarrativeSchemaMixin:
                 CREATE TABLE IF NOT EXISTS calls(call_id TEXT PRIMARY KEY,identity TEXT NOT NULL,
                     umo TEXT NOT NULL,started REAL NOT NULL,duration REAL NOT NULL,
                     status TEXT NOT NULL,kind TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS calls_started ON calls(started);
                 CREATE TABLE IF NOT EXISTS legacy_imports(source_hash TEXT PRIMARY KEY,
                     source_path TEXT NOT NULL,payload TEXT NOT NULL,fact_kind TEXT NOT NULL,
                     imported REAL NOT NULL);

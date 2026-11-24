@@ -1,13 +1,95 @@
 /** Main workbench shell for astrbot_plugin_dynamics_world. */
 import { languagePicker, msg, setText, tr } from "./series-ui.js";
-import "./map.js?v=round2.1";
-import "./setup.js?v=series-audit.1";
-import "./creative-world.js?v=wb-iso.1";
 import "./pixel-cabin.js?v=wb-iso.1";
 import { refreshWorld, refreshLife } from "./world.js?v=wb-iso.1";
 import { apiGet, escapeHtml, readyBridge } from "./api.js";
 import { createWorkbenchOps } from "./workbench-ops.js?v=stage.11";
 import { createWorkbenchStudio } from "./workbench-studio.js?v=stage.11";
+
+let leafletPromise = null;
+let mapModulePromise = null;
+let setupModulePromise = null;
+let creativeModulePromise = null;
+const loadedModules = new Set();
+
+function ensureLeaflet() {
+  if (typeof window.L !== "undefined") return Promise.resolve();
+  if (!leafletPromise) {
+    leafletPromise = new Promise((resolve, reject) => {
+      const existing = document.querySelector('script[src*="./vendor/leaflet/leaflet.js"]');
+      if (existing) {
+        if (typeof window.L !== "undefined") {
+          resolve();
+          return;
+        }
+        existing.addEventListener("load", () => resolve(), { once: true });
+        existing.addEventListener("error", () => {
+          leafletPromise = null;
+          reject(new Error("Failed to load Leaflet"));
+        }, { once: true });
+        return;
+      }
+      const script = document.createElement("script");
+      script.src = "./vendor/leaflet/leaflet.js";
+      script.async = true;
+      script.addEventListener("load", () => resolve(), { once: true });
+      script.addEventListener("error", () => {
+        leafletPromise = null;
+        reject(new Error("Failed to load Leaflet"));
+      }, { once: true });
+      document.head.append(script);
+    });
+  }
+  return leafletPromise;
+}
+
+function ensureMapModule(needLeaflet = false) {
+  const loadMap = () => {
+    if (!mapModulePromise) {
+      mapModulePromise = import("./map.js?v=round2.1")
+        .then((mod) => {
+          loadedModules.add("map");
+          return mod;
+        })
+        .catch((err) => {
+          mapModulePromise = null;
+          throw err;
+        });
+    }
+    return mapModulePromise;
+  };
+  return needLeaflet ? ensureLeaflet().then(loadMap) : loadMap();
+}
+
+function ensureSetupModule() {
+  if (!setupModulePromise) {
+    setupModulePromise = import("./setup.js?v=series-audit.1")
+      .then((mod) => {
+        loadedModules.add("setup");
+        return mod;
+      })
+      .catch((err) => {
+        setupModulePromise = null;
+        throw err;
+      });
+  }
+  return setupModulePromise;
+}
+
+function ensureCreativeModule() {
+  if (!creativeModulePromise) {
+    creativeModulePromise = import("./creative-world.js?v=wb-iso.1")
+      .then((mod) => {
+        loadedModules.add("creative");
+        return mod;
+      })
+      .catch((err) => {
+        creativeModulePromise = null;
+        throw err;
+      });
+  }
+  return creativeModulePromise;
+}
 
 const state = {
   overview: null,
@@ -135,7 +217,32 @@ function ensureDrawerBar() {
   return drawerBar;
 }
 
+function ensureLazyViewTabs() {
+  const tabs = $("wbTabs");
+  if (!tabs) return;
+  const defs = [
+    ["projects", "创作项目"],
+    ["activity", "世界动态"],
+    ["setup", "安装引导"],
+  ];
+  for (const [viewName, label] of defs) {
+    if ($("tab-" + viewName)) continue;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "wb-tab";
+    btn.id = "tab-" + viewName;
+    btn.dataset.view = viewName;
+    btn.setAttribute("role", "tab");
+    btn.setAttribute("aria-selected", "false");
+    btn.setAttribute("aria-controls", "view-" + viewName);
+    btn.tabIndex = -1;
+    setText(btn, msg(label));
+    tabs.append(btn);
+  }
+}
+
 function organizeTabClusters() {
+  ensureLazyViewTabs();
   const tabs = $("wbTabs");
   if (!tabs) return;
   const moreDetails = $("wbTabsMore");
@@ -212,6 +319,61 @@ const studio = createWorkbenchStudio({
   refreshOverviewSilently,
 });
 
+function syncViewSections(name, isDrawer, isCabinStage) {
+  const bar = ensureDrawerBar();
+  document.querySelectorAll(".wb-view").forEach((section) => {
+    const isTarget = section.id === "view-" + name;
+    const keepCabin = isCabinStage && section.id === "view-cabin";
+    section.classList.toggle("wb-hidden", !(isTarget || keepCabin));
+    section.classList.toggle("is-stage-drawer", isDrawer && isTarget);
+    if (isDrawer && isTarget) {
+      setText($("cabinDrawerTitle") || bar.querySelector("#cabinDrawerTitle"), msg(views[name][0]));
+      setText($("cabinDrawerLede") || bar.querySelector("#cabinDrawerLede"), msg(views[name][1]));
+      if (section.firstElementChild !== bar) section.prepend(bar);
+    }
+  });
+  if (!isDrawer && bar.parentElement) bar.remove();
+}
+
+function loadLazyViewModule(name) {
+  const finish = () => {
+    if (state.view !== name) return;
+    const curDrawer = document.body.dataset.stageMode === "cabin-drawer";
+    syncViewSections(name, curDrawer, curDrawer || name === "cabin");
+    document.dispatchEvent(new CustomEvent("world-view", { detail: name }));
+  };
+  if (name === "map") {
+    if (typeof window.L === "undefined" || !loadedModules.has("map")) {
+      void ensureMapModule(true)
+        .then(finish)
+        .catch((err) => notify(tr("无法加载地图模块。") + (err?.message ? " " + err.message : ""), "error"));
+      return true;
+    }
+  } else if (name === "scenes" || name === "weather") {
+    if (!loadedModules.has("map")) {
+      void ensureMapModule(false)
+        .then(finish)
+        .catch((err) => notify(tr("无法加载世界视图模块。") + (err?.message ? " " + err.message : ""), "error"));
+      return true;
+    }
+  } else if (name === "setup") {
+    if (!loadedModules.has("setup")) {
+      void ensureSetupModule()
+        .then(finish)
+        .catch((err) => notify(tr("无法加载安装引导模块。") + (err?.message ? " " + err.message : ""), "error"));
+      return true;
+    }
+  } else if (name === "projects" || name === "activity") {
+    if (!loadedModules.has("creative")) {
+      void ensureCreativeModule()
+        .then(finish)
+        .catch((err) => notify(tr("无法加载创作与动态模块。") + (err?.message ? " " + err.message : ""), "error"));
+      return true;
+    }
+  }
+  return false;
+}
+
 function setView(rawName, { focus = false, remember = true, drawer = false, anchor = "" } = {}) {
   const normalized = normalizeView(rawName, anchor);
   let name = normalized.name;
@@ -241,20 +403,11 @@ function setView(rawName, { focus = false, remember = true, drawer = false, anch
   updateMoreTabsIndicator(name);
   const moreDetails = $("wbTabsMore");
   if (moreDetails && moreDetails.open && !focus) moreDetails.open = false;
-  const bar = ensureDrawerBar();
-  document.querySelectorAll(".wb-view").forEach((section) => {
-    const isTarget = section.id === "view-" + name;
-    const keepCabin = isCabinStage && section.id === "view-cabin";
-    section.classList.toggle("wb-hidden", !(isTarget || keepCabin));
-    section.classList.toggle("is-stage-drawer", isDrawer && isTarget);
-    if (isDrawer && isTarget) {
-      setText($("cabinDrawerTitle") || bar.querySelector("#cabinDrawerTitle"), msg(views[name][0]));
-      setText($("cabinDrawerLede") || bar.querySelector("#cabinDrawerLede"), msg(views[name][1]));
-      if (section.firstElementChild !== bar) section.prepend(bar);
-    }
-  });
-  if (!isDrawer && bar.parentElement) bar.remove();
-  document.dispatchEvent(new CustomEvent("world-view", { detail: name }));
+  syncViewSections(name, isDrawer, isCabinStage);
+  const loadingLazy = loadLazyViewModule(name);
+  if (!loadingLazy) {
+    document.dispatchEvent(new CustomEvent("world-view", { detail: name }));
+  }
   if (name === "books" && !state.bookId) studio.selectFirstBook();
   if (name === "cards" && !state.cardId) studio.selectFirstCard();
   if (name === "life" && resolvedAnchor === "stories") {

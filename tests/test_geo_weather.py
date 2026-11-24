@@ -203,7 +203,10 @@ async def test_real_weather_cache_dedup_stale_retry_and_nonblocking_snapshot(rig
     assert weather(engine)["status"] == "pending"
     service.schedule(SCOPE)
     service.schedule(SCOPE)
-    await asyncio.sleep(0)
+    for _ in range(50):
+        if calls:
+            break
+        await asyncio.sleep(0.01)
     assert len(calls) == 1 and weather(engine)["status"] == "pending"
     gate.set()
     await asyncio.gather(*list(service.tasks.values()))

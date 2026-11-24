@@ -212,7 +212,10 @@ class LifeService:
         while True:
             try:
                 if self.is_active():
-                    self.narrative.environment.schedule_all()
+                    if hasattr(self.narrative.environment, "schedule_all_async"):
+                        await self.narrative.environment.schedule_all_async()
+                    else:
+                        self.narrative.environment.schedule_all()
                     await self.narrative.tick()
             except asyncio.CancelledError:
                 raise

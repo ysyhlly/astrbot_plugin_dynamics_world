@@ -540,6 +540,17 @@ class EnvironmentService:
             env = self.snapshot(db, scope, self.engine.clock())
         self.schedule_projected(env)
 
+    async def schedule_async(self, scope):
+        if self.closed:
+            return
+
+        def _snap():
+            with self.engine._db(notify=False) as db:
+                return self.snapshot(db, scope, self.engine.clock())
+
+        env = await asyncio.to_thread(_snap)
+        self.schedule_projected(env)
+
     def schedule_projected(self, env):
         if self.closed:
             return
@@ -552,15 +563,13 @@ class EnvironmentService:
         self.tasks[key] = task
         task.add_done_callback(lambda done: self.tasks.pop(key, None))
 
-    def schedule_all(self):
-        if self.closed:
-            return
+    def _collect_schedule_all_envs(self):
         now = self.engine.clock()
         with self.engine._db(notify=False) as db:
             keys = [
                 json.loads(r[0]) for r in db.execute("SELECT identity FROM world_maps")
             ]
-            envs = [
+            return [
                 self.snapshot(
                     db,
                     {
@@ -573,6 +582,17 @@ class EnvironmentService:
                 )
                 for persona, instance in keys
             ]
+
+    def schedule_all(self):
+        if self.closed:
+            return
+        for env in self._collect_schedule_all_envs():
+            self.schedule_projected(env)
+
+    async def schedule_all_async(self):
+        if self.closed:
+            return
+        envs = await asyncio.to_thread(self._collect_schedule_all_envs)
         for env in envs:
             self.schedule_projected(env)
 
@@ -582,11 +602,14 @@ class EnvironmentService:
             for provider in self.providers(env["settings"]):
                 if self.closed:
                     return
-                with self.engine._db() as db:
-                    candidate = self._read_source(
-                        db, provider, env, self.engine.clock()
-                    )
-                    revision, credentials = self.credentials.read(db)
+
+                def _read_candidate(prov=provider):
+                    with self.engine._db() as db:
+                        cand = self._read_source(db, prov, env, self.engine.clock())
+                        _rev, creds = self.credentials.read(db)
+                        return cand, creds
+
+                candidate, credentials = await asyncio.to_thread(_read_candidate)
                 if candidate["status"] == "ready":
                     return
                 if not candidate["can_fetch"]:
@@ -598,8 +621,12 @@ class EnvironmentService:
                     candidate["limit_key"],
                     credentials,
                 )
-                with self.engine._db() as db:
-                    result = self._read_source(db, provider, env, self.engine.clock())
+
+                def _read_result(prov=provider):
+                    with self.engine._db() as db:
+                        return self._read_source(db, prov, env, self.engine.clock())
+
+                result = await asyncio.to_thread(_read_result)
                 if result["status"] == "ready":
                     return
 
@@ -626,12 +653,15 @@ class EnvironmentService:
                 now = self.engine.clock()
                 payload = normalize_forecast(data, now)
             elif provider == "met":
-                with self.engine._db() as db:
-                    row = db.execute(
-                        "SELECT payload FROM world_weather_cache WHERE cache_key=?",
-                        (key,),
-                    ).fetchone()
-                old = json.loads(row[0]) if row and row[0] else {}
+                def _load_met_cache():
+                    with self.engine._db() as db:
+                        row = db.execute(
+                            "SELECT payload FROM world_weather_cache WHERE cache_key=?",
+                            (key,),
+                        ).fetchone()
+                    return json.loads(row[0]) if row and row[0] else {}
+
+                old = await asyncio.to_thread(_load_met_cache)
                 data = await self.fetch(
                     "met",
                     {
@@ -662,21 +692,25 @@ class EnvironmentService:
             payload["expires_at"] = deadline
             if self.closed:
                 return
-            with self.engine._db() as db:
-                db.execute(
-                    "INSERT INTO world_weather_cache VALUES(?,?,?,?,?) ON CONFLICT(cache_key) DO UPDATE SET payload=excluded.payload,updated=excluded.updated,retry_at=excluded.retry_at,error=''",
-                    (key, encode(payload), now, deadline, ""),
-                )
-                db.execute(
-                    "DELETE FROM world_weather_cache WHERE updated<? AND retry_at<?",
-                    (now - 7 * 86400, now),
-                )
+
+            def _save_weather():
+                with self.engine._db() as db:
+                    db.execute(
+                        "INSERT INTO world_weather_cache VALUES(?,?,?,?,?) ON CONFLICT(cache_key) DO UPDATE SET payload=excluded.payload,updated=excluded.updated,retry_at=excluded.retry_at,error=''",
+                        (key, encode(payload), now, deadline, ""),
+                    )
+                    db.execute(
+                        "DELETE FROM world_weather_cache WHERE updated<? AND retry_at<?",
+                        (now - 7 * 86400, now),
+                    )
+
+            await asyncio.to_thread(_save_weather)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             if self.closed:
                 return
-            self.record_failure(key, exc, limit_key)
+            await asyncio.to_thread(self.record_failure, key, exc, limit_key)
 
     def record_failure(self, key, exc, limit_key="forecast"):
         now = self.engine.clock()

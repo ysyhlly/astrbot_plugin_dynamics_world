@@ -3,10 +3,13 @@
 import hashlib
 import json
 import re
+import time
 
 from .room_design import layout_text
 from .spatial import encode
 from .style_presets import catalog, selected
+
+_ASSETS_CACHE_TTL_SECONDS = 5.0
 
 
 class VisualProfiles:
@@ -14,6 +17,11 @@ class VisualProfiles:
         self.engine = engine
         self.asset_root = engine.path.parent / "visual-assets"
         self._verified = {}
+        self._manifest_cache_key = None
+        self._manifest_rows = None
+        self._assets_cache_key = None
+        self._assets_cache_expires = 0.0
+        self._assets_cache_value = {}
         with engine._db() as db:
             db.execute(
                 "CREATE TABLE IF NOT EXISTS world_visual_profiles(identity TEXT PRIMARY KEY, revision INTEGER NOT NULL, profile TEXT NOT NULL)"
@@ -67,28 +75,67 @@ class VisualProfiles:
         """Only explicitly installed, content-verified files; never fetch on chat."""
         try:
             manifest = self.asset_root / "index.json"
-            if manifest.stat().st_size > 65536:
+            mstat = manifest.stat()
+            if mstat.st_size > 65536:
                 return {}
-            rows = json.loads(manifest.read_text("utf-8"))
-            result = {}
-            for key, row in list(rows.items())[:32]:
-                if not re.fullmatch(r"[a-z0-9_-]{1,64}", key) or not isinstance(
-                    row, dict
-                ):
-                    continue
-                filename = row.get("file", "")
-                if not isinstance(filename, str) or not re.fullmatch(
-                    r"[a-zA-Z0-9_-]+\.(png|jpg|jpeg|webp)", filename
-                ):
-                    continue
-                path = self.asset_root / filename
-                if path.is_symlink() or not path.resolve().is_relative_to(
-                    self.asset_root.resolve()
-                ):
-                    continue
+            manifest_key = (mstat.st_mtime_ns, mstat.st_size)
+            now_mono = time.monotonic()
+            if (
+                self._manifest_cache_key == manifest_key
+                and self._manifest_rows is not None
+            ):
+                entries = self._manifest_rows
+            else:
+                rows = json.loads(manifest.read_text("utf-8"))
+                root_resolved = self.asset_root.resolve()
+                entries = []
+                for key, row in list(rows.items())[:32]:
+                    if not re.fullmatch(r"[a-z0-9_-]{1,64}", key) or not isinstance(
+                        row, dict
+                    ):
+                        continue
+                    filename = row.get("file", "")
+                    if not isinstance(filename, str) or not re.fullmatch(
+                        r"[a-zA-Z0-9_-]+\.(png|jpg|jpeg|webp)", filename
+                    ):
+                        continue
+                    if row.get("role") not in {"style", "layout"}:
+                        continue
+                    path = self.asset_root / filename
+                    if path.is_symlink() or not path.resolve().is_relative_to(
+                        root_resolved
+                    ):
+                        continue
+                    entries.append((key, row, path))
+                self._manifest_cache_key = manifest_key
+                self._manifest_rows = entries
+                self._assets_cache_key = None
+
+            file_stamps = []
+            valid_stats = []
+            for key, row, path in entries:
                 try:
                     stamp = path.stat()
-                    if not 0 < stamp.st_size <= 16 * 1024 * 1024:
+                except OSError:
+                    file_stamps.append((key, None, None))
+                    valid_stats.append((key, row, path, None))
+                    continue
+                file_stamps.append((key, stamp.st_mtime_ns, stamp.st_size))
+                valid_stats.append((key, row, path, stamp))
+
+            cache_key = (manifest_key, tuple(file_stamps))
+            if (
+                self._assets_cache_key == cache_key
+                and now_mono < self._assets_cache_expires
+            ):
+                return {k: dict(v) for k, v in self._assets_cache_value.items()}
+
+            result = {}
+            for key, row, path, stamp in valid_stats:
+                if stamp is None or not 0 < stamp.st_size <= 16 * 1024 * 1024:
+                    continue
+                try:
+                    if path.is_symlink():
                         continue
                     check = (
                         str(path),
@@ -102,12 +149,10 @@ class VisualProfiles:
                         ):
                             continue
                         self._verified = {
-                            **dict(list(self._verified.items())[-31:]),
+                            **dict(list(self._verified.items())[-127:]),
                             check: True,
                         }
                 except OSError:
-                    continue
-                if row.get("role") not in {"style", "layout"}:
                     continue
                 result[key] = {
                     "asset_id": key,
@@ -117,8 +162,14 @@ class VisualProfiles:
                     "label": str(row.get("label", key))[:100],
                     "source_url": str(row.get("source_url", ""))[:300],
                 }
-            return result
+            self._assets_cache_key = cache_key
+            self._assets_cache_value = result
+            self._assets_cache_expires = now_mono + _ASSETS_CACHE_TTL_SECONDS
+            return {k: dict(v) for k, v in result.items()}
         except (OSError, ValueError, AttributeError, TypeError):
+            self._manifest_cache_key = None
+            self._manifest_rows = None
+            self._assets_cache_key = None
             return {}
 
     def load(self, db, scope):

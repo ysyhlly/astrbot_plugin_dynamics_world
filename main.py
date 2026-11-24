@@ -8,7 +8,7 @@ ensure_current(
     __package__,
     __name__,
     __file__,
-    version="v0.23.0-rc.8",
+    version="v0.23.0-rc.9",
     checks=[
         ("life.core.narrative", "NarrativeEngine", "_world_map_v1"),
         ("life.core.narrative", "NarrativeEngine", "_horizons_sync_v1"),
@@ -124,7 +124,7 @@ class Main(Star):
     def get_dynamics_capabilities(self):
         return {
             "schema_version": 1,
-            "version": "v0.23.0-rc.8",
+            "version": "v0.23.0-rc.9",
             "world_integration_version": 2,
             "provider_id": "astrbot_plugin_dynamics_world",
             "display_name": "群间世界",
@@ -192,6 +192,12 @@ class Main(Star):
         from .series_hooks import build_series_summary
 
         return build_series_summary(self)
+
+    def get_series_health(self) -> dict:
+        """Public synchronous read-only health diagnostics hook for series_panels."""
+        from .series_hooks import build_series_health
+
+        return build_series_health(self)
 
     def get_series_scope_status(self, umo: str) -> dict:
         """Public synchronous read-only status for a group/session scope in series_matrix."""

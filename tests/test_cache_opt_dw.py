@@ -593,10 +593,10 @@ def test_dw3_resident_card_truncation_caps():
     truncated = _truncate_resident_card(huge_card)
     assert all(len(v) <= RESIDENT_CARD_FIELD_LIMIT for v in truncated.values())
     assert sum(len(v) for v in truncated.values()) <= RESIDENT_CARD_TOTAL_LIMIT
-    assert len(truncated["name"]) == 1800
-    assert len(truncated["description"]) == 1800
-    assert len(truncated["personality"]) == 1800
-    assert len(truncated["scenario"]) == 600
+    assert len(truncated["name"]) == RESIDENT_CARD_FIELD_LIMIT == 1200
+    assert len(truncated["description"]) == RESIDENT_CARD_FIELD_LIMIT == 1200
+    assert len(truncated["personality"]) == RESIDENT_CARD_TOTAL_LIMIT - 2 * RESIDENT_CARD_FIELD_LIMIT == 400
+    assert truncated["scenario"] == ""
     assert truncated["system_prompt"] == ""
     assert truncated["post_history_instructions"] == ""
 

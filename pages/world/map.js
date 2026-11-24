@@ -45,6 +45,7 @@ function setup(mode="virtual"){
 function coordinateLabel(){$("mapCoordinates").textContent=`${mapType==="real"?tr("经度、纬度"):tr("坐标")} ${pin.map(x=>x.toFixed(mapType==="real"?5:1)).join(", ")}`;}
 function fit(){if(!map||!documentMap)return;if(mapType==="real")map.fitBounds(L.latLngBounds([...documentMap.places.map(p=>xy([p.x,p.y])),xy(documentMap.center)]),{padding:[45,45],maxZoom:14});else map.fitBounds([[-documentMap.height,0],[0,documentMap.width]],{padding:[25,25]});}
 function draw(doc){
+  if(typeof L==="undefined"){pendingMapDoc=doc;return;}
   const firstView=!documentMap||documentMap.world_id!==doc.world_id||mapType!==(doc.map_type||"virtual");
   setup(doc.map_type||"virtual");layers.clearLayers();if(avatar)avatar.remove();avatar=null;documentMap=doc;
   lastDrawnMapKey=`${doc.world_id||""}:${doc.map_type||"virtual"}:${doc.revision||0}`;

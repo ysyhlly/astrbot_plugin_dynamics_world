@@ -192,6 +192,7 @@ class NarrativeEngine(
         self.host_context = host_context
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._locks: dict[str, asyncio.Lock] = {}
+        self._scoped_locks: dict[str, asyncio.Lock] = {}
         self._plan_regens: set[str] = set()
         self._outreach_lock = asyncio.Lock()
         self._closed = False
@@ -222,6 +223,7 @@ class NarrativeEngine(
             "resident": None,
         }
         self._generation_lock = threading.Lock()
+        self._tls = threading.local()
         self._backup_before_retry_extension()
         self._backup_before_v20_extension()
         self._initialize()
@@ -232,6 +234,7 @@ class NarrativeEngine(
         conn = sqlite3.connect(self.path, timeout=5, factory=_NarrativeConnection)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA busy_timeout=5000")
         wrote = False
 
@@ -425,18 +428,9 @@ class NarrativeEngine(
             and not self._closed
         )
 
-    def _ensure(self, db, scope: dict, now: float) -> None:
-        identity = _identity(scope)
-        if (
-            db.execute("SELECT 1 FROM lives WHERE identity=?", (identity,)).fetchone()
-            and db.execute(
-                "SELECT 1 FROM scopes WHERE identity=? AND umo=?",
-                (identity, scope["umo"]),
-            ).fetchone()
-        ):
-            return
-        global_scope = dict(scope, umo="", platform="")
-        state = {
+    @staticmethod
+    def _default_life_state(now: float) -> dict:
+        return {
             "activity": "未知",
             "activity_code": "unknown",
             "availability": "unknown",
@@ -450,6 +444,19 @@ class NarrativeEngine(
             "plan_date": "",
             "clock_schema_version": 2,
         }
+
+    def _ensure(self, db, scope: dict, now: float) -> None:
+        identity = _identity(scope)
+        if (
+            db.execute("SELECT 1 FROM lives WHERE identity=?", (identity,)).fetchone()
+            and db.execute(
+                "SELECT 1 FROM scopes WHERE identity=? AND umo=?",
+                (identity, scope["umo"]),
+            ).fetchone()
+        ):
+            return
+        global_scope = dict(scope, umo="", platform="")
+        state = self._default_life_state(now)
         db.execute(
             "INSERT OR IGNORE INTO lives(identity,scope,state,updated) VALUES(?,?,?,?)",
             (identity, _json(global_scope), _json(state), now),
@@ -463,14 +470,115 @@ class NarrativeEngine(
             ),
         )
 
-    def _snapshot(self, db, scope: dict, now: float) -> dict:
-        self._ensure(db, scope, now)
-        if self.causal is not None:
-            self.causal.advance(db, scope, now)
-        if self.spatial is not None:
-            self.spatial.settle(db, scope, now)
-        if self.scenes is not None:
-            self.scenes.settle(db, scope, now)
+    def _record_ambient_keyframe(
+        self,
+        db,
+        scope: dict,
+        state: dict,
+        scene: dict | None,
+        spatial: dict | None,
+        environment: dict | None,
+        ecology_snap: dict | None,
+        now: float,
+    ) -> None:
+        if self.keepsakes is None or scope["umo"]:
+            return
+        cur = (environment or {}).get("current") or {}
+        designs = (scene or {}).get("room_designs") or []
+        self.keepsakes.record_keyframe(
+            db,
+            scope,
+            "ambient",
+            str(
+                (scene or {}).get("action", {}).get("label")
+                if (scene or {}).get("action")
+                else state.get("activity", "")
+            ),
+            {
+                "timezone": (environment or {}).get("timezone")
+                or self._timezone_name(),
+                "weather": cur.get("effect", "clear"),
+                "weather_label": cur.get("label", "晴"),
+                "temperature": cur.get("temperature"),
+                "curtains": (designs[0].get("curtains") if designs else None) or "open",
+                "lighting": (designs[0].get("lighting") if designs else None) or "warm",
+                "location": "away"
+                if (spatial or {}).get("phase") == "travelling"
+                else ("room" if (scene or {}).get("room_id") else "garden"),
+                "place_name": (scene or {}).get("place_name")
+                or (spatial or {}).get("place_name")
+                or "",
+                "pose": "sleep" if state.get("availability") == "asleep" else "idle",
+                "cat_spot": ((ecology_snap or {}).get("cat") or {}).get(
+                    "spot", "bed_nap"
+                ),
+            },
+            now,
+        )
+
+    def _settle_world_in_tick(self, db, scope: dict, now: float) -> None:
+        """Converge world settlement and ambient keyframe writes into background tick."""
+        scene = (
+            self.scenes.snapshot(db, scope, now) if self.scenes is not None else None
+        )
+        spatial = (
+            self.spatial.snapshot(db, scope, now) if self.spatial is not None else None
+        )
+        environment = (
+            self.environment.snapshot(db, scope, now, spatial)
+            if self.environment is not None
+            else None
+        )
+        raw_scene_state = (
+            self.scenes.load(db, scope)[2] if self.scenes is not None else None
+        )
+        if self.ecology is not None:
+            self.ecology.settle(db, scope, environment, raw_scene_state, now)
+        if self.mailbox is not None:
+            self.mailbox.settle(db, scope, raw_scene_state, spatial, now)
+        if self.world_spaces is not None:
+            self.world_spaces.settle(db, scope, now, spatial)
+        if self.keepsakes is not None and not scope["umo"]:
+            identity = _identity(scope)
+            row = db.execute(
+                "SELECT state FROM lives WHERE identity=?", (identity,)
+            ).fetchone()
+            state = json.loads(row[0]) if row else self._default_life_state(now)
+            recent_mail_at = (
+                self.mailbox.latest_opened_at(db, scope)
+                if self.mailbox is not None
+                else 0.0
+            )
+            ecology_snap = (
+                self.ecology.snapshot(
+                    db,
+                    scope,
+                    now,
+                    life_state=state,
+                    scene_state=raw_scene_state,
+                    env=environment,
+                    actor=spatial,
+                    recent_mail_at=recent_mail_at,
+                )
+                if self.ecology is not None
+                else None
+            )
+            self._record_ambient_keyframe(
+                db, scope, state, scene, spatial, environment, ecology_snap, now
+            )
+
+    def _snapshot(
+        self, db, scope: dict, now: float, *, read_only: bool = False
+    ) -> dict:
+        is_ro = read_only or bool(getattr(self._tls, "read_only_snapshot", False))
+        if not is_ro:
+            self._ensure(db, scope, now)
+            if self.causal is not None:
+                self.causal.advance(db, scope, now)
+            if self.spatial is not None:
+                self.spatial.settle(db, scope, now)
+            if self.scenes is not None:
+                self.scenes.settle(db, scope, now)
         scene = (
             self.scenes.snapshot(db, scope, now) if self.scenes is not None else None
         )
@@ -492,16 +600,24 @@ class NarrativeEngine(
         local = db.execute(
             "SELECT * FROM scopes WHERE identity=? AND umo=?", (identity, scope["umo"])
         ).fetchone()
-        state, scoped = json.loads(row["state"]), json.loads(local["state"])
+        state = json.loads(row["state"]) if row else self._default_life_state(now)
+        scoped = (
+            json.loads(local["state"])
+            if local
+            else {"subjective_state": "", "summary": "", "source_ids": []}
+        )
+        row_revision = int(row["revision"]) if row else 0
+        local_revision = int(local["revision"]) if local else 0
         raw_scene_state = (
             self.scenes.load(db, scope)[2] if self.scenes is not None else None
         )
-        if self.ecology is not None:
-            self.ecology.settle(db, scope, environment, raw_scene_state, now)
-        if self.mailbox is not None:
-            self.mailbox.settle(db, scope, raw_scene_state, spatial, now)
-        if self.world_spaces is not None:
-            self.world_spaces.settle(db, scope, now, spatial)
+        if not is_ro:
+            if self.ecology is not None:
+                self.ecology.settle(db, scope, environment, raw_scene_state, now)
+            if self.mailbox is not None:
+                self.mailbox.settle(db, scope, raw_scene_state, spatial, now)
+            if self.world_spaces is not None:
+                self.world_spaces.settle(db, scope, now, spatial)
         recent_mail_at = (
             self.mailbox.latest_opened_at(db, scope)
             if self.mailbox is not None
@@ -527,7 +643,9 @@ class NarrativeEngine(
             else None
         )
         mailbox_snap = (
-            self.mailbox.snapshot(db, scope, now) if self.mailbox is not None else None
+            self.mailbox.snapshot(db, scope, now, read_only=is_ro)
+            if self.mailbox is not None
+            else None
         )
         world_space_snap = (
             self.world_spaces.snapshot(db, scope, now)
@@ -539,44 +657,11 @@ class NarrativeEngine(
             if getattr(self, "horizons", None) is not None
             else []
         )
-        if self.keepsakes is not None and not scope["umo"]:
-            cur = (environment or {}).get("current") or {}
-            designs = (scene or {}).get("room_designs") or []
-            self.keepsakes.record_keyframe(
-                db,
-                scope,
-                "ambient",
-                str(
-                    (scene or {}).get("action", {}).get("label")
-                    if (scene or {}).get("action")
-                    else state.get("activity", "")
-                ),
-                {
-                    "timezone": (environment or {}).get("timezone")
-                    or self._timezone_name(),
-                    "weather": cur.get("effect", "clear"),
-                    "weather_label": cur.get("label", "晴"),
-                    "temperature": cur.get("temperature"),
-                    "curtains": (designs[0].get("curtains") if designs else None)
-                    or "open",
-                    "lighting": (designs[0].get("lighting") if designs else None)
-                    or "warm",
-                    "location": "away"
-                    if (spatial or {}).get("phase") == "travelling"
-                    else ("room" if (scene or {}).get("room_id") else "garden"),
-                    "place_name": (scene or {}).get("place_name")
-                    or (spatial or {}).get("place_name")
-                    or "",
-                    "pose": "sleep"
-                    if state.get("availability") == "asleep"
-                    else "idle",
-                    "cat_spot": ((ecology_snap or {}).get("cat") or {}).get(
-                        "spot", "bed_nap"
-                    ),
-                },
-                now,
+        if not is_ro:
+            self._record_ambient_keyframe(
+                db, scope, state, scene, spatial, environment, ecology_snap, now
             )
-        activity_revision = state.get("activity_revision", row["revision"])
+        activity_revision = state.get("activity_revision", row_revision)
         scoped_current = (
             scoped.get("activity_revision") == activity_revision
             and float(scoped.get("valid_until", 0)) > now
@@ -656,8 +741,8 @@ class NarrativeEngine(
             "schema_version": 1,
             "managed": self._allowed(scope),
             "scope": copy.deepcopy(scope),
-            "revision": row["revision"],
-            "scope_revision": local["revision"],
+            "revision": row_revision,
+            "scope_revision": local_revision,
             "activity": (
                 self.scenes.activity(
                     scene,
@@ -806,9 +891,10 @@ class NarrativeEngine(
         started = time.perf_counter()
         began = executed = None
         stage = "begin"
+        prev_ro = getattr(self._tls, "read_only_snapshot", False)
+        self._tls.read_only_snapshot = True
         try:
-            with self._db() as db:
-                db.execute("BEGIN IMMEDIATE")
+            with self._db(notify=False) as db:
                 began = time.perf_counter()
                 stage = "permission"
                 if not self._snapshot_allowed(scope):
@@ -816,17 +902,18 @@ class NarrativeEngine(
                 stage = "execute"
                 result = self._snapshot(db, scope, self.clock())
                 executed = time.perf_counter()
-                # Seal before releasing the writer lock. A later caller may follow
-                # an intervening committed pause or correction.
+                # Seal before returning so a later caller sees any intervening
+                # committed pause or correction instead of joining stale work.
                 self._snapshot_io.seal_current()
                 stage = "permission"
                 if not self._snapshot_allowed(scope):
                     db.rollback()
                     return unavailable
-                stage = "commit"
+                stage = "finish"
             stage = "done"
             return result
         finally:
+            self._tls.read_only_snapshot = prev_ro
             finished = time.perf_counter()
             begin_ms = ((began or finished) - started) * 1000
             level = _INFO_LEVEL if begin_ms >= 500 or finished - started >= 1 else _DEBUG_LEVEL
@@ -899,10 +986,9 @@ class NarrativeEngine(
             "data": copy.deepcopy(data),
         }
 
-    async def ingest_events(self, events: list[dict]) -> dict:
-        """Persist observed input and delivery receipts idempotently before inference."""
-        now = self.clock()
-        validated = [self._event(event, now) for event in events]
+    def _ingest_events_sync(
+        self, validated: list[dict], now: float
+    ) -> tuple[list[str], list[str], list[str], bool]:
         accepted, duplicate, ignored = [], [], []
         saw_activity = False
         with self._db() as db:
@@ -1031,6 +1117,15 @@ class NarrativeEngine(
                         "UPDATE events SET status='observed_only' WHERE event_id=?",
                         (event_id,),
                     )
+        return accepted, duplicate, ignored, saw_activity
+
+    async def ingest_events(self, events: list[dict]) -> dict:
+        """Persist observed input and delivery receipts idempotently before inference."""
+        now = self.clock()
+        validated = [self._event(event, now) for event in events]
+        accepted, duplicate, ignored, saw_activity = await asyncio.to_thread(
+            self._ingest_events_sync, validated, now
+        )
         if saw_activity:
             self.note_activity(now)
         return {
@@ -1332,20 +1427,49 @@ class NarrativeEngine(
                 (_identity(scope), scope["umo"]),
             )
 
+    def _global_hourly_budget_cap(self) -> int:
+        try:
+            raw = self.config.get("narrative_global_hourly_budget", 24)
+            return max(1, int(raw if raw is not None else 24))
+        except (TypeError, ValueError):
+            return 24
+
+    def _outreach_hourly_budget_cap(self) -> int:
+        try:
+            raw = self.config.get("narrative_outreach_hourly_budget", 6)
+            return max(1, int(raw if raw is not None else 6))
+        except (TypeError, ValueError):
+            return 6
+
     def _reserve(
         self, db, identity: str, kind: str, now: float, *, umo: str = ""
     ) -> bool:
         hour = int(now // 3600)
-        maximum = 1 if kind == "hourly" else 2 if kind == "weather" else 6
+        if kind == "hourly":
+            maximum = 1
+        elif kind == "weather":
+            maximum = 2
+        elif kind == "outreach":
+            maximum = self._outreach_hourly_budget_cap()
+        else:
+            maximum = 6
         if kind == "extra" and umo:
             # Separate conversation queues must not consume each other's six
             # inference slots. Global life/weather retain their original budgets.
             kind = "extra:" + hashlib.sha256(umo.encode()).hexdigest()[:16]
+        elif kind == "outreach" and umo:
+            kind = "outreach:" + hashlib.sha256(umo.encode()).hexdigest()[:16]
         row = db.execute(
             "SELECT used FROM budgets WHERE identity=? AND hour=? AND kind=?",
             (identity, hour, kind),
         ).fetchone()
         if row and row[0] >= maximum:
+            return False
+        total_row = db.execute(
+            "SELECT COALESCE(SUM(used), 0) FROM budgets WHERE identity=? AND hour=?",
+            (identity, hour),
+        ).fetchone()
+        if total_row and int(total_row[0]) >= self._global_hourly_budget_cap():
             return False
         db.execute(
             "INSERT INTO budgets VALUES(?,?,?,1) ON CONFLICT(identity,hour,kind) DO UPDATE SET used=used+1",
@@ -1522,6 +1646,185 @@ class NarrativeEngine(
             "fact_kind": "fiction",
         }
 
+    def _advance_check_due_sync(
+        self, scope: dict, identity: str, boundary: float, expected_revision: int | None
+    ) -> tuple[bool, dict, bool]:
+        with self._db() as db:
+            before = self._snapshot(db, scope, self.clock())
+            life = json.loads(
+                db.execute(
+                    "SELECT state FROM lives WHERE identity=?", (identity,)
+                ).fetchone()[0]
+            )
+            due = (
+                before["revision"] > 0
+                and life["valid_from"] <= boundary
+                and min(life["valid_until"], life["next_check"]) <= boundary
+                and not self._paused(db, scope)
+            )
+            stale = (
+                expected_revision is not None
+                and expected_revision != before["revision"]
+            )
+            return due, before, stale
+
+    def _record_maintenance_max_sync(
+        self, identity: str, kind: str, stamp: float
+    ) -> None:
+        with self._db() as db:
+            db.execute(
+                "INSERT INTO maintenance VALUES(?,?,?) ON CONFLICT(identity,kind) DO UPDATE SET last=MAX(last,excluded.last)",
+                (identity, kind, stamp),
+            )
+
+    def _advance_prepare_sync(
+        self,
+        scope: dict,
+        identity: str,
+        events: list[dict],
+        now: float,
+        expected_revision: int | None,
+    ) -> tuple[str | None, dict | None]:
+        with self._db() as db:
+            snapshot = self._snapshot(db, scope, now)
+            if self._paused(db, scope):
+                return "early", self._result("paused", snapshot)
+            if (
+                expected_revision is not None
+                and expected_revision != snapshot["revision"]
+            ):
+                return "early", self._result("stale", snapshot)
+            pending, queue_status = self._pending_state(db, scope, now)
+            if not pending:
+                if queue_status == "no_change" and any(
+                    db.execute(
+                        "SELECT 1 FROM events WHERE event_id=? AND identity=? AND umo=? AND status='blocked_policy'",
+                        (event["event_id"], identity, scope["umo"]),
+                    ).fetchone()
+                    for event in events
+                ):
+                    return "early", self._result("policy_refusal", snapshot)
+                return "early", self._result(queue_status, snapshot)
+            if self._is_low_signal_group_batch(scope, pending):
+                for event in pending:
+                    db.execute(
+                        "UPDATE events SET status='observed_only',error='routing:low_signal_group_ambient' WHERE event_id=?",
+                        (event["event_id"],),
+                    )
+                local_row = db.execute(
+                    "SELECT state FROM scopes WHERE identity=? AND umo=?",
+                    (identity, scope["umo"]),
+                ).fetchone()
+                if local_row:
+                    local_state = json.loads(local_row[0])
+                    local_state["observed_until"] = now
+                    db.execute(
+                        "UPDATE scopes SET state=? WHERE identity=? AND umo=?",
+                        (_json(local_state), identity, scope["umo"]),
+                    )
+                return "early", self._result("no_change", self._snapshot(db, scope, now))
+            triggers = {event.get("data", {}).get("trigger") for event in pending}
+            if not all(event["type"] == "life.tick" for event in pending):
+                kind = "extra"
+            elif triggers - {"world_action_completed", "weather_change"}:
+                kind = "hourly"
+            elif "world_action_completed" in triggers:
+                kind = "action"
+            else:
+                kind = "weather"
+            if not self._reserve(db, identity, kind, now, umo=scope["umo"]):
+                return "early", self._result("budget_exhausted", snapshot)
+            life = json.loads(
+                db.execute(
+                    "SELECT state FROM lives WHERE identity=?", (identity,)
+                ).fetchone()[0]
+            )
+            diary = [
+                dict(row)
+                for row in db.execute(
+                    "SELECT occurred,text,fact_kind,source_ids FROM diary WHERE identity=? AND umo=? ORDER BY occurred DESC LIMIT 8",
+                    (identity, scope["umo"]),
+                )
+            ]
+            care_waits = [
+                dict(json.loads(r["payload"]), status=r["status"])
+                for r in db.execute(
+                    "SELECT payload,status FROM intents WHERE identity=? AND umo=? ORDER BY updated DESC LIMIT 100",
+                    (identity, scope["umo"]),
+                )
+                if json.loads(r["payload"]).get("kind") == "care_wait"
+            ]
+            bg_world = None
+            causal_rev = None
+            if self.causal is not None and not scope["umo"]:
+                bg_world = (
+                    None
+                    if getattr(self, "resident_runner", None) is not None
+                    else self.causal.background_request(db, scope, now)
+                )
+                causal_rev = self.causal.load(db, scope)[0]
+            failed_row = db.execute(
+                "SELECT error,retry_attempt FROM events WHERE event_id=?",
+                (pending[0]["event_id"],),
+            ).fetchone()
+            failed = dict(failed_row) if failed_row else None
+            return None, {
+                "snapshot": snapshot,
+                "pending": pending,
+                "kind": kind,
+                "life": life,
+                "diary": diary,
+                "care_waits": care_waits,
+                "background_world": bg_world,
+                "causal_revision": causal_rev,
+                "failed": failed,
+            }
+
+    def _advance_record_rejection_sync(
+        self, scope: dict, call_id: str, code: str, raw: Any, pending: list[dict]
+    ) -> None:
+        if (
+            self.causal is not None
+            and not scope["umo"]
+            and isinstance(raw, dict)
+            and raw.get("world_updates")
+        ):
+            with self._db() as db:
+                self.causal.receipt(
+                    db,
+                    scope,
+                    "rejected:" + call_id,
+                    "proposal.rejected",
+                    self.clock(),
+                    {
+                        "summary": "居民提案未执行",
+                        "reason": code,
+                        "origin": "system",
+                        "observers": [],
+                    },
+                )
+        if self.scenes is not None:
+            self.scenes.record_rejection(scope, raw, code, pending)
+
+    def _advance_commit_sync(
+        self,
+        scope: dict,
+        change: dict,
+        pending: list[dict],
+        now: float,
+        expected_rev: int,
+    ) -> tuple[str, dict]:
+        with self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            current = self._snapshot(db, scope, self.clock())
+            if current["revision"] != expected_rev or self._paused(db, scope):
+                status = "stale"
+            else:
+                self._commit(db, scope, change, pending, now, expected_rev + 1)
+                status = "no_change" if change["no_change"] else "advanced"
+            result = self._snapshot(db, scope, self.clock())
+            return status, result
+
     async def advance(
         self,
         events: list[dict],
@@ -1555,6 +1858,24 @@ class NarrativeEngine(
             return self._result("no_change", await self.get_snapshot(scope))
         identity = _identity(scope)
         if scope["umo"]:
+            async with self._scoped_locks.setdefault(identity, asyncio.Lock()):
+                return await self._advance_locked(
+                    events, scope, identity, expected_revision, _as_of=_as_of
+                )
+        return await self._advance_locked(
+            events, scope, identity, expected_revision, _as_of=_as_of
+        )
+
+    async def _advance_locked(
+        self,
+        events: list[dict],
+        scope: dict,
+        identity: str,
+        expected_revision: int | None = None,
+        *,
+        _as_of: float | None = None,
+    ) -> dict:
+        if scope["umo"]:
             # Advance overdue private-free life to the incoming event boundary
             # first. Inference below still processes only this conversation.
             boundary = min(
@@ -1564,109 +1885,48 @@ class NarrativeEngine(
                     for event in events
                 ),
             )
-            with self._db() as db:
-                before = self._snapshot(db, scope, self.clock())
-                life = json.loads(
-                    db.execute(
-                        "SELECT state FROM lives WHERE identity=?", (identity,)
-                    ).fetchone()[0]
-                )
-                due = (
-                    before["revision"] > 0
-                    and life["valid_from"] <= boundary
-                    and min(life["valid_until"], life["next_check"]) <= boundary
-                    and not self._paused(db, scope)
-                )
-                if (
-                    expected_revision is not None
-                    and expected_revision != before["revision"]
-                ):
-                    return self._result("stale", before)
+            due, before, is_stale = await asyncio.to_thread(
+                self._advance_check_due_sync,
+                scope,
+                identity,
+                boundary,
+                expected_revision,
+            )
+            if is_stale:
+                return self._result("stale", before)
             if due:
                 global_scope = dict(scope, umo="", platform="")
-                tick = self._hourly_event(global_scope, boundary)
+                tick = await asyncio.to_thread(
+                    self._hourly_event, global_scope, boundary
+                )
                 result = await self.advance(
                     [tick], expected_revision=before["revision"], _as_of=boundary
                 )
                 if result["status"] in {"advanced", "no_change"}:
-                    with self._db() as db:
-                        db.execute(
-                            "INSERT INTO maintenance VALUES(?,'hourly',?) ON CONFLICT(identity,kind) DO UPDATE SET last=MAX(last,excluded.last)",
-                            (identity, boundary),
-                        )
+                    await asyncio.to_thread(
+                        self._record_maintenance_max_sync, identity, "hourly", boundary
+                    )
                     if expected_revision is not None:
                         expected_revision = result["snapshot"]["revision"]
         async with self._locks.setdefault(identity, asyncio.Lock()):
             now = self.clock() if _as_of is None else min(self.clock(), _as_of)
-            with self._db() as db:
-                snapshot = self._snapshot(db, scope, now)
-                if self._paused(db, scope):
-                    return self._result("paused", snapshot)
-                if (
-                    expected_revision is not None
-                    and expected_revision != snapshot["revision"]
-                ):
-                    return self._result("stale", snapshot)
-                pending, queue_status = self._pending_state(db, scope, now)
-                if not pending:
-                    if queue_status == "no_change" and any(
-                        db.execute(
-                            "SELECT 1 FROM events WHERE event_id=? AND identity=? AND umo=? AND status='blocked_policy'",
-                            (event["event_id"], identity, scope["umo"]),
-                        ).fetchone()
-                        for event in events
-                    ):
-                        return self._result("policy_refusal", snapshot)
-                    return self._result(queue_status, snapshot)
-                if self._is_low_signal_group_batch(scope, pending):
-                    for event in pending:
-                        db.execute(
-                            "UPDATE events SET status='observed_only',error='routing:low_signal_group_ambient' WHERE event_id=?",
-                            (event["event_id"],),
-                        )
-                    local_row = db.execute(
-                        "SELECT state FROM scopes WHERE identity=? AND umo=?",
-                        (identity, scope["umo"]),
-                    ).fetchone()
-                    if local_row:
-                        local_state = json.loads(local_row[0])
-                        local_state["observed_until"] = now
-                        db.execute(
-                            "UPDATE scopes SET state=? WHERE identity=? AND umo=?",
-                            (_json(local_state), identity, scope["umo"]),
-                        )
-                    return self._result("no_change", self._snapshot(db, scope, now))
-                triggers = {event.get("data", {}).get("trigger") for event in pending}
-                if not all(event["type"] == "life.tick" for event in pending):
-                    kind = "extra"
-                elif triggers - {"world_action_completed", "weather_change"}:
-                    kind = "hourly"
-                elif "world_action_completed" in triggers:
-                    kind = "action"
-                else:
-                    kind = "weather"
-                if not self._reserve(db, identity, kind, now, umo=scope["umo"]):
-                    return self._result("budget_exhausted", snapshot)
-                life = json.loads(
-                    db.execute(
-                        "SELECT state FROM lives WHERE identity=?", (identity,)
-                    ).fetchone()[0]
-                )
-                diary = [
-                    dict(row)
-                    for row in db.execute(
-                        "SELECT occurred,text,fact_kind,source_ids FROM diary WHERE identity=? AND umo=? ORDER BY occurred DESC LIMIT 8",
-                        (identity, scope["umo"]),
-                    )
-                ]
-                care_waits = [
-                    dict(json.loads(r["payload"]), status=r["status"])
-                    for r in db.execute(
-                        "SELECT payload,status FROM intents WHERE identity=? AND umo=? ORDER BY updated DESC LIMIT 100",
-                        (identity, scope["umo"]),
-                    )
-                    if json.loads(r["payload"]).get("kind") == "care_wait"
-                ]
+            early_tag, prepared = await asyncio.to_thread(
+                self._advance_prepare_sync,
+                scope,
+                identity,
+                events,
+                now,
+                expected_revision,
+            )
+            if early_tag == "early":
+                return prepared
+            snapshot = prepared["snapshot"]
+            pending = prepared["pending"]
+            kind = prepared["kind"]
+            life = prepared["life"]
+            diary = prepared["diary"]
+            care_waits = prepared["care_waits"]
+            failed = prepared["failed"]
             tz = self._timezone()
             tz_name = self._timezone_name()
             local_date = dt.datetime.fromtimestamp(now, tz).date()
@@ -1698,17 +1958,12 @@ class NarrativeEngine(
                 ),
             }
             if self.causal is not None and not scope["umo"]:
-                with self._db() as db:
-                    request["background_world"] = (
-                        None
-                        if getattr(self, "resident_runner", None) is not None
-                        else self.causal.background_request(db, scope, now)
-                    )
-                    request["causal_revision"] = self.causal.load(db, scope)[0]
-                    request["background_only"] = bool(
-                        request["background_world"]
-                        and snapshot.get("availability") == "asleep"
-                    )
+                request["background_world"] = prepared["background_world"]
+                request["causal_revision"] = prepared["causal_revision"]
+                request["background_only"] = bool(
+                    request["background_world"]
+                    and snapshot.get("availability") == "asleep"
+                )
             # Keep earlier scoped affect as attributed evidence, not the next
             # turn's assumed starting mood. Global life remains authoritative.
             request["snapshot"] = dict(
@@ -1732,11 +1987,6 @@ class NarrativeEngine(
             request["snapshot"]["care_waits"] = [
                 r for r in care_waits if r.get("recipient_user_id") in participants
             ]
-            with self._db() as db:
-                failed = db.execute(
-                    "SELECT error,retry_attempt FROM events WHERE event_id=?",
-                    (pending[0]["event_id"],),
-                ).fetchone()
             if failed and failed["error"].startswith("validation."):
                 request["previous_validation_failure"] = {
                     "reason_code": failed["error"],
@@ -1775,7 +2025,8 @@ class NarrativeEngine(
                 raise
             except Exception as exc:
                 if self._is_policy_refusal(exc):
-                    self._call(
+                    await asyncio.to_thread(
+                        self._call,
                         call_id,
                         identity,
                         scope["umo"],
@@ -1784,7 +2035,7 @@ class NarrativeEngine(
                         "policy_refusal",
                         kind,
                     )
-                    self._block_policy_refusal(pending)
+                    await asyncio.to_thread(self._block_policy_refusal, pending)
                     return self._result(
                         "policy_refusal", await self.get_snapshot(scope)
                     )
@@ -1794,7 +2045,9 @@ class NarrativeEngine(
                     if requested_status == "provider_unavailable"
                     else ("timeout" if isinstance(exc, TimeoutError) else "invalid")
                 )
-                self._call(call_id, identity, scope["umo"], now, started, status, kind)
+                await asyncio.to_thread(
+                    self._call, call_id, identity, scope["umo"], now, started, status, kind
+                )
                 code = (
                     "validation." + exc.code
                     if isinstance(exc, NarrativeValidationError)
@@ -1805,50 +2058,40 @@ class NarrativeEngine(
                     # Preserve actionable status without logging request bodies,
                     # provider URLs, credentials or arbitrary error messages.
                     code = f"provider.http_{http_status}.{type(exc).__name__}"
-                self._record_failure(pending, self.clock(), code)
-                if (
-                    self.causal is not None
-                    and not scope["umo"]
-                    and isinstance(raw, dict)
-                    and raw.get("world_updates")
-                ):
-                    with self._db() as db:
-                        self.causal.receipt(
-                            db,
-                            scope,
-                            "rejected:" + call_id,
-                            "proposal.rejected",
-                            self.clock(),
-                            {
-                                "summary": "居民提案未执行",
-                                "reason": code,
-                                "origin": "system",
-                                "observers": [],
-                            },
-                        )
-                if self.scenes is not None:
-                    self.scenes.record_rejection(scope, raw, code, pending)
+                await asyncio.to_thread(
+                    self._record_failure, pending, self.clock(), code
+                )
+                await asyncio.to_thread(
+                    self._advance_record_rejection_sync,
+                    scope,
+                    call_id,
+                    code,
+                    raw,
+                    pending,
+                )
                 return self._result(status, await self.get_snapshot(scope))
             # A config switch or unload revokes permission before commit.
             if not self._allowed(scope):
-                self._call(
-                    call_id, identity, scope["umo"], now, started, "unmanaged", kind
+                await asyncio.to_thread(
+                    self._call,
+                    call_id,
+                    identity,
+                    scope["umo"],
+                    now,
+                    started,
+                    "unmanaged",
+                    kind,
                 )
                 return self._result("unmanaged", {"managed": False})
             try:
-                with self._db() as db:
-                    db.execute("BEGIN IMMEDIATE")
-                    current = self._snapshot(db, scope, self.clock())
-                    if current["revision"] != snapshot["revision"] or self._paused(
-                        db, scope
-                    ):
-                        status = "stale"
-                    else:
-                        self._commit(
-                            db, scope, change, pending, now, snapshot["revision"] + 1
-                        )
-                        status = "no_change" if change["no_change"] else "advanced"
-                    result = self._snapshot(db, scope, self.clock())
+                status, result = await asyncio.to_thread(
+                    self._advance_commit_sync,
+                    scope,
+                    change,
+                    pending,
+                    now,
+                    snapshot["revision"],
+                )
             except (ValueError, sqlite3.Error) as exc:
                 # A late invalid ownership/transition must roll back the whole
                 # update, leave events queued, and preserve usable prior state.
@@ -1858,11 +2101,17 @@ class NarrativeEngine(
                     if isinstance(exc, NarrativeValidationError)
                     else type(exc).__name__
                 )
-                self._record_failure(pending, self.clock(), code)
+                await asyncio.to_thread(
+                    self._record_failure, pending, self.clock(), code
+                )
                 if self.scenes is not None:
-                    self.scenes.record_rejection(scope, raw, code, pending)
+                    await asyncio.to_thread(
+                        self.scenes.record_rejection, scope, raw, code, pending
+                    )
                 result = await self.get_snapshot(scope)
-            self._call(call_id, identity, scope["umo"], now, started, status, kind)
+            await asyncio.to_thread(
+                self._call, call_id, identity, scope["umo"], now, started, status, kind
+            )
             return self._result(
                 status, result, change["event_impact"] if status != "stale" else "none"
             )
@@ -2165,32 +2414,36 @@ class NarrativeEngine(
         now = self.clock() if now is None else _timestamp(now)
         if is_series_in_quiet_hours(getattr(self, "host_context", None)):
             return []
-        result = []
-        with self._db() as db:
-            db.execute(
-                "UPDATE intents SET status='expired',updated=? WHERE expires<=? AND status IN ('pending','failed')",
-                (now, now),
-            )
-            for row in db.execute(
-                "SELECT * FROM intents WHERE status='pending' AND not_before<=? AND expires>? ORDER BY not_before LIMIT 100",
-                (now, now),
-            ):
-                item = json.loads(row["payload"])
-                if not self.is_managed(item["scope"]) or self._paused(
-                    db, item["scope"]
+
+        def _sync():
+            result = []
+            with self._db() as db:
+                db.execute(
+                    "UPDATE intents SET status='expired',updated=? WHERE expires<=? AND status IN ('pending','failed')",
+                    (now, now),
+                )
+                for row in db.execute(
+                    "SELECT * FROM intents WHERE status='pending' AND not_before<=? AND expires>? ORDER BY not_before LIMIT 100",
+                    (now, now),
                 ):
-                    continue
-                if self._outreach_paused(db, item["scope"]):
-                    continue
-                if not self._care_current(db, item):
-                    db.execute(
-                        "UPDATE intents SET status='cancelled',updated=? WHERE intent_id=?",
-                        (now, item["intent_id"]),
-                    )
-                    continue
-                item.update(status=row["status"])
-                result.append(item)
-        return result
+                    item = json.loads(row["payload"])
+                    if not self.is_managed(item["scope"]) or self._paused(
+                        db, item["scope"]
+                    ):
+                        continue
+                    if self._outreach_paused(db, item["scope"]):
+                        continue
+                    if not self._care_current(db, item):
+                        db.execute(
+                            "UPDATE intents SET status='cancelled',updated=? WHERE intent_id=?",
+                            (now, item["intent_id"]),
+                        )
+                        continue
+                    item.update(status=row["status"])
+                    result.append(item)
+            return result
+
+        return await asyncio.to_thread(_sync)
 
     async def update_intent(
         self, intent_id: str, status: str, receipt: dict | None = None
@@ -2201,95 +2454,113 @@ class NarrativeEngine(
                 "unsupported_intent_status", "Unsupported intent status"
             )
         now = self.clock()
-        with self._db() as db:
-            db.execute("BEGIN IMMEDIATE")
-            row = db.execute(
-                "SELECT * FROM intents WHERE intent_id=?", (intent_id,)
-            ).fetchone()
-            if not row:
-                return {"schema_version": 1, "status": "missing"}
-            item = json.loads(row["payload"])
-            if row["status"] in TERMINAL_INTENTS:
-                return {"schema_version": 1, "status": row["status"], "changed": False}
-            if status == "claimed":
-                if not self._care_current(db, item):
-                    db.execute(
-                        "UPDATE intents SET status='cancelled',updated=? WHERE intent_id=?",
-                        (now, intent_id),
-                    )
-                    return {
-                        "schema_version": 1,
-                        "status": "cancelled",
-                        "changed": False,
-                    }
-                if (
-                    row["status"] != "pending"
-                    or row["not_before"] > now
-                    or row["expires"] <= now
-                ):
+
+        def _sync():
+            with self._db() as db:
+                db.execute("BEGIN IMMEDIATE")
+                row = db.execute(
+                    "SELECT * FROM intents WHERE intent_id=?", (intent_id,)
+                ).fetchone()
+                if not row:
+                    return {"schema_version": 1, "status": "missing"}
+                item = json.loads(row["payload"])
+                if row["status"] in TERMINAL_INTENTS:
                     return {
                         "schema_version": 1,
                         "status": row["status"],
                         "changed": False,
                     }
-                if (
-                    not self.is_managed(item["scope"])
-                    or self._paused(db, item["scope"])
-                    or self._outreach_paused(db, item["scope"])
-                ):
-                    return {"schema_version": 1, "status": "disabled", "changed": False}
-                if item.get("kind") in {"care_wait", "social_chat"}:
-                    item["claimed_at"] = now
-            if status == "pending" and row["status"] in {"claimed", "failed"}:
-                raise NarrativeValidationError(
-                    "a_send_attempt_cannot_automatically_return_to_pending",
-                    "A send attempt cannot automatically return to pending",
+                if status == "claimed":
+                    if not self._care_current(db, item):
+                        db.execute(
+                            "UPDATE intents SET status='cancelled',updated=? WHERE intent_id=?",
+                            (now, intent_id),
+                        )
+                        return {
+                            "schema_version": 1,
+                            "status": "cancelled",
+                            "changed": False,
+                        }
+                    if (
+                        row["status"] != "pending"
+                        or row["not_before"] > now
+                        or row["expires"] <= now
+                    ):
+                        return {
+                            "schema_version": 1,
+                            "status": row["status"],
+                            "changed": False,
+                        }
+                    if (
+                        not self.is_managed(item["scope"])
+                        or self._paused(db, item["scope"])
+                        or self._outreach_paused(db, item["scope"])
+                    ):
+                        return {
+                            "schema_version": 1,
+                            "status": "disabled",
+                            "changed": False,
+                        }
+                    if item.get("kind") in {"care_wait", "social_chat"}:
+                        item["claimed_at"] = now
+                if status == "pending" and row["status"] in {"claimed", "failed"}:
+                    raise NarrativeValidationError(
+                        "a_send_attempt_cannot_automatically_return_to_pending",
+                        "A send attempt cannot automatically return to pending",
+                    )
+                if receipt is not None:
+                    item["receipt"] = copy.deepcopy(receipt)
+                item["status"] = status
+                db.execute(
+                    "UPDATE intents SET payload=?,status=?,updated=? WHERE intent_id=?",
+                    (_json(item), status, now, intent_id),
                 )
-            if receipt is not None:
-                item["receipt"] = copy.deepcopy(receipt)
-            item["status"] = status
-            db.execute(
-                "UPDATE intents SET payload=?,status=?,updated=? WHERE intent_id=?",
-                (_json(item), status, now, intent_id),
-            )
-            return {
-                "schema_version": 1,
-                "status": status,
-                "changed": True,
-                "intent": item,
-            }
+                return {
+                    "schema_version": 1,
+                    "status": status,
+                    "changed": True,
+                    "intent": item,
+                }
+
+        return await asyncio.to_thread(_sync)
 
     async def get_intent(self, intent_id: str) -> dict:
         """Read one authority record even while it is paused or not yet due."""
         now = self.clock()
-        with self._db() as db:
-            row = db.execute(
-                "SELECT * FROM intents WHERE intent_id=?", (intent_id,)
-            ).fetchone()
-            if row is None:
-                return {"schema_version": 1, "available": False, "item": None}
-            status = row["status"]
-            item = json.loads(row["payload"])
-            if status in {"pending", "claimed"} and not self._care_current(db, item):
-                status = "cancelled"
-                db.execute(
-                    "UPDATE intents SET status='cancelled',updated=? WHERE intent_id=?",
-                    (now, intent_id),
+
+        def _sync():
+            with self._db() as db:
+                row = db.execute(
+                    "SELECT * FROM intents WHERE intent_id=?", (intent_id,)
+                ).fetchone()
+                if row is None:
+                    return {"schema_version": 1, "available": False, "item": None}
+                status = row["status"]
+                item = json.loads(row["payload"])
+                if status in {"pending", "claimed"} and not self._care_current(
+                    db, item
+                ):
+                    status = "cancelled"
+                    db.execute(
+                        "UPDATE intents SET status='cancelled',updated=? WHERE intent_id=?",
+                        (now, intent_id),
+                    )
+                if status in {"pending", "failed"} and row["expires"] <= now:
+                    status = "expired"
+                    db.execute(
+                        "UPDATE intents SET status='expired',updated=? WHERE intent_id=?",
+                        (now, intent_id),
+                    )
+                item = json.loads(row["payload"])
+                item.update(
+                    status=status,
+                    managed=self.is_managed(item["scope"]),
+                    paused=self._paused(db, item["scope"]),
+                    outreach_paused=self._outreach_paused(db, item["scope"]),
                 )
-            if status in {"pending", "failed"} and row["expires"] <= now:
-                status = "expired"
-                db.execute(
-                    "UPDATE intents SET status='expired',updated=? WHERE intent_id=?",
-                    (now, intent_id),
-                )
-            item = json.loads(row["payload"])
-            item.update(
-                status=status,
-                managed=self.is_managed(item["scope"]),
-                paused=self._paused(db, item["scope"]),
-                outreach_paused=self._outreach_paused(db, item["scope"]),
-            )
-            return {"schema_version": 1, "available": True, "item": item}
+                return {"schema_version": 1, "available": True, "item": item}
+
+        return await asyncio.to_thread(_sync)
 
     async def cancel_intent(self, intent_id: str) -> dict:
         """Cancel a motivation before sending, preserving its historical record."""
@@ -2306,19 +2577,23 @@ class NarrativeEngine(
         if scope and not proactive_only:
             scope = normalize_scope(scope)
             key += ":" + _identity(scope) + ":" + scope["umo"]
-        with self._db() as db:
-            db.execute(
-                "INSERT INTO metadata VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (key, "true" if paused else "false"),
-            )
-            if (
-                self.spatial is not None
-                and not proactive_only
-                and (scope is None or not scope["umo"])
-            ):
-                self.spatial.pause(
-                    db, scope or self._global_scope(), bool(paused), self.clock()
+
+        def _sync():
+            with self._db() as db:
+                db.execute(
+                    "INSERT INTO metadata VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (key, "true" if paused else "false"),
                 )
+                if (
+                    self.spatial is not None
+                    and not proactive_only
+                    and (scope is None or not scope["umo"])
+                ):
+                    self.spatial.pause(
+                        db, scope or self._global_scope(), bool(paused), self.clock()
+                    )
+
+        await asyncio.to_thread(_sync)
         return {
             "schema_version": 1,
             "paused": bool(paused),
@@ -2360,45 +2635,49 @@ class NarrativeEngine(
         await self.ingest_events([event])
         # Corrections intentionally do not acquire the model lock, so a stale
         # in-flight result fails its revision comparison instead of blocking UI.
-        with self._db() as db:
-            db.execute("BEGIN IMMEDIATE")
-            snapshot = self._snapshot(db, scope, now)
-            request = {
-                "scope": scope,
-                "now": now,
-                "snapshot": snapshot,
-                "events": [self._event(event, now)],
-                "needs_daily_plan": False,
-            }
-            change = self._validate_change(
-                {
-                    "state": patch,
-                    "diary": [
-                        {
-                            "text": "管理员纠正了当前状态。",
-                            "source_ids": [event["event_id"]],
-                            "fact_kind": "observation",
-                        }
-                    ],
-                },
-                request,
-            )
-            self._commit(
-                db, scope, change, request["events"], now, snapshot["revision"] + 1
-            )
-            if manual_activity is not None:
-                identity = _identity(scope)
-                state = json.loads(
+
+        def _commit_correction():
+            with self._db() as db:
+                db.execute("BEGIN IMMEDIATE")
+                snapshot = self._snapshot(db, scope, now)
+                request = {
+                    "scope": scope,
+                    "now": now,
+                    "snapshot": snapshot,
+                    "events": [self._event(event, now)],
+                    "needs_daily_plan": False,
+                }
+                change = self._validate_change(
+                    {
+                        "state": patch,
+                        "diary": [
+                            {
+                                "text": "管理员纠正了当前状态。",
+                                "source_ids": [event["event_id"]],
+                                "fact_kind": "observation",
+                            }
+                        ],
+                    },
+                    request,
+                )
+                self._commit(
+                    db, scope, change, request["events"], now, snapshot["revision"] + 1
+                )
+                if manual_activity is not None:
+                    identity = _identity(scope)
+                    state = json.loads(
+                        db.execute(
+                            "SELECT state FROM lives WHERE identity=?", (identity,)
+                        ).fetchone()[0]
+                    )
+                    state["activity"] = manual_activity
                     db.execute(
-                        "SELECT state FROM lives WHERE identity=?", (identity,)
-                    ).fetchone()[0]
-                )
-                state["activity"] = manual_activity
-                db.execute(
-                    "UPDATE lives SET state=? WHERE identity=?",
-                    (_json(state), identity),
-                )
-            return self._result("corrected", self._snapshot(db, scope, now))
+                        "UPDATE lives SET state=? WHERE identity=?",
+                        (_json(state), identity),
+                    )
+                return self._result("corrected", self._snapshot(db, scope, now))
+
+        return await asyncio.to_thread(_commit_correction)
 
     async def get_narrative_admin(self, scope: dict) -> dict:
         """Return administrator diagnostics for one explicit conversation only."""
@@ -2413,128 +2692,143 @@ class NarrativeEngine(
                 "outreach_paused": False,
             }
         identity = _identity(scope)
-        with self._db() as db:
-            snapshot = self._snapshot(db, scope, now)
-            diary = [
-                dict(row)
-                for row in db.execute(
-                    "SELECT * FROM diary WHERE identity=? AND umo IN (?, '') ORDER BY occurred DESC LIMIT 100",
+
+        def _read_admin():
+            with self._db(notify=False) as db:
+                snapshot = self._snapshot(db, scope, now, read_only=True)
+                diary = [
+                    dict(row)
+                    for row in db.execute(
+                        "SELECT * FROM diary WHERE identity=? AND umo IN (?, '') ORDER BY occurred DESC LIMIT 100",
+                        (identity, scope["umo"]),
+                    )
+                ]
+                intents = [
+                    dict(json.loads(row["payload"]), status=row["status"])
+                    for row in db.execute(
+                        "SELECT * FROM intents WHERE identity=? AND umo=? ORDER BY updated DESC LIMIT 100",
+                        (identity, scope["umo"]),
+                    )
+                ]
+                pending = db.execute(
+                    "SELECT COUNT(*) FROM events WHERE identity=? AND umo=? AND status='pending'",
                     (identity, scope["umo"]),
-                )
-            ]
-            intents = [
-                dict(json.loads(row["payload"]), status=row["status"])
-                for row in db.execute(
-                    "SELECT * FROM intents WHERE identity=? AND umo=? ORDER BY updated DESC LIMIT 100",
-                    (identity, scope["umo"]),
-                )
-            ]
-            pending = db.execute(
-                "SELECT COUNT(*) FROM events WHERE identity=? AND umo=? AND status='pending'",
-                (identity, scope["umo"]),
-            ).fetchone()[0]
-            routing = dict(
-                db.execute(
-                    "SELECT status,COUNT(*) FROM events WHERE identity=? AND umo=? GROUP BY status",
-                    (identity, scope["umo"]),
-                ).fetchall()
-            )
-            oldest = db.execute(
-                "SELECT MIN(occurred) FROM events WHERE identity=? AND umo=? AND status='pending'",
-                (identity, scope["umo"]),
-            ).fetchone()[0]
-            retry_due = db.execute(
-                "SELECT COUNT(*) FROM events WHERE identity=? AND umo=? AND status='pending' AND next_retry>?",
-                (identity, scope["umo"], now),
-            ).fetchone()[0]
-            oversized = db.execute(
-                "SELECT COUNT(*) FROM events WHERE identity=? AND umo=? AND status='pending' AND error LIKE 'oversized_payload_bytes:%'",
-                (identity, scope["umo"]),
-            ).fetchone()[0]
-            blocked_policy = db.execute(
-                "SELECT COUNT(*) FROM events WHERE identity=? AND umo=? AND status='blocked_policy'",
-                (identity, scope["umo"]),
-            ).fetchone()[0]
-            queue_head = db.execute(
-                "SELECT retry_attempt,next_retry,error,LENGTH(CAST(payload AS BLOB)) payload_bytes "
-                "FROM events WHERE identity=? AND umo=? AND status='pending' ORDER BY occurred,received,event_id LIMIT 1",
-                (identity, scope["umo"]),
-            ).fetchone()
-            budget = dict(
-                db.execute(
-                    "SELECT kind,used FROM budgets WHERE identity=? AND hour=?",
-                    (identity, int(now // 3600)),
-                ).fetchall()
-            )
-            scoped_budget = (
-                "extra:" + hashlib.sha256(scope["umo"].encode()).hexdigest()[:16]
-            )
-            budget = {k: v for k, v in budget.items() if not k.startswith("extra:")} | {
-                "extra": budget.get(scoped_budget, 0)
-            }
-            calls = [
-                dict(row)
-                for row in db.execute(
-                    "SELECT * FROM calls WHERE identity=? AND umo IN (?, '') ORDER BY started DESC LIMIT 100",
-                    (identity, scope["umo"]),
-                )
-            ]
-            life = json.loads(
-                db.execute(
-                    "SELECT state FROM lives WHERE identity=?", (identity,)
                 ).fetchone()[0]
-            )
-            queue_diagnostics = {
-                "pending_count": pending,
-                "deferred_count": retry_due,
-                "oversized_blocked_count": oversized,
-                "blocked_policy_count": blocked_policy,
-                "next_retry_at": (
+                routing = dict(
                     db.execute(
-                        "SELECT MIN(next_retry) FROM events WHERE identity=? AND umo=? AND status='pending' AND next_retry>?",
-                        (identity, scope["umo"], now),
-                    ).fetchone()[0]
-                ),
-                "head": (
-                    {
-                        "attempt": queue_head["retry_attempt"],
-                        "next_retry_at": queue_head["next_retry"],
-                        "error": queue_head["error"],
-                        "payload_bytes": queue_head["payload_bytes"],
-                    }
-                    if queue_head
-                    else None
-                ),
-            }
-            review = db.execute(
-                "SELECT value FROM metadata WHERE key=?",
-                ("outreach_review:" + _json([identity, scope["umo"]]),),
-            ).fetchone()
-            review = json.loads(review[0]) if review else {}
-            queue_diagnostics["outreach_review"] = {
-                k: review.get(k) for k in ("last_at", "next_at", "status", "candidates")
-            }
-            return {
-                "schema_version": 1,
-                "managed": True,
-                "available": True,
-                "reason": "",
-                "paused": self._paused(db, scope),
-                "outreach_paused": self._outreach_paused(db, scope),
-                "snapshot": snapshot,
-                "diary": diary,
-                "intents": intents,
-                "pending_count": pending,
-                "routing_counts": routing,
-                "oldest_pending_at": oldest,
-                "queue_diagnostics": queue_diagnostics,
-                "hourly_budget_used": budget,
-                "calls": calls,
-                "daily_plan": life["plan"],
-                "plan_date": life["plan_date"],
-                "plan_status": self._plan_status(db, scope, life, now),
-                "source_ids": snapshot["source_ids"],
-            }
+                        "SELECT status,COUNT(*) FROM events WHERE identity=? AND umo=? GROUP BY status",
+                        (identity, scope["umo"]),
+                    ).fetchall()
+                )
+                oldest = db.execute(
+                    "SELECT MIN(occurred) FROM events WHERE identity=? AND umo=? AND status='pending'",
+                    (identity, scope["umo"]),
+                ).fetchone()[0]
+                retry_due = db.execute(
+                    "SELECT COUNT(*) FROM events WHERE identity=? AND umo=? AND status='pending' AND next_retry>?",
+                    (identity, scope["umo"], now),
+                ).fetchone()[0]
+                oversized = db.execute(
+                    "SELECT COUNT(*) FROM events WHERE identity=? AND umo=? AND status='pending' AND error LIKE 'oversized_payload_bytes:%'",
+                    (identity, scope["umo"]),
+                ).fetchone()[0]
+                blocked_policy = db.execute(
+                    "SELECT COUNT(*) FROM events WHERE identity=? AND umo=? AND status='blocked_policy'",
+                    (identity, scope["umo"]),
+                ).fetchone()[0]
+                queue_head = db.execute(
+                    "SELECT retry_attempt,next_retry,error,LENGTH(CAST(payload AS BLOB)) payload_bytes "
+                    "FROM events WHERE identity=? AND umo=? AND status='pending' ORDER BY occurred,received,event_id LIMIT 1",
+                    (identity, scope["umo"]),
+                ).fetchone()
+                budget = dict(
+                    db.execute(
+                        "SELECT kind,used FROM budgets WHERE identity=? AND hour=?",
+                        (identity, int(now // 3600)),
+                    ).fetchall()
+                )
+                global_total = sum(int(v) for v in budget.values())
+                scoped_hash = hashlib.sha256(scope["umo"].encode()).hexdigest()[:16]
+                scoped_budget = "extra:" + scoped_hash
+                scoped_outreach = "outreach:" + scoped_hash
+                budget = {
+                    k: v
+                    for k, v in budget.items()
+                    if not k.startswith(("extra:", "outreach:"))
+                } | {
+                    "extra": budget.get(scoped_budget, 0),
+                    "outreach": budget.get(scoped_outreach, 0),
+                    "global_total": global_total,
+                }
+                calls = [
+                    dict(row)
+                    for row in db.execute(
+                        "SELECT * FROM calls WHERE identity=? AND umo IN (?, '') ORDER BY started DESC LIMIT 100",
+                        (identity, scope["umo"]),
+                    )
+                ]
+                life_row = db.execute(
+                    "SELECT state FROM lives WHERE identity=?", (identity,)
+                ).fetchone()
+                life = (
+                    json.loads(life_row[0])
+                    if life_row
+                    else self._default_life_state(now)
+                )
+                queue_diagnostics = {
+                    "pending_count": pending,
+                    "deferred_count": retry_due,
+                    "oversized_blocked_count": oversized,
+                    "blocked_policy_count": blocked_policy,
+                    "next_retry_at": (
+                        db.execute(
+                            "SELECT MIN(next_retry) FROM events WHERE identity=? AND umo=? AND status='pending' AND next_retry>?",
+                            (identity, scope["umo"], now),
+                        ).fetchone()[0]
+                    ),
+                    "head": (
+                        {
+                            "attempt": queue_head["retry_attempt"],
+                            "next_retry_at": queue_head["next_retry"],
+                            "error": queue_head["error"],
+                            "payload_bytes": queue_head["payload_bytes"],
+                        }
+                        if queue_head
+                        else None
+                    ),
+                }
+                review = db.execute(
+                    "SELECT value FROM metadata WHERE key=?",
+                    ("outreach_review:" + _json([identity, scope["umo"]]),),
+                ).fetchone()
+                review = json.loads(review[0]) if review else {}
+                queue_diagnostics["outreach_review"] = {
+                    k: review.get(k)
+                    for k in ("last_at", "next_at", "status", "candidates")
+                }
+                return {
+                    "schema_version": 1,
+                    "managed": True,
+                    "available": True,
+                    "reason": "",
+                    "paused": self._paused(db, scope),
+                    "outreach_paused": self._outreach_paused(db, scope),
+                    "snapshot": snapshot,
+                    "diary": diary,
+                    "intents": intents,
+                    "pending_count": pending,
+                    "routing_counts": routing,
+                    "oldest_pending_at": oldest,
+                    "queue_diagnostics": queue_diagnostics,
+                    "hourly_budget_used": budget,
+                    "calls": calls,
+                    "daily_plan": life["plan"],
+                    "plan_date": life["plan_date"],
+                    "plan_status": self._plan_status(db, scope, life, now),
+                    "source_ids": snapshot["source_ids"],
+                }
+
+        return await asyncio.to_thread(_read_admin)
 
     def _plan_status(
         self,
@@ -2625,7 +2919,7 @@ class NarrativeEngine(
                 "schema_version": 1,
                 "status": "unmanaged",
                 "message": "当前会话未启用持续叙事生活。",
-                "plan_status": self.get_plan_status(scope),
+                "plan_status": await asyncio.to_thread(self.get_plan_status, scope),
             }
         global_scope = dict(scope, umo="", platform="")
         identity = _identity(global_scope)
@@ -2634,76 +2928,91 @@ class NarrativeEngine(
                 "schema_version": 1,
                 "status": "generating",
                 "message": "今日日程正在重新生成中，请稍候。",
-                "plan_status": self.get_plan_status(global_scope),
+                "plan_status": await asyncio.to_thread(
+                    self.get_plan_status, global_scope
+                ),
             }
         clean_extra = str(extra or "").strip()[:200]
         self._plan_regens.add(identity)
         try:
             async with self._locks.setdefault(identity, asyncio.Lock()):
                 now = self.clock()
-                with self._db() as db:
-                    self._ensure(db, global_scope, now)
-                    if self._paused(db, scope) or self._paused(db, global_scope):
-                        row = db.execute(
-                            "SELECT state FROM lives WHERE identity=?", (identity,)
-                        ).fetchone()
-                        paused_life = (
-                            json.loads(row[0]) if row else {"plan": [], "plan_date": ""}
+
+                def _prepare_regen_sync():
+                    with self._db() as db:
+                        self._ensure(db, global_scope, now)
+                        if self._paused(db, scope) or self._paused(db, global_scope):
+                            row = db.execute(
+                                "SELECT state FROM lives WHERE identity=?", (identity,)
+                            ).fetchone()
+                            paused_life = (
+                                json.loads(row[0])
+                                if row
+                                else {"plan": [], "plan_date": ""}
+                            )
+                            return (
+                                {
+                                    "schema_version": 1,
+                                    "status": "paused",
+                                    "message": "持续叙事已暂停，请先恢复后再重新生成日程。",
+                                    "plan_status": self._plan_status(
+                                        db,
+                                        global_scope,
+                                        paused_life,
+                                        now,
+                                        generating=False,
+                                    ),
+                                },
+                                None,
+                            )
+                        if self.causal is not None and self.spatial is not None:
+                            self.causal.advance(db, global_scope, now)
+                        if self.scenes is not None and self.spatial is not None:
+                            self.spatial.settle(db, global_scope, now)
+                            self.scenes.settle(db, global_scope, now)
+                        snap = self._snapshot(db, global_scope, now)
+                        lf = json.loads(
+                            db.execute(
+                                "SELECT state FROM lives WHERE identity=?", (identity,)
+                            ).fetchone()[0]
                         )
-                        return {
-                            "schema_version": 1,
-                            "status": "paused",
-                            "message": "持续叙事已暂停，请先恢复后再重新生成日程。",
-                            "plan_status": self._plan_status(
-                                db, global_scope, paused_life, now, generating=False
-                            ),
+                        dy = [
+                            dict(row)
+                            for row in db.execute(
+                                "SELECT occurred,text,fact_kind,source_ids FROM diary "
+                                "WHERE identity=? AND umo='' ORDER BY occurred DESC LIMIT 8",
+                                (identity,),
+                            )
+                        ]
+                        ev_id = f"admin.regen_plan:{identity}:{uuid.uuid4().hex[:12]}"
+                        ev = {
+                            "event_id": ev_id,
+                            "type": "life.tick",
+                            "scope": global_scope,
+                            "occurred_at": now,
+                            "received_at": now,
+                            "actor_id": "admin",
+                            "fact_kind": "fiction",
+                            "data": {
+                                "trigger": "admin_regenerate_plan",
+                                **({"hint": clean_extra} if clean_extra else {}),
+                            },
                         }
-                    if self.causal is not None and self.spatial is not None:
-                        self.causal.advance(db, global_scope, now)
-                    if self.scenes is not None and self.spatial is not None:
-                        self.spatial.settle(db, global_scope, now)
-                        self.scenes.settle(db, global_scope, now)
-                    snapshot = self._snapshot(db, global_scope, now)
-                    life = json.loads(
                         db.execute(
-                            "SELECT state FROM lives WHERE identity=?", (identity,)
-                        ).fetchone()[0]
-                    )
-                    diary = [
-                        dict(row)
-                        for row in db.execute(
-                            "SELECT occurred,text,fact_kind,source_ids FROM diary "
-                            "WHERE identity=? AND umo='' ORDER BY occurred DESC LIMIT 8",
-                            (identity,),
+                            "INSERT INTO events VALUES(?,?,?,?,?,?,'pending','',?,0,0)",
+                            (ev_id, identity, "", now, now, _json(ev), now),
                         )
-                    ]
-                    event_id = f"admin.regen_plan:{identity}:{uuid.uuid4().hex[:12]}"
-                    event = {
-                        "event_id": event_id,
-                        "type": "life.tick",
-                        "scope": global_scope,
-                        "occurred_at": now,
-                        "received_at": now,
-                        "actor_id": "admin",
-                        "fact_kind": "fiction",
-                        "data": {
-                            "trigger": "admin_regenerate_plan",
-                            **(
-                                {"hint": clean_extra}
-                                if clean_extra
-                                else {}
-                            ),
-                        },
-                    }
-                    db.execute(
-                        "INSERT INTO events VALUES(?,?,?,?,?,?,'pending','',?,0,0)",
-                        (event_id, identity, "", now, now, _json(event), now),
-                    )
-                    causal_rev = (
-                        self.causal.load(db, global_scope)[0]
-                        if self.causal is not None
-                        else None
-                    )
+                        c_rev = (
+                            self.causal.load(db, global_scope)[0]
+                            if self.causal is not None
+                            else None
+                        )
+                        return None, (snap, lf, dy, ev_id, ev, c_rev)
+
+                paused_resp, prep = await asyncio.to_thread(_prepare_regen_sync)
+                if paused_resp is not None:
+                    return paused_resp
+                snapshot, life, diary, event_id, event, causal_rev = prep
                 tz = self._timezone()
                 tz_name = self._timezone_name()
                 local_date = dt.datetime.fromtimestamp(now, tz).date()
@@ -2791,22 +3100,28 @@ class NarrativeEngine(
                                 continue
                             raise
                 except asyncio.CancelledError:
-                    self._call(call_id, identity, "", now, started, "cancelled", kind)
+                    await asyncio.shield(
+                        asyncio.to_thread(
+                            self._call, call_id, identity, "", now, started, "cancelled", kind
+                        )
+                    )
                     raise
                 except Exception as exc:
                     if self._is_policy_refusal(exc):
-                        self._call(
-                            call_id, identity, "", now, started, "policy_refusal", kind
-                        )
-                        self._block_policy_refusal([event])
+                        def _record_refusal():
+                            self._call(
+                                call_id, identity, "", now, started, "policy_refusal", kind
+                            )
+                            self._block_policy_refusal([event])
+                            return self.get_plan_status(global_scope, generating=False)
+
+                        plan_st = await asyncio.to_thread(_record_refusal)
                         return {
                             "schema_version": 1,
                             "status": "policy_refusal",
                             "error": "policy_refusal",
                             "message": "模型拒绝了本次日程生成请求，请稍后重试。",
-                            "plan_status": self.get_plan_status(
-                                global_scope, generating=False
-                            ),
+                            "plan_status": plan_st,
                         }
                     requested_status = getattr(exc, "status_code", "")
                     err_status = (
@@ -2814,7 +3129,6 @@ class NarrativeEngine(
                         if requested_status == "provider_unavailable"
                         else ("timeout" if isinstance(exc, TimeoutError) else "invalid")
                     )
-                    self._call(call_id, identity, "", now, started, err_status, kind)
                     code = (
                         "validation." + exc.code
                         if isinstance(exc, NarrativeValidationError)
@@ -2823,11 +3137,17 @@ class NarrativeEngine(
                     http_status = getattr(exc, "code", None)
                     if type(http_status) is int and 400 <= http_status <= 599:
                         code = f"provider.http_{http_status}.{type(exc).__name__}"
-                    with self._db() as db:
-                        db.execute(
-                            "UPDATE events SET status='failed',error=?,retry_attempt=retry_attempt+1 WHERE event_id=?",
-                            (code, event_id),
-                        )
+
+                    def _record_error():
+                        self._call(call_id, identity, "", now, started, err_status, kind)
+                        with self._db() as db:
+                            db.execute(
+                                "UPDATE events SET status='failed',error=?,retry_attempt=retry_attempt+1 WHERE event_id=?",
+                                (code, event_id),
+                            )
+                        return self.get_plan_status(global_scope, generating=False)
+
+                    plan_st = await asyncio.to_thread(_record_error)
                     msg_map = {
                         "timeout": "日程生成超时，请稍后重试。",
                         "provider_unavailable": "当前模型服务不可用，请检查模型配置后重试。",
@@ -2839,54 +3159,59 @@ class NarrativeEngine(
                         "message": msg_map.get(
                             err_status, f"日程重新生成失败（{code}），请重试。"
                         ),
-                        "plan_status": self.get_plan_status(
-                            global_scope, generating=False
-                        ),
+                        "plan_status": plan_st,
                     }
                 if not self._allowed(global_scope):
-                    self._call(call_id, identity, "", now, started, "unmanaged", kind)
+                    def _record_unmanaged():
+                        self._call(call_id, identity, "", now, started, "unmanaged", kind)
+                        return self.get_plan_status(global_scope, generating=False)
+
+                    plan_st = await asyncio.to_thread(_record_unmanaged)
                     return {
                         "schema_version": 1,
                         "status": "unmanaged",
                         "message": "当前会话未启用持续叙事生活。",
-                        "plan_status": self.get_plan_status(
-                            global_scope, generating=False
-                        ),
+                        "plan_status": plan_st,
                     }
-                stale_response = None
-                try:
-                    with self._db() as db:
-                        db.execute("BEGIN IMMEDIATE")
-                        current = self._snapshot(db, global_scope, self.clock())
-                        if current["revision"] != snapshot["revision"] or self._paused(
-                            db, global_scope
-                        ):
-                            db.execute(
-                                "UPDATE events SET status='failed',error='stale_revision' WHERE event_id=?",
-                                (event_id,),
-                            )
-                            stale_row = db.execute(
-                                "SELECT state FROM lives WHERE identity=?", (identity,)
-                            ).fetchone()
-                            stale_life = (
-                                json.loads(stale_row[0])
-                                if stale_row
-                                else {"plan": [], "plan_date": ""}
-                            )
-                            stale_response = {
-                                "schema_version": 1,
-                                "status": "stale",
-                                "error": "stale_revision",
-                                "message": "生成期间生活状态已变化，请再次点击重新生成。",
-                                "plan_status": self._plan_status(
-                                    db,
-                                    global_scope,
-                                    stale_life,
-                                    self.clock(),
-                                    generating=False,
-                                ),
-                            }
-                        else:
+
+                def _commit_regen_sync():
+                    try:
+                        with self._db() as db:
+                            db.execute("BEGIN IMMEDIATE")
+                            current = self._snapshot(db, global_scope, self.clock())
+                            if current["revision"] != snapshot[
+                                "revision"
+                            ] or self._paused(db, global_scope):
+                                db.execute(
+                                    "UPDATE events SET status='failed',error='stale_revision' WHERE event_id=?",
+                                    (event_id,),
+                                )
+                                stale_row = db.execute(
+                                    "SELECT state FROM lives WHERE identity=?",
+                                    (identity,),
+                                ).fetchone()
+                                stale_life = (
+                                    json.loads(stale_row[0])
+                                    if stale_row
+                                    else {"plan": [], "plan_date": ""}
+                                )
+                                stale_resp = {
+                                    "schema_version": 1,
+                                    "status": "stale",
+                                    "error": "stale_revision",
+                                    "message": "生成期间生活状态已变化，请再次点击重新生成。",
+                                    "plan_status": self._plan_status(
+                                        db,
+                                        global_scope,
+                                        stale_life,
+                                        self.clock(),
+                                        generating=False,
+                                    ),
+                                }
+                                self._call(
+                                    call_id, identity, "", now, started, "stale", kind
+                                )
+                                return stale_resp
                             self._commit(
                                 db,
                                 global_scope,
@@ -2895,70 +3220,170 @@ class NarrativeEngine(
                                 now,
                                 snapshot["revision"] + 1,
                             )
-                            result_snap = self._snapshot(db, global_scope, self.clock())
+                            result_snap = self._snapshot(
+                                db, global_scope, self.clock()
+                            )
                             updated_life = json.loads(
                                 db.execute(
                                     "SELECT state FROM lives WHERE identity=?",
                                     (identity,),
                                 ).fetchone()[0]
                             )
-                            plan_st = self._plan_status(
+                            plan_st_ok = self._plan_status(
                                 db,
                                 global_scope,
                                 updated_life,
                                 self.clock(),
                                 generating=False,
                             )
-                except (ValueError, sqlite3.Error) as exc:
-                    code = (
-                        "validation." + exc.code
-                        if isinstance(exc, NarrativeValidationError)
-                        else type(exc).__name__
-                    )
-                    with self._db() as db:
-                        db.execute(
-                            "UPDATE events SET status='failed',error=? WHERE event_id=?",
-                            (code, event_id),
+                        self._call(
+                            call_id, identity, "", now, started, "advanced", kind
                         )
-                    self._call(call_id, identity, "", now, started, "invalid", kind)
-                    return {
-                        "schema_version": 1,
-                        "status": "invalid",
-                        "error": code,
-                        "message": f"日程校验未通过（{code}），请重试。",
-                        "plan_status": self.get_plan_status(
-                            global_scope, generating=False
-                        ),
-                    }
-                if stale_response is not None:
-                    self._call(call_id, identity, "", now, started, "stale", kind)
-                    return stale_response
-                self._call(call_id, identity, "", now, started, "advanced", kind)
-                return {
-                    "schema_version": 1,
-                    "status": "regenerated",
-                    "plan_date": updated_life.get("plan_date", local_date.isoformat()),
-                    "count": len(updated_life.get("plan", [])),
-                    "daily_plan": updated_life.get("plan", []),
-                    "snapshot": result_snap,
-                    "plan_status": plan_st,
-                }
+                        return {
+                            "schema_version": 1,
+                            "status": "regenerated",
+                            "plan_date": updated_life.get(
+                                "plan_date", local_date.isoformat()
+                            ),
+                            "count": len(updated_life.get("plan", [])),
+                            "daily_plan": updated_life.get("plan", []),
+                            "snapshot": result_snap,
+                            "plan_status": plan_st_ok,
+                        }
+                    except (ValueError, sqlite3.Error) as exc:
+                        err_code = (
+                            "validation." + exc.code
+                            if isinstance(exc, NarrativeValidationError)
+                            else type(exc).__name__
+                        )
+                        with self._db() as db:
+                            db.execute(
+                                "UPDATE events SET status='failed',error=? WHERE event_id=?",
+                                (err_code, event_id),
+                            )
+                        self._call(
+                            call_id, identity, "", now, started, "invalid", kind
+                        )
+                        return {
+                            "schema_version": 1,
+                            "status": "invalid",
+                            "error": err_code,
+                            "message": f"日程校验未通过（{err_code}），请重试。",
+                            "plan_status": self.get_plan_status(
+                                global_scope, generating=False
+                            ),
+                        }
+
+                return await asyncio.to_thread(_commit_regen_sync)
         finally:
             self._plan_regens.discard(identity)
 
-    async def tick(self, now: float | None = None) -> dict:
-        """Check hourly life and five-minute scoped queues without catch-up storms."""
-        now = self.clock() if now is None else _timestamp(now)
-        if (
-            self.config.get("mode", "legacy") != "narrative"
-            or not self.config.get("persona_id")
-            or not self._has_targets()
-            or self._closed
-        ):
-            return {"schema_version": 1, "status": "disabled", "results": []}
-        scope = self._global_scope()
-        identity = _identity(scope)
-        results = []
+    def prune_history(
+        self,
+        *,
+        retention_days: int = 60,
+        batch_size: int = 500,
+        now: float | None = None,
+        vacuum_pages: int = 64,
+        max_batches: int = 20,
+    ) -> dict:
+        """Delete aged terminal history rows in bounded batches and incrementally vacuum."""
+        ts = self.clock() if now is None else _timestamp(now)
+        days = max(1, int(retention_days))
+        limit = max(1, int(batch_size))
+        batches = max(1, int(max_batches))
+        cutoff = ts - days * 86400.0
+        cutoff_hour = int(cutoff // 3600)
+        deleted = {
+            "events": 0,
+            "calls": 0,
+            "budgets": 0,
+            "validation_failures": 0,
+            "intents": 0,
+        }
+        statements = (
+            (
+                "events",
+                "DELETE FROM events WHERE rowid IN ("
+                "SELECT rowid FROM events WHERE status!='pending' AND created<? AND occurred<? LIMIT ?)",
+                (cutoff, cutoff, limit),
+            ),
+            (
+                "calls",
+                "DELETE FROM calls WHERE rowid IN ("
+                "SELECT rowid FROM calls WHERE started<? LIMIT ?)",
+                (cutoff, limit),
+            ),
+            (
+                "budgets",
+                "DELETE FROM budgets WHERE rowid IN ("
+                "SELECT rowid FROM budgets WHERE hour<? LIMIT ?)",
+                (cutoff_hour, limit),
+            ),
+            (
+                "validation_failures",
+                "DELETE FROM validation_failures WHERE rowid IN ("
+                "SELECT rowid FROM validation_failures WHERE occurred<? LIMIT ?)",
+                (cutoff, limit),
+            ),
+            (
+                "intents",
+                "DELETE FROM intents WHERE rowid IN ("
+                "SELECT rowid FROM intents WHERE status NOT IN ('pending','claimed') AND updated<? AND expires<? LIMIT ?)",
+                (cutoff, cutoff, limit),
+            ),
+        )
+        for table, sql, params in statements:
+            for _ in range(batches):
+                with self._db(notify=False) as db:
+                    cur = db.execute(sql, params)
+                    count = max(0, int(cur.rowcount or 0))
+                deleted[table] += count
+                if count < limit:
+                    break
+        total_deleted = sum(deleted.values())
+        vacuumed = False
+        if total_deleted > 0 and vacuum_pages > 0:
+            conn = None
+            try:
+                conn = sqlite3.connect(self.path, timeout=5, isolation_level=None)
+                conn.execute("PRAGMA busy_timeout=5000")
+                conn.execute(f"PRAGMA incremental_vacuum({int(vacuum_pages)})")
+                vacuumed = True
+            except sqlite3.Error as exc:
+                logger.debug(
+                    "[DynamicsWorld] incremental_vacuum skipped: %s", exc
+                )
+            finally:
+                if conn is not None:
+                    conn.close()
+        return {
+            **deleted,
+            "total_deleted": total_deleted,
+            "vacuumed": vacuumed,
+            "retention_days": days,
+        }
+
+    def _maybe_prune_history(self, identity: str, now: float) -> dict | None:
+        with self._db(notify=False) as db:
+            row = db.execute(
+                "SELECT last FROM maintenance WHERE identity=? AND kind='history_prune'",
+                (identity,),
+            ).fetchone()
+            if row and now - float(row[0]) < 86400.0:
+                return None
+            db.execute(
+                "INSERT INTO maintenance VALUES(?,'history_prune',?) "
+                "ON CONFLICT(identity,kind) DO UPDATE SET last=excluded.last",
+                (identity, now),
+            )
+        try:
+            days = int(self.config.get("narrative_retention_days", 60) or 60)
+        except (TypeError, ValueError):
+            days = 60
+        return self.prune_history(retention_days=days, now=now)
+
+    def _tick_prepare_sync(self, scope: dict, identity: str, now: float) -> dict:
         with self._db() as db:
             self._ensure(db, scope, now)
             self._compact_old_queue(db, identity)
@@ -2970,10 +3395,11 @@ class NarrativeEngine(
             if self.scenes is not None:
                 self.spatial.settle(db, scope, now)
                 self.scenes.settle(db, scope, now)
+            self._settle_world_in_tick(db, scope, now)
             if self._paused(db, scope):
                 if self.environment is not None:
                     self.environment.life_observer.poll(db, scope, now, suspended=True)
-                return {"schema_version": 1, "status": "paused", "results": []}
+                return {"paused": True}
             row = db.execute(
                 "SELECT state FROM lives WHERE identity=?", (identity,)
             ).fetchone()
@@ -3047,18 +3473,70 @@ class NarrativeEngine(
                     return row[0] if row else 0
 
                 scopes.sort(key=last_served)
-        background_due = False
-        if (
-            asleep
-            and due
-            and self.causal is not None
-            and getattr(self, "resident_runner", None) is None
-        ):
-            with self._db() as db:
+            background_due = False
+            if (
+                asleep
+                and due
+                and self.causal is not None
+                and getattr(self, "resident_runner", None) is None
+            ):
                 background_due = bool(self.causal.background_request(db, scope, now))
+            return {
+                "paused": False,
+                "due": due,
+                "asleep": asleep,
+                "background_due": background_due,
+                "weather_event": weather_event,
+                "scene_event": scene_event,
+                "scopes": scopes,
+            }
+
+    def _tick_pending_for_candidate_sync(
+        self, candidate: dict, now: float
+    ) -> list[dict]:
+        with self._db() as db:
+            return self._pending(db, candidate, now)
+
+    def _record_maintenance_sync(
+        self, identity: str, kind: str, stamp: float
+    ) -> None:
+        with self._db() as db:
+            db.execute(
+                "INSERT INTO maintenance VALUES(?,?,?) ON CONFLICT(identity,kind) DO UPDATE SET last=excluded.last",
+                (identity, kind, stamp),
+            )
+
+    async def tick(self, now: float | None = None) -> dict:
+        """Check hourly life and five-minute scoped queues without catch-up storms."""
+        now = self.clock() if now is None else _timestamp(now)
+        if (
+            self.config.get("mode", "legacy") != "narrative"
+            or not self.config.get("persona_id")
+            or not self._has_targets()
+            or self._closed
+        ):
+            return {"schema_version": 1, "status": "disabled", "results": []}
+        scope = self._global_scope()
+        identity = _identity(scope)
+        results = []
+        prep = await asyncio.to_thread(self._tick_prepare_sync, scope, identity, now)
+        await asyncio.to_thread(self._maybe_prune_history, identity, now)
+        if prep.get("paused"):
+            return {"schema_version": 1, "status": "paused", "results": []}
+        due = prep["due"]
+        asleep = prep["asleep"]
+        background_due = prep["background_due"]
+        weather_event = prep["weather_event"]
+        scene_event = prep["scene_event"]
+        scopes = prep["scopes"]
         if (not asleep or background_due) and (due or weather_event or scene_event):
+            hourly = (
+                [await asyncio.to_thread(self._hourly_event, scope, now)]
+                if due
+                else []
+            )
             events = (
-                ([self._hourly_event(scope, now)] if due else [])
+                hourly
                 + ([weather_event] if weather_event else [])
                 + ([scene_event] if scene_event else [])
             )
@@ -3066,26 +3544,28 @@ class NarrativeEngine(
             results.append(result)
             if result["status"] in {"advanced", "no_change"}:
                 if due:
-                    with self._db() as db:
-                        db.execute(
-                            "INSERT INTO maintenance VALUES(?,'hourly',?) ON CONFLICT(identity,kind) DO UPDATE SET last=excluded.last",
-                            (identity, now),
-                        )
+                    await asyncio.to_thread(
+                        self._record_maintenance_sync, identity, "hourly", now
+                    )
                 if self.environment is not None:
-                    self.environment.life_observer.acknowledge(scope, now)
+                    await asyncio.to_thread(
+                        self.environment.life_observer.acknowledge, scope, now
+                    )
         for candidate in scopes:
-            with self._db() as db:
-                pending = self._pending(db, candidate, now)
+            pending = await asyncio.to_thread(
+                self._tick_pending_for_candidate_sync, candidate, now
+            )
             if pending:
                 result = await self.advance(pending)
                 results.append(result)
                 if result["status"] == "budget_exhausted":
                     continue
-                with self._db() as db:
-                    db.execute(
-                        "INSERT INTO maintenance VALUES(?,?,?) ON CONFLICT(identity,kind) DO UPDATE SET last=excluded.last",
-                        (identity, "served:" + candidate["umo"], now),
-                    )
+                await asyncio.to_thread(
+                    self._record_maintenance_sync,
+                    identity,
+                    "served:" + candidate["umo"],
+                    now,
+                )
         return {"schema_version": 1, "status": "checked", "results": results}
 
     def record_horizon_reading(

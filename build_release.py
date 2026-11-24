@@ -31,6 +31,39 @@ def release_metadata(root):
     return raw.replace(marker, revision)
 
 
+_AZGAAR_EXCLUDED_PREFIXES = (
+    "icons-charges-",
+    "view-3d-renderer",
+    "view-3d-",
+    "Dropbox-sdk",
+    "notes-editor",
+    "assistant-",
+    "Assistant-",
+    "Knowledge Base",
+    "jszip",
+    "battle-screen",
+    "Battle-Simulator",
+    "ui-tour",
+)
+
+
+def _is_excluded_azgaar_asset(rel: Path) -> bool:
+    """Exclude interactive-only Azgaar assets unused by headless map_renderer.py."""
+    if rel.parts[:2] != ("vendor", "azgaar"):
+        return False
+    if rel.parts[:4] == ("vendor", "azgaar", "images", "textures"):
+        return True
+    if rel.parts[:3] == ("vendor", "azgaar", "heightmaps") and rel.suffix.lower() == ".png":
+        return True
+    if len(rel.parts) == 3:
+        name = rel.parts[2]
+        if name == "dropbox.html" or any(
+            name.startswith(prefix) for prefix in _AZGAAR_EXCLUDED_PREFIXES
+        ):
+            return True
+    return False
+
+
 def build(root, output):
     root = Path(root).resolve()
     output = Path(output).resolve()
@@ -71,7 +104,7 @@ def build(root, output):
                 or path.name.endswith("_config.json")
             ):
                 continue
-            if rel.parts[:4] == ("vendor", "azgaar", "images", "textures"):
+            if _is_excluded_azgaar_asset(rel):
                 continue
             if path.suffix == ".py":
                 tree = ast.parse(path.read_text("utf-8-sig"))

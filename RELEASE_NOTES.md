@@ -1,4 +1,10 @@
-# astrbot_plugin_dynamics_world v0.23.0-rc.8
+# astrbot_plugin_dynamics_world v0.23.0-rc.9
+
+## v0.23.0-rc.9 — 2026-11-24
+
+- 彻底消除主事件循环同步阻塞：`weather.py`、`resident_runtime.py`、`narrative.py` 管理接口与 `web_api.py` 全部下沉 `asyncio.to_thread`，`narrative_outreach` 改用轻量 `_outreach_snapshot`，`VisualProfiles.assets()` 按 `(mtime_ns, size)` 缓存。
+- 重排 `narrative_prompt` 前缀顺序（静态角色资料+静态世界前置，模式专属规则与易变字段下沉），恢复跨模式 Prompt Cache 命中；压缩居民私有人设并截断 `own_knowledge` 上限。
+- 同步最新 `series_panels.py`（支持结构化 `retry_after` 与 `provider_circuit_remaining()`）。
 
 ## v0.23.0-rc.8 — 2026-11-22
 

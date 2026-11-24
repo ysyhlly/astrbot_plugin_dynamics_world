@@ -1357,7 +1357,11 @@ class WorldService:
         source_ids = [f"worldbook:card:{card.id}"]
         if group_rules:
             source_ids.append(f"worldbook:card:{card.id}:group")
+        global_book_ids = set(getattr(self.store._store, "active_book_ids", []) or [])
+        if card.linked_book_id:
+            global_book_ids.add(card.linked_book_id)
         world_items = []
+        scoped_world_source_ids = []
         for matched in matches.matched:
             entry = matched.entry
             source_id = f"worldbook:book:{matched.book.id}:entry:{entry.uid}"
@@ -1379,6 +1383,11 @@ class WorldService:
                     "unknown": False,
                 }
             )
+            if sid and (
+                not entry.constant
+                or (state.book_ids and matched.book.id not in global_book_ids)
+            ):
+                scoped_world_source_ids.append(source_id)
             source_ids.append(source_id)
         result.update(
             {
@@ -1391,6 +1400,7 @@ class WorldService:
                 "core_prompt": core_prompt,
                 "group_rules": group_rules,
                 "world_items": world_items,
+                "scoped_world_source_ids": scoped_world_source_ids,
                 "world_prompt": build_injection_text(
                     matches, active_scenario=scenario, style=self.settings
                 ),

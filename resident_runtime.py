@@ -7,6 +7,7 @@ import copy
 import hashlib
 import json
 import math
+import re
 import time
 import uuid
 from datetime import datetime
@@ -16,8 +17,9 @@ from .spatial import encode, identity
 
 OPERATIONS = ["wait", "rest", "observe", "travel", "invite", "respond", "speak"]
 DEFAULT_RESIDENT_HOURLY_BUDGET = 6
-RESIDENT_CARD_FIELD_LIMIT = 1800
-RESIDENT_CARD_TOTAL_LIMIT = 6000
+RESIDENT_CARD_FIELD_LIMIT = 1200
+RESIDENT_CARD_TOTAL_LIMIT = 2800
+RESIDENT_MAX_KNOWLEDGE = 25
 RESIDENT_CARD_FIELDS = (
     "name",
     "description",
@@ -42,13 +44,30 @@ def fingerprint(card):
 
 
 def _truncate_resident_card(card: dict) -> dict[str, str]:
-    """Enforce per-field and total character caps on resident card context."""
+    """Enforce per-field/total caps and deduplicate repeated lines across resident card fields."""
     private: dict[str, str] = {}
     remaining = RESIDENT_CARD_TOTAL_LIMIT
+    seen_lines: set[str] = set()
     for key in RESIDENT_CARD_FIELDS:
-        raw = str(card.get(key, "") or "")
+        raw = str(card.get(key, "") or "").replace("\r\n", "\n").replace("\r", "\n")
+        raw = re.sub(r"\n{3,}", "\n\n", raw).strip()
+        if raw:
+            deduped_lines: list[str] = []
+            for line in raw.split("\n"):
+                stripped = line.strip()
+                if not stripped:
+                    if deduped_lines and deduped_lines[-1] != "":
+                        deduped_lines.append("")
+                    continue
+                if len(stripped) >= 8 and stripped in seen_lines:
+                    continue
+                seen_lines.add(stripped)
+                deduped_lines.append(stripped)
+            cleaned = "\n".join(deduped_lines).strip()
+        else:
+            cleaned = ""
         limit = min(RESIDENT_CARD_FIELD_LIMIT, max(0, remaining))
-        value = raw[:limit]
+        value = cleaned[:limit]
         private[key] = value
         remaining -= len(value)
     return private
@@ -137,10 +156,16 @@ def build_prompt_parts(request) -> tuple[str, str]:
                 )
             )
         if "private_character" in resident_context:
+            priv_raw = resident_context["private_character"]
+            priv_compact = (
+                {k: v for k, v in priv_raw.items() if v}
+                if isinstance(priv_raw, dict)
+                else priv_raw
+            )
             system_parts.append(
                 "private_character：\n"
                 + json.dumps(
-                    resident_context["private_character"],
+                    priv_compact,
                     ensure_ascii=False,
                     separators=(",", ":"),
                     sort_keys=False,
@@ -201,7 +226,8 @@ class ResidentRunner:
         if not card:
             raise ValueError("居民角色卡不存在")
         world = self.engine.spatial.document(db, identity(scope)) or {}
-        known = copy.deepcopy(actor.get("knowledge", []))
+        all_known = actor.get("knowledge", []) or []
+        known = copy.deepcopy(all_known[-RESIDENT_MAX_KNOWLEDGE:])
         own_text = "\n".join(
             str(card.get(k, "") or "") for k in ("description", "personality")
         )
@@ -210,7 +236,7 @@ class ResidentRunner:
             spoken = next(
                 (
                     k.get("speaker_name")
-                    for k in reversed(known)
+                    for k in reversed(all_known)
                     if k.get("speaker") == peer["id"] and k.get("speaker_name")
                 ),
                 None,
@@ -230,7 +256,7 @@ class ResidentRunner:
             and i["status"] not in {"completed", "declined", "cancelled"}
         ]
         contacts = {a for i in invitations for a in (i["host"], i["guest"])}
-        for k in known:
+        for k in all_known:
             contacts.update(k.get("participants") or [])
             if k.get("speaker"):
                 contacts.add(k["speaker"])
@@ -352,128 +378,153 @@ class ResidentRunner:
                 else float(base_interval)
             )
             if not manual and request_id is None:
-                with engine._db(notify=False) as db:
+                def _fast_due_check():
+                    with engine._db(notify=False) as db:
+                        if engine._paused(db, scope):
+                            return {"status": "paused"}
+                        last = db.execute(
+                            "SELECT last FROM maintenance WHERE identity=? AND kind='resident_tick'",
+                            (identity(scope),),
+                        ).fetchone()
+                        if last and now - last[0] < interval:
+                            return {"status": "not_due"}
+                    return None
+
+                early = await asyncio.to_thread(_fast_due_check)
+                if early is not None:
+                    return early
+
+            def _prepare_tick_sync():
+                with engine._db() as db:
+                    db.execute("BEGIN IMMEDIATE")
+                    prior = db.execute(
+                        "SELECT * FROM world_resident_evaluations WHERE call_id=?", (cid,)
+                    ).fetchone()
+                    if prior:
+                        if (
+                            prior["identity"] != identity(scope)
+                            or actor_id
+                            and prior["actor_id"] != actor_id
+                        ):
+                            raise ValueError("请求标识属于另一居民")
+                        return (
+                            {
+                                "status": prior["status"],
+                                "actor_id": prior["actor_id"],
+                                "replayed": True,
+                            },
+                            None,
+                        )
                     if engine._paused(db, scope):
-                        return {"status": "paused"}
+                        return {"status": "paused"}, None
                     last = db.execute(
                         "SELECT last FROM maintenance WHERE identity=? AND kind='resident_tick'",
                         (identity(scope),),
                     ).fetchone()
-                    if last and now - last[0] < interval:
-                        return {"status": "not_due"}
-            with engine._db() as db:
-                db.execute("BEGIN IMMEDIATE")
-                prior = db.execute(
-                    "SELECT * FROM world_resident_evaluations WHERE call_id=?", (cid,)
-                ).fetchone()
-                if prior:
-                    if (
-                        prior["identity"] != identity(scope)
-                        or actor_id
-                        and prior["actor_id"] != actor_id
-                    ):
-                        raise ValueError("请求标识属于另一居民")
-                    return {
-                        "status": prior["status"],
-                        "actor_id": prior["actor_id"],
-                        "replayed": True,
+                    if not manual and last and now - last[0] < interval:
+                        return {"status": "not_due"}, None
+                    causal.advance(db, scope, now)
+                    _, doc = causal.load(db, scope)
+                    available = [
+                        a
+                        for a in doc["residents"].values()
+                        if a.get("enabled")
+                        and not a.get("journey")
+                        and a.get("busy_until", 0) <= now
+                        and causal.card_resolver(a["card_id"])
+                    ]
+                    if actor_id:
+                        available = [a for a in available if a["id"] == actor_id]
+                    if not available:
+                        return {"status": "no_ready_resident"}, None
+                    # Waiting invitations receive priority only within a bounded fairness window.
+                    due = {
+                        i["guest"]
+                        for i in doc["invitations"].values()
+                        if i["status"] == "proposed"
                     }
-                if engine._paused(db, scope):
-                    return {"status": "paused"}
-                last = db.execute(
-                    "SELECT last FROM maintenance WHERE identity=? AND kind='resident_tick'",
-                    (identity(scope),),
-                ).fetchone()
-                if not manual and last and now - last[0] < interval:
-                    return {"status": "not_due"}
-                causal.advance(db, scope, now)
-                _, doc = causal.load(db, scope)
-                available = [
-                    a
-                    for a in doc["residents"].values()
-                    if a.get("enabled")
-                    and not a.get("journey")
-                    and a.get("busy_until", 0) <= now
-                    and causal.card_resolver(a["card_id"])
-                ]
-                if actor_id:
-                    available = [a for a in available if a["id"] == actor_id]
-                if not available:
-                    return {"status": "no_ready_resident"}
-                # Waiting invitations receive priority only within a bounded fairness window.
-                due = {
-                    i["guest"]
-                    for i in doc["invitations"].values()
-                    if i["status"] == "proposed"
-                }
-                available.sort(
-                    key=lambda a: (
-                        a.get("last_served", 0) > now - 1800,
-                        a["id"] not in due,
-                        a.get("last_served", 0),
-                        a["id"],
+                    available.sort(
+                        key=lambda a: (
+                            a.get("last_served", 0) > now - 1800,
+                            a["id"] not in due,
+                            a.get("last_served", 0),
+                            a["id"],
+                        )
                     )
-                )
-                selected = available[0]
-                actor_id = selected["id"]
-                hour = int(now // 3600)
-                budget = "resident_global"
-                maximum = max(
-                    1,
-                    min(
-                        60,
-                        int(
-                            engine.config.get(
-                                "resident_hourly_budget", DEFAULT_RESIDENT_HOURLY_BUDGET
-                            )
+                    selected = available[0]
+                    chosen_actor_id = selected["id"]
+                    hour = int(now // 3600)
+                    budget = "resident_global"
+                    maximum = max(
+                        1,
+                        min(
+                            60,
+                            int(
+                                engine.config.get(
+                                    "resident_hourly_budget",
+                                    DEFAULT_RESIDENT_HOURLY_BUDGET,
+                                )
+                            ),
                         ),
-                    ),
-                )
-                used = db.execute(
-                    "SELECT used FROM budgets WHERE identity=? AND hour=? AND kind=?",
-                    (identity(scope), hour, budget),
-                ).fetchone()
-                if used and used[0] >= maximum:
-                    return {"status": "budget_exhausted"}
-                db.execute(
-                    "INSERT INTO budgets VALUES(?,?,?,1) ON CONFLICT(identity,hour,kind) DO UPDATE SET used=used+1",
-                    (identity(scope), hour, budget),
-                )
-                db.execute(
-                    "INSERT INTO maintenance VALUES(?,'resident_tick',?) ON CONFLICT(identity,kind) DO UPDATE SET last=excluded.last",
-                    (identity(scope), now),
-                )
-                if not manual and hasattr(engine, "record_background_tick"):
-                    engine.record_background_tick(kind="resident", now=now)
-                public, context = self.context(db, scope, actor_id, now)
-                tz = (
-                    engine._timezone()
-                    if hasattr(engine, "_timezone")
-                    else resolve_series_timezone(getattr(self.life, "context", None))
-                )
-                request = {
-                    "scope": scope,
-                    "now": now,
-                    "local_datetime": datetime.fromtimestamp(
-                        now, tz
-                    ).isoformat(),
-                    "resident_isolated": True,
-                    "resident_context": public,
-                    "inference_call_id": cid,
-                }
-                evidence = {
-                    "profile_hash": context["actors"][0]["card_fingerprint"],
-                    "prompt_hash": hashlib.sha256(
-                        build_prompt(request).encode()
-                    ).hexdigest(),
-                    "source_ids": public["available_source_ids"],
-                    "visible_peer_ids": context["visible_peer_ids"],
-                    "other_private_profiles": 0,
-                }
-                db.execute(
-                    "INSERT INTO world_resident_evaluations VALUES(?,?,?,?,?,?)",
-                    (cid, identity(scope), actor_id, now, "pending", encode(evidence)),
-                )
+                    )
+                    used = db.execute(
+                        "SELECT used FROM budgets WHERE identity=? AND hour=? AND kind=?",
+                        (identity(scope), hour, budget),
+                    ).fetchone()
+                    if used and used[0] >= maximum:
+                        return {"status": "budget_exhausted"}, None
+                    db.execute(
+                        "INSERT INTO budgets VALUES(?,?,?,1) ON CONFLICT(identity,hour,kind) DO UPDATE SET used=used+1",
+                        (identity(scope), hour, budget),
+                    )
+                    db.execute(
+                        "INSERT INTO maintenance VALUES(?,'resident_tick',?) ON CONFLICT(identity,kind) DO UPDATE SET last=excluded.last",
+                        (identity(scope), now),
+                    )
+                    if not manual and hasattr(engine, "record_background_tick"):
+                        engine.record_background_tick(kind="resident", now=now)
+                    public, context = self.context(db, scope, chosen_actor_id, now)
+                    tz = (
+                        engine._timezone()
+                        if hasattr(engine, "_timezone")
+                        else resolve_series_timezone(getattr(self.service, "context", None))
+                    )
+                    request = {
+                        "scope": scope,
+                        "now": now,
+                        "local_datetime": datetime.fromtimestamp(
+                            now, tz
+                        ).isoformat(),
+                        "resident_isolated": True,
+                        "resident_context": public,
+                        "inference_call_id": cid,
+                    }
+                    evidence = {
+                        "profile_hash": context["actors"][0]["card_fingerprint"],
+                        "prompt_hash": hashlib.sha256(
+                            build_prompt(request).encode()
+                        ).hexdigest(),
+                        "source_ids": public["available_source_ids"],
+                        "visible_peer_ids": context["visible_peer_ids"],
+                        "other_private_profiles": 0,
+                    }
+                    db.execute(
+                        "INSERT INTO world_resident_evaluations VALUES(?,?,?,?,?,?)",
+                        (
+                            cid,
+                            identity(scope),
+                            chosen_actor_id,
+                            now,
+                            "pending",
+                            encode(evidence),
+                        ),
+                    )
+                    return None, (chosen_actor_id, public, context, request, evidence)
+
+            early_result, prepared = await asyncio.to_thread(_prepare_tick_sync)
+            if early_result is not None:
+                return early_result
+            actor_id, public, context, request, evidence = prepared
             status = "invalid"
             reason = ""
             operation = None
@@ -517,45 +568,50 @@ class ResidentRunner:
                 proposal = {k: v for k, v in raw.items() if k != "reason"}
                 if operation in {"rest", "observe", "travel"}:
                     proposal["text"] = reason
-                with engine._db() as db:
-                    db.execute("BEGIN IMMEDIATE")
-                    if not self.enabled() or engine._paused(db, scope):
-                        raise ValueError("运行权限已撤销")
-                    causal.advance(db, scope, engine.clock())
-                    rev, doc = causal.load(db, scope)
-                    actor = doc["residents"].get(actor_id)
-                    if (
-                        not actor
-                        or not actor["enabled"]
-                        or actor["revision"] != context["actor_revision"]
-                    ):
-                        raise ValueError("居民在推演期间已变化")
-                    if (
-                        fingerprint(causal.card_resolver(actor["card_id"]))
-                        != context["actors"][0]["card_fingerprint"]
-                    ):
-                        raise ValueError("人设在推演期间已变化")
-                    if operation != "wait":
-                        change = causal.validate_updates(
-                            {"world_updates": [proposal]},
-                            {"scope": scope, "background_world": context},
-                        )
-                        causal.commit_updates(db, scope, change, engine.clock())
+
+                def _commit_tick_sync():
+                    with engine._db() as db:
+                        db.execute("BEGIN IMMEDIATE")
+                        if not self.enabled() or engine._paused(db, scope):
+                            raise ValueError("运行权限已撤销")
+                        causal.advance(db, scope, engine.clock())
                         rev, doc = causal.load(db, scope)
-                        actor = doc["residents"][actor_id]
-                    actor["last_served"] = now
-                    actor["last_reason"] = reason
-                    actor["last_evaluation_status"] = (
-                        "wait" if operation == "wait" else "advanced"
-                    )
-                    actor["last_decision"] = operation
-                    causal.save(db, scope, rev, doc)
-                    status = "no_change" if operation == "wait" else "advanced"
-                    evidence.update(operation=operation, reason=reason, decision=raw)
-                    db.execute(
-                        "UPDATE world_resident_evaluations SET status=?,evidence=? WHERE call_id=?",
-                        (status, encode(evidence), cid),
-                    )
+                        actor = doc["residents"].get(actor_id)
+                        if (
+                            not actor
+                            or not actor["enabled"]
+                            or actor["revision"] != context["actor_revision"]
+                        ):
+                            raise ValueError("居民在推演期间已变化")
+                        if (
+                            fingerprint(causal.card_resolver(actor["card_id"]))
+                            != context["actors"][0]["card_fingerprint"]
+                        ):
+                            raise ValueError("人设在推演期间已变化")
+                        if operation != "wait":
+                            change = causal.validate_updates(
+                                {"world_updates": [proposal]},
+                                {"scope": scope, "background_world": context},
+                            )
+                            causal.commit_updates(db, scope, change, engine.clock())
+                            rev, doc = causal.load(db, scope)
+                            actor = doc["residents"][actor_id]
+                        actor["last_served"] = now
+                        actor["last_reason"] = reason
+                        actor["last_evaluation_status"] = (
+                            "wait" if operation == "wait" else "advanced"
+                        )
+                        actor["last_decision"] = operation
+                        causal.save(db, scope, rev, doc)
+                        next_status = "no_change" if operation == "wait" else "advanced"
+                        evidence.update(operation=operation, reason=reason, decision=raw)
+                        db.execute(
+                            "UPDATE world_resident_evaluations SET status=?,evidence=? WHERE call_id=?",
+                            (next_status, encode(evidence), cid),
+                        )
+                        return next_status
+
+                status = await asyncio.to_thread(_commit_tick_sync)
             except asyncio.CancelledError:
                 status = "cancelled"
                 reason = "推演取消，未提交行动"
@@ -574,22 +630,25 @@ class ResidentRunner:
                     else type(exc).__name__
                 )
             finally:
-                with engine._db() as db:
-                    if status not in {"advanced", "no_change"}:
-                        evidence.update(error=reason)
-                        db.execute(
-                            "UPDATE world_resident_evaluations SET status=?,evidence=? WHERE call_id=?",
-                            (status, encode(evidence), cid),
-                        )
-                        rev, doc = causal.load(db, scope)
-                        if actor_id in doc["residents"]:
-                            doc["residents"][actor_id].update(
-                                last_served=now,
-                                last_evaluation_status=status,
-                                last_reason="评估未提交：" + reason,
+                def _finalize_tick_sync():
+                    with engine._db() as db:
+                        if status not in {"advanced", "no_change"}:
+                            evidence.update(error=reason)
+                            db.execute(
+                                "UPDATE world_resident_evaluations SET status=?,evidence=? WHERE call_id=?",
+                                (status, encode(evidence), cid),
                             )
-                            causal.save(db, scope, rev, doc, bump=False)
-                engine._call(cid, identity(scope), "", now, started, status, "resident")
+                            rev, doc = causal.load(db, scope)
+                            if actor_id in doc["residents"]:
+                                doc["residents"][actor_id].update(
+                                    last_served=now,
+                                    last_evaluation_status=status,
+                                    last_reason="评估未提交：" + reason,
+                                )
+                                causal.save(db, scope, rev, doc, bump=False)
+                    engine._call(cid, identity(scope), "", now, started, status, "resident")
+
+                await asyncio.shield(asyncio.to_thread(_finalize_tick_sync))
             return {
                 "status": status,
                 "actor_id": actor_id,

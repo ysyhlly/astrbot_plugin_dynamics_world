@@ -83,9 +83,13 @@ class WorldAPI(CausalAPIMixin):
             umo = _query("umo")
             scope = (await self.scope(umo))[0] if umo else None
             engine = self.plugin.life.narrative
-            with engine._db() as db:
-                key = engine.scenes.key(db, scope) if scope else cabin_life.PREVIEW
-                result = cabin_life.view(db, engine.scenes, scope, key)
+
+            def _read():
+                with engine._db(notify=False) as db:
+                    key = engine.scenes.key(db, scope) if scope else cabin_life.PREVIEW
+                    return cabin_life.view(db, engine.scenes, scope, key)
+
+            result = await asyncio.to_thread(_read)
             result["can_write"] = self.plugin.world.web.settings.web_panel_allow_write
             return _ok(result)
         except (ValueError, TypeError) as exc:
@@ -105,15 +109,30 @@ class WorldAPI(CausalAPIMixin):
                 engine = self.plugin.life.narrative
                 binding = {}
                 if scope:
-                    with engine._db() as db:
-                        key = engine.scenes.key(db, scope)
+                    def _read_key():
+                        with engine._db(notify=False) as db:
+                            return engine.scenes.key(db, scope)
+
+                    key = await asyncio.to_thread(_read_key)
                     catalog = await asyncio.to_thread(self.avatar_library().catalog, key)
                     binding = catalog["selection"]
-                with engine._db() as db:
-                    db.execute("BEGIN IMMEDIATE")
-                    if scope:
-                        engine._ensure(db, scope, engine.clock())
-                    result = cabin_life.select(db,engine.scenes,scope,body["style"],body["expected_revision"],binding,engine.clock())
+
+                def _write():
+                    with engine._db() as db:
+                        db.execute("BEGIN IMMEDIATE")
+                        if scope:
+                            engine._ensure(db, scope, engine.clock())
+                        return cabin_life.select(
+                            db,
+                            engine.scenes,
+                            scope,
+                            body["style"],
+                            body["expected_revision"],
+                            binding,
+                            engine.clock(),
+                        )
+
+                result = await asyncio.to_thread(_write)
                 self.bus.notify()
                 result["can_write"] = True
                 return _ok(result)
@@ -553,8 +572,12 @@ class WorldAPI(CausalAPIMixin):
         try:
             scope, _ = await self.scope(_query("umo"))
             engine = self.plugin.life.narrative
-            with engine._db() as db:
-                key, _, state = engine.scenes.load(db, scope)
+
+            def _load_scene():
+                with engine._db(notify=False) as db:
+                    return engine.scenes.load(db, scope)
+
+            key, _, state = await asyncio.to_thread(_load_scene)
             data = await asyncio.to_thread(self.avatar_library().catalog, key)
             data.update(
                 can_write=self.plugin.world.web.settings.web_panel_allow_write,
@@ -595,10 +618,14 @@ class WorldAPI(CausalAPIMixin):
             try:
                 scope, _ = await self.scope(body.get("umo", ""))
                 engine = self.plugin.life.narrative
-                with engine._db() as db:
-                    key, _, state = engine.scenes.load(db, scope)
+
+                def _load_scene():
+                    with engine._db(notify=False) as db:
+                        return engine.scenes.load(db, scope)
+
+                key, _, state = await asyncio.to_thread(_load_scene)
                 rooms = (state or {}).get("rooms", {})
-                prior = self.avatar_library().catalog(key)["selection"]
+                prior = (await asyncio.to_thread(self.avatar_library().catalog, key))["selection"]
                 home = body.get("home_room_id", prior["home_room_id"])
                 garden = body.get("garden_room_id", prior["garden_room_id"])
                 if any(
@@ -615,9 +642,13 @@ class WorldAPI(CausalAPIMixin):
                 )
                 if "home_room_id" in body or "garden_room_id" in body:
                     from . import cabin_life
-                    with engine._db() as db:
-                        db.execute("BEGIN IMMEDIATE")
-                        cabin_life.update_binding(db, key, res)
+
+                    def _update_binding():
+                        with engine._db() as db:
+                            db.execute("BEGIN IMMEDIATE")
+                            cabin_life.update_binding(db, key, res)
+
+                    await asyncio.to_thread(_update_binding)
                 self.bus.notify()
                 return _ok(res)
             except (ValueError, TypeError) as exc:
@@ -668,29 +699,29 @@ class WorldAPI(CausalAPIMixin):
 
             scope, _ = await self.scope(_query("umo"))
             engine = self.plugin.life.narrative
-            with engine._db() as db:
-                db.execute("BEGIN IMMEDIATE")
-                engine.spatial.settle(db, scope, engine.clock())
-                engine.scenes.settle(db, scope, engine.clock())
-                _, revision, state = engine.scenes.load(db, scope)
-                pid = _query("project_id")
-                if not state:
-                    if pid:
-                        raise ValueError("项目不存在或不属于当前世界")
-                    return _ok(
-                        {
+            pid = _query("project_id")
+            can_write = self.plugin.world.web.settings.web_panel_allow_write
+
+            def _read_projects():
+                with engine._db() as db:
+                    db.execute("BEGIN IMMEDIATE")
+                    engine.spatial.settle(db, scope, engine.clock())
+                    engine.scenes.settle(db, scope, engine.clock())
+                    _, revision, state = engine.scenes.load(db, scope)
+                    if not state:
+                        if pid:
+                            raise ValueError("项目不存在或不属于当前世界")
+                        return {
                             "available": False,
                             "projects": [],
                             "scene_revision": 0,
                             "action": None,
-                            "can_write": self.plugin.world.web.settings.web_panel_allow_write,
+                            "can_write": can_write,
                         }
-                    )
-                if pid:
-                    return _ok({"project": detail(state, pid)})
-                action = state.get("flow")
-                return _ok(
-                    {
+                    if pid:
+                        return {"project": detail(state, pid)}
+                    action = state.get("flow")
+                    return {
                         "available": True,
                         "projects": public(state, admin=True),
                         "scene_revision": revision,
@@ -700,11 +731,12 @@ class WorldAPI(CausalAPIMixin):
                         }
                         if action
                         else None,
-                        "can_write": self.plugin.world.web.settings.web_panel_allow_write,
+                        "can_write": can_write,
                         "paused": state.get("paused_at") is not None,
                         "server_time": engine.clock(),
                     }
-                )
+
+            return _ok(await asyncio.to_thread(_read_projects))
         except (ValueError, TypeError) as exc:
             return _err(str(exc))
 
@@ -717,35 +749,42 @@ class WorldAPI(CausalAPIMixin):
 
             scope, _ = await self.scope(_query("umo"))
             engine = self.plugin.life.narrative
-            with engine._db() as db:
-                db.execute("BEGIN IMMEDIATE")
-                engine.spatial.settle(db, scope, engine.clock())
-                engine.scenes.settle(db, scope, engine.clock())
-                result = page(
-                    engine,
-                    db,
-                    scope,
-                    before=_query("before"),
-                    limit=int(_query("limit") or 30),
-                    category=_query("category") or "all",
-                )
-                scene = engine.scenes.snapshot(db, scope, engine.clock())
-                action = scene.get("action")
-                result["current"] = {
-                    "place": scene.get("place_name"),
-                    "room": scene.get("room_name"),
-                    "phase": scene.get("phase"),
-                    "destination": scene.get("destination"),
-                    "paused": scene.get("paused", False),
-                    "action": {
-                        k: action.get(k)
-                        for k in ("label", "progress", "step_ends_at", "origin")
+            before = _query("before")
+            limit = int(_query("limit") or 30)
+            category = _query("category") or "all"
+
+            def _read_activity():
+                with engine._db() as db:
+                    db.execute("BEGIN IMMEDIATE")
+                    engine.spatial.settle(db, scope, engine.clock())
+                    engine.scenes.settle(db, scope, engine.clock())
+                    result = page(
+                        engine,
+                        db,
+                        scope,
+                        before=before,
+                        limit=limit,
+                        category=category,
+                    )
+                    scene = engine.scenes.snapshot(db, scope, engine.clock())
+                    action = scene.get("action")
+                    result["current"] = {
+                        "place": scene.get("place_name"),
+                        "room": scene.get("room_name"),
+                        "phase": scene.get("phase"),
+                        "destination": scene.get("destination"),
+                        "paused": scene.get("paused", False),
+                        "action": {
+                            k: action.get(k)
+                            for k in ("label", "progress", "step_ends_at", "origin")
+                        }
+                        if action
+                        else None,
                     }
-                    if action
-                    else None,
-                }
-                result["server_time"] = engine.clock()
-            return _ok(result)
+                    result["server_time"] = engine.clock()
+                    return result
+
+            return _ok(await asyncio.to_thread(_read_activity))
         except (ValueError, TypeError) as exc:
             return _err(str(exc))
 
@@ -789,71 +828,76 @@ class WorldAPI(CausalAPIMixin):
                 now = engine.clock()
                 if body.get("action") not in {"pause", "resume"}:
                     raise ValueError("只支持暂停或继续项目")
-                with engine._db() as db:
-                    db.execute("BEGIN IMMEDIATE")
-                    engine.scenes.settle(db, scope, now)
-                    key, rev, state = engine.scenes.load(db, scope)
-                    if (
-                        not state
-                        or type(body.get("expected_revision")) is not int
-                        or body["expected_revision"] != rev
-                    ):
-                        raise ValueError("场景已变化，请刷新后重试")
-                    project = state.get("projects", {}).get(body.get("project_id"))
-                    if not project:
-                        raise ValueError("项目不存在或不属于当前世界")
-                    expected = "active" if body["action"] == "pause" else "paused"
-                    if project["status"] != expected:
-                        raise ValueError("项目状态已变化，请刷新")
-                    if (
-                        body["action"] == "resume"
-                        and sum(
-                            p["status"] == "active"
-                            for p in state.get("projects", {}).values()
-                        )
-                        >= 4
-                    ):
-                        raise ValueError("请先完成或暂停其他进行中项目")
-                    flow = state.get("flow")
-                    cancelled = False
-                    if body["action"] == "pause" and flow:
-                        remaining = flow["steps"][flow["index"] :]
-                        related = {
-                            s.get("project_id")
-                            for s in remaining
-                            if s.get("project_id")
-                        }
-                        if remaining[0].get("project_id") == project[
-                            "id"
-                        ] or related == {project["id"]}:
-                            engine.scenes.finish_flow(
-                                db,
-                                scope,
-                                key,
-                                state,
-                                now,
-                                "cancelled",
-                                "管理员暂停创作项目；已保存版本保留",
-                            )
-                            cancelled = True
-                    project.update(
-                        status="paused" if body["action"] == "pause" else "active",
-                        paused_by="admin" if body["action"] == "pause" else None,
-                        updated_at=now,
-                        revision=project["revision"] + 1,
-                    )
-                    from .creative_projects import summary
 
-                    engine.scenes.audit(
-                        db,
-                        key,
-                        "project.paused"
-                        if body["action"] == "pause"
-                        else "project.resumed",
-                        now,
-                        {"origin": "admin", "project": summary(project)},
-                    )
-                    engine.scenes.save(db, key, rev, state)
+                def _mutate_project():
+                    with engine._db() as db:
+                        db.execute("BEGIN IMMEDIATE")
+                        engine.scenes.settle(db, scope, now)
+                        key, rev, state = engine.scenes.load(db, scope)
+                        if (
+                            not state
+                            or type(body.get("expected_revision")) is not int
+                            or body["expected_revision"] != rev
+                        ):
+                            raise ValueError("场景已变化，请刷新后重试")
+                        project = state.get("projects", {}).get(body.get("project_id"))
+                        if not project:
+                            raise ValueError("项目不存在或不属于当前世界")
+                        expected = "active" if body["action"] == "pause" else "paused"
+                        if project["status"] != expected:
+                            raise ValueError("项目状态已变化，请刷新")
+                        if (
+                            body["action"] == "resume"
+                            and sum(
+                                p["status"] == "active"
+                                for p in state.get("projects", {}).values()
+                            )
+                            >= 4
+                        ):
+                            raise ValueError("请先完成或暂停其他进行中项目")
+                        flow = state.get("flow")
+                        cancelled = False
+                        if body["action"] == "pause" and flow:
+                            remaining = flow["steps"][flow["index"] :]
+                            related = {
+                                s.get("project_id")
+                                for s in remaining
+                                if s.get("project_id")
+                            }
+                            if remaining[0].get("project_id") == project[
+                                "id"
+                            ] or related == {project["id"]}:
+                                engine.scenes.finish_flow(
+                                    db,
+                                    scope,
+                                    key,
+                                    state,
+                                    now,
+                                    "cancelled",
+                                    "管理员暂停创作项目；已保存版本保留",
+                                )
+                                cancelled = True
+                        project.update(
+                            status="paused" if body["action"] == "pause" else "active",
+                            paused_by="admin" if body["action"] == "pause" else None,
+                            updated_at=now,
+                            revision=project["revision"] + 1,
+                        )
+                        from .creative_projects import summary
+
+                        engine.scenes.audit(
+                            db,
+                            key,
+                            "project.paused"
+                            if body["action"] == "pause"
+                            else "project.resumed",
+                            now,
+                            {"origin": "admin", "project": summary(project)},
+                        )
+                        engine.scenes.save(db, key, rev, state)
+                        return cancelled
+
+                cancelled = await asyncio.to_thread(_mutate_project)
                 return _ok({"saved": True, "cancelled_remaining_flow": cancelled})
             except (ValueError, TypeError) as exc:
                 return _err(str(exc), 409)
@@ -1117,25 +1161,30 @@ class WorldAPI(CausalAPIMixin):
                     if self.plugin.maps.task and not self.plugin.maps.task.done():
                         raise ValueError("请等待地图生成完成后切换模式")
                     spatial = self.plugin.life.narrative.spatial
-                    result = (
-                        switch_mode(
-                            spatial,
-                            scope,
-                            body.get("mode"),
-                            body.get("expected_revision"),
+                    result = await asyncio.to_thread(
+                        (
+                            lambda: switch_mode(
+                                spatial,
+                                scope,
+                                body.get("mode"),
+                                body.get("expected_revision"),
+                            )
                         )
                         if action == "switch_mode"
-                        else configure_real(spatial, scope, body)
+                        else (lambda: configure_real(spatial, scope, body))
                     )
                 elif action == "save_place":
-                    result = self.plugin.life.narrative.spatial.save_place(scope, body)
+                    result = await asyncio.to_thread(
+                        self.plugin.life.narrative.spatial.save_place, scope, body
+                    )
                 elif action in {"locate", "plan", "depart", "cancel"}:
                     if any(
                         type(body.get(k)) is not int
                         for k in ("map_revision", "position_revision")
                     ):
                         raise ValueError("缺少地图与位置版本，请刷新")
-                    result = self.plugin.life.narrative.spatial.admin_action(
+                    result = await asyncio.to_thread(
+                        self.plugin.life.narrative.spatial.admin_action,
                         scope,
                         {
                             "kind": action,
@@ -1177,14 +1226,14 @@ class WorldAPI(CausalAPIMixin):
                 if body.get("action") == "search":
                     return _ok(await service.search(body.get("query")))
                 if body.get("action") == "credentials":
-                    return _ok(service.credentials.save(body))
+                    return _ok(await asyncio.to_thread(service.credentials.save, body))
                 if body.get("action") == "configure":
-                    result = service.configure(scope, body)
+                    result = await asyncio.to_thread(service.configure, scope, body)
                 elif body.get("action") == "refresh":
                     result = {"scheduled": True}
                 else:
                     raise ValueError("未知天气操作")
-                service.schedule(scope)
+                await service.schedule_async(scope)
                 return _ok(result)
             except (ValueError, TypeError) as exc:
                 return _err(str(exc), 409)
@@ -1246,17 +1295,18 @@ class WorldAPI(CausalAPIMixin):
                 service = engine.scenes
                 act = body.get("action")
                 if act == "bootstrap":
-                    result = service.bootstrap(scope, body)
+                    result = await asyncio.to_thread(service.bootstrap, scope, body)
                 elif act == "retire_item":
-                    result = service.retire_item(scope, body)
+                    result = await asyncio.to_thread(service.retire_item, scope, body)
                 elif act in {"place", "room", "item", "room_design"}:
-                    result = service.configure(scope, body)
+                    result = await asyncio.to_thread(service.configure, scope, body)
                 elif act in {"start", "preset", "cancel", "interrupt", "resume"}:
-                    result = service.administer(scope, body)
+                    result = await asyncio.to_thread(service.administer, scope, body)
                 elif act == "admin_arrange":
-                    result = service.admin_arrange(scope, body)
+                    result = await asyncio.to_thread(service.admin_arrange, scope, body)
                 elif act == "mailbox_deliver":
-                    result = engine.mailbox.deliver_parcel(
+                    result = await asyncio.to_thread(
+                        engine.mailbox.deliver_parcel,
                         scope,
                         sender_id="web_admin",
                         sender_name=str(body.get("sender_name") or "面板投递"),
@@ -1267,18 +1317,24 @@ class WorldAPI(CausalAPIMixin):
                         bypass_cooldown=True,
                     )
                 elif act == "mailbox_open":
-                    with engine._db() as db:
-                        db.execute("BEGIN IMMEDIATE")
-                        opened = engine.mailbox.open_pending_parcels(
-                            db, scope, engine.clock(), max_open=5
-                        )
+                    def _open_mail():
+                        with engine._db() as db:
+                            db.execute("BEGIN IMMEDIATE")
+                            return engine.mailbox.open_pending_parcels(
+                                db, scope, engine.clock(), max_open=5
+                            )
+
+                    opened = await asyncio.to_thread(_open_mail)
                     result = {"opened": opened, "count": len(opened)}
                 elif act == "visitor_policy":
-                    result = engine.mailbox.set_policy(
-                        scope, str(body.get("visitor_mode") or "")
+                    result = await asyncio.to_thread(
+                        engine.mailbox.set_policy,
+                        scope,
+                        str(body.get("visitor_mode") or ""),
                     )
                 elif act == "visitor_enter":
-                    result = engine.mailbox.enter_garden(
+                    result = await asyncio.to_thread(
+                        engine.mailbox.enter_garden,
                         scope,
                         user_id="web_visitor_"
                         + hashlib.sha256(
@@ -1290,20 +1346,23 @@ class WorldAPI(CausalAPIMixin):
                         bypass_cooldown=True,
                     )
                 elif act == "keepsake_swap":
-                    result = engine.keepsakes.swap_from_archive(
+                    result = await asyncio.to_thread(
+                        engine.keepsakes.swap_from_archive,
                         scope,
                         str(body.get("item_id") or ""),
                         str(body.get("slot") or ""),
                     )
                 elif act == "world_space_bind":
-                    result = engine.world_spaces.bind(
+                    result = await asyncio.to_thread(
+                        engine.world_spaces.bind,
                         scope,
                         str(body.get("world_id") or ""),
                         str(body.get("label") or ""),
                         character.get("name", ""),
                     )
                 elif act == "peer_visit":
-                    result = engine.world_spaces.invite_guest(
+                    result = await asyncio.to_thread(
+                        engine.world_spaces.invite_guest,
                         scope,
                         guest_name=str(body.get("guest_name") or ""),
                         guest_model_id=str(body.get("guest_model_id") or "builtin"),
@@ -1357,7 +1416,11 @@ class WorldAPI(CausalAPIMixin):
             try:
                 scope, _ = await self.scope(body.get("umo", ""))
                 return _ok(
-                    self.plugin.life.narrative.visuals.profiles.configure(scope, body)
+                    await asyncio.to_thread(
+                        self.plugin.life.narrative.visuals.profiles.configure,
+                        scope,
+                        body,
+                    )
                 )
             except (ValueError, TypeError) as exc:
                 return _err(str(exc), 409)
@@ -1369,8 +1432,12 @@ class WorldAPI(CausalAPIMixin):
         try:
             scope, _ = await self.scope(_query("umo"))
             engine = self.plugin.life.narrative
-            with engine._db() as db:
-                data = engine.visuals.profiles.admin(db, scope)
+
+            def _read_visual():
+                with engine._db(notify=False) as db:
+                    return engine.visuals.profiles.admin(db, scope)
+
+            data = await asyncio.to_thread(_read_visual)
             data["can_write"] = self.plugin.world.web.settings.web_panel_allow_write
             return _ok(data)
         except (ValueError, TypeError) as exc:
