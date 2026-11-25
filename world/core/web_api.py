@@ -41,6 +41,7 @@ except Exception:  # pragma: no cover - older hosts expose Quart instead
         def error_response(message, *, status_code=400, data=None, headers=None):
             return {"status": "error", "message": message, "data": data}
 
+from ...series_panels import require_series_admin
 from .character import CharacterCard
 from .matcher import MatchedEntry, MatchResult, build_injection_text, match_entries
 from .models import SESSION_CARD_NONE, WorldBook, WorldEntry, new_uid
@@ -294,9 +295,12 @@ class WorldBookWebAPI:
 
     # ------------------------------------------------------------- guards
 
-    def _rate_limited(self, endpoint: str, limit: int) -> bool:
+    def _rate_limited(
+        self, endpoint: str, limit: int, client_id: str | None = None
+    ) -> bool:
         now = time.monotonic()
-        key = (endpoint, _client_id())
+        actor = str(client_id or _client_id())[:128]
+        key = (endpoint, actor)
         bucket = [stamp for stamp in self._buckets.get(key, []) if now - stamp < 60.0]
         if len(bucket) >= limit:
             self._buckets[key] = bucket
@@ -309,13 +313,22 @@ class WorldBookWebAPI:
             }
         return False
 
-    def _guard(self, endpoint: str, *, write: bool):
+    async def _guard(self, endpoint: str, *, write: bool):
         """Return an error response when the call must not proceed, else None."""
         owner = getattr(self.plugin, "owner", None)
         if owner is not None and (owner._migrating or owner._terminating):
             return _err("世界正在切换，请稍后重试", 409)
+        context = getattr(owner, "context", None) if owner is not None else None
+        if context is None:
+            context = getattr(self.plugin, "context", None)
+        try:
+            actor = await require_series_admin(context, request, check_csrf=write)
+        except PermissionError as exc:
+            return _err(str(exc) or "需要 Dashboard 管理员登录", 403)
+        except RuntimeError:
+            return _err("需要 Dashboard 管理员登录", 403)
         limit = _WRITE_LIMIT_PER_MINUTE if write else _READ_LIMIT_PER_MINUTE
-        if self._rate_limited(endpoint, limit):
+        if self._rate_limited(endpoint, limit, client_id=actor):
             return _err("请求过于频繁，请稍后再试", 429)
         if not self.settings.web_panel_enabled:
             return _err("面板接口已在插件配置 web_panel.enabled 中关闭", 403)
@@ -335,7 +348,7 @@ class WorldBookWebAPI:
     # --------------------------------------------------------------- read
 
     async def overview(self):
-        limited = self._guard("overview", write=False)
+        limited = await self._guard("overview", write=False)
         if limited is not None:
             return limited
         try:
@@ -420,7 +433,7 @@ class WorldBookWebAPI:
         }
 
     async def book_get(self):
-        limited = self._guard("book_get", write=False)
+        limited = await self._guard("book_get", write=False)
         if limited is not None:
             return limited
         book_id = _query("book_id") or _query("id")
@@ -430,7 +443,7 @@ class WorldBookWebAPI:
         return _ok({"book": self._book_detail(book)})
 
     async def card_get(self):
-        limited = self._guard("card_get", write=False)
+        limited = await self._guard("card_get", write=False)
         if limited is not None:
             return limited
         card_id = _query("card_id") or _query("id")
@@ -440,7 +453,7 @@ class WorldBookWebAPI:
         return _ok({"card": self._card_detail(card)})
 
     async def preview(self):
-        limited = self._guard("preview", write=False)
+        limited = await self._guard("preview", write=False)
         if limited is not None:
             return limited
         book_id = _query("book_id")
@@ -483,7 +496,7 @@ class WorldBookWebAPI:
     # -------------------------------------------------------------- write
 
     async def book_post(self):
-        limited = self._guard("book_post", write=True)
+        limited = await self._guard("book_post", write=True)
         if limited is not None:
             return limited
         body = await _body()
@@ -551,7 +564,7 @@ class WorldBookWebAPI:
         return _err("未知操作：" + (action or "(空)"))
 
     async def entry_post(self):
-        limited = self._guard("entry_post", write=True)
+        limited = await self._guard("entry_post", write=True)
         if limited is not None:
             return limited
         body = await _body()
@@ -654,7 +667,7 @@ class WorldBookWebAPI:
         return target
 
     async def card_post(self):
-        limited = self._guard("card_post", write=True)
+        limited = await self._guard("card_post", write=True)
         if limited is not None:
             return limited
         body = await _body()
@@ -740,7 +753,7 @@ class WorldBookWebAPI:
         return card
 
     async def session_post(self):
-        limited = self._guard("session_post", write=True)
+        limited = await self._guard("session_post", write=True)
         if limited is not None:
             return limited
         body = await _body()
@@ -794,7 +807,7 @@ class WorldBookWebAPI:
         return _ok({"session": self._session_row(session_id, state)})
 
     async def import_post(self):
-        limited = self._guard("import_post", write=True)
+        limited = await self._guard("import_post", write=True)
         if limited is not None:
             return limited
         body = await _body()

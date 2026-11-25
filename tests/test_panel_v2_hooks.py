@@ -218,10 +218,23 @@ async def test_journal_feed_aggregates_world_and_siblings_with_isolation(
         )
 
         monkeypatch.setattr(wb_api, "json_response", lambda data=None, **kwargs: data)
+        raw_req = NS(
+            state=NS(dashboard_g=NS(username="admin")),
+            method="GET",
+            headers={},
+            cookies={},
+        )
         monkeypatch.setattr(
             wb_api,
             "request",
-            NS(query={"scope": UMO, "date": "today", "limit": "20"}, headers={}),
+            NS(
+                query={"scope": UMO, "date": "today", "limit": "20"},
+                headers={},
+                cookies={},
+                method="GET",
+                username="admin",
+                _request=raw_req,
+            ),
         )
         handler = routes[("/astrbot_plugin_dynamics_world/journal_feed", ("GET",))]
         res = await handler()
@@ -470,12 +483,24 @@ async def test_journal_feed_isolates_persona_after_group_switch_and_blocks_unbou
         monkeypatch.setattr(wb_api, "json_response", lambda data=None, **kwargs: data)
         handler = routes[("/astrbot_plugin_dynamics_world/journal_feed", ("GET",))]
 
+        def _journal_req(scope_val):
+            raw_req = NS(
+                state=NS(dashboard_g=NS(username="admin")),
+                method="GET",
+                headers={},
+                cookies={},
+            )
+            return NS(
+                query={"scope": scope_val, "date": "today", "limit": "30"},
+                headers={},
+                cookies={},
+                method="GET",
+                username="admin",
+                _request=raw_req,
+            )
+
         # 1. Cabin only sends scope + date (no persona): backend resolves persona_b and forwards it
-        monkeypatch.setattr(
-            wb_api,
-            "request",
-            NS(query={"scope": UMO, "date": "today", "limit": "30"}, headers={}),
-        )
+        monkeypatch.setattr(wb_api, "request", _journal_req(UMO))
         res = await handler()
         assert res["status"] == "ok"
         payload = res["data"]
@@ -495,11 +520,7 @@ async def test_journal_feed_isolates_persona_after_group_switch_and_blocks_unbou
         # 2. Unbound group (no card bound and no default card): returns empty without calling siblings
         unknown_group = "qq:GroupMessage:unbound_no_card"
         sessions_before = set(plugin.world.store._store.sessions.keys())
-        monkeypatch.setattr(
-            wb_api,
-            "request",
-            NS(query={"scope": unknown_group, "date": "today", "limit": "30"}, headers={}),
-        )
+        monkeypatch.setattr(wb_api, "request", _journal_req(unknown_group))
         res_unbound = await handler()
         assert res_unbound["status"] == "ok"
         assert res_unbound["data"]["events"] == []
@@ -511,11 +532,7 @@ async def test_journal_feed_isolates_persona_after_group_switch_and_blocks_unbou
 
         # 3. Explicitly unbound (__none__) group: returns empty without calling siblings
         plugin.world.store.update_session(UMO, card_id="__none__")
-        monkeypatch.setattr(
-            wb_api,
-            "request",
-            NS(query={"scope": UMO, "date": "today", "limit": "30"}, headers={}),
-        )
+        monkeypatch.setattr(wb_api, "request", _journal_req(UMO))
         res_none = await handler()
         assert res_none["status"] == "ok"
         assert res_none["data"]["events"] == []

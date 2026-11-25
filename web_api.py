@@ -76,7 +76,7 @@ class WorldAPI(CausalAPIMixin):
 
     async def cabin_style_get(self):
         from . import cabin_life
-        guard = self.guard("cabin_style")
+        guard = await self.guard("cabin_style")
         if guard is not None:
             return guard
         try:
@@ -98,7 +98,7 @@ class WorldAPI(CausalAPIMixin):
     async def cabin_style_post(self):
         from . import cabin_life
         async with self.plugin._migration_lock:
-            guard = self.guard("cabin_style", True)
+            guard = await self.guard("cabin_style", True)
             if guard is not None:
                 return guard
             body = await _body()
@@ -139,12 +139,13 @@ class WorldAPI(CausalAPIMixin):
             except (ValueError, TypeError) as exc:
                 return _err(str(exc), 409 if "已改变" in str(exc) else 400)
 
-    def guard(self, endpoint, write=False):
+    async def guard(self, endpoint, write=False):
+        """Enforce lifecycle, Dashboard admin auth (require_series_admin + CSRF), rate-limit, and panel mode guards."""
         if self.plugin._migrating:
             return _err("正在迁移，请稍后重试", 409)
         if self.plugin._terminating:
             return _err("插件正在停止", 503)
-        return self.plugin.world.web._guard(endpoint, write=write)
+        return await self.plugin.world.web._guard(endpoint, write=write)
 
     def _find_companion_owner(self, target_id: str):
         getter = getattr(self.plugin.context, "get_all_stars", None)
@@ -530,7 +531,7 @@ class WorldAPI(CausalAPIMixin):
         return summary
 
     async def overview(self):
-        guard = self.guard("world")
+        guard = await self.guard("world")
         if guard is not None:
             return guard
         p = self.plugin
@@ -555,7 +556,7 @@ class WorldAPI(CausalAPIMixin):
         )
 
     async def setup_get(self):
-        guard = self.guard("setup")
+        guard = await self.guard("setup")
         if guard is not None:
             return guard
         return _ok(await self.plugin.onboarding.status(_query("umo")))
@@ -566,7 +567,7 @@ class WorldAPI(CausalAPIMixin):
         return AvatarLibrary(self.plugin.data_root / "avatar-models")
 
     async def avatar_get(self):
-        guard = self.guard("avatar")
+        guard = await self.guard("avatar")
         if guard is not None:
             return guard
         try:
@@ -589,7 +590,7 @@ class WorldAPI(CausalAPIMixin):
             return _err(str(exc))
 
     async def avatar_model_get(self):
-        guard = self.guard("avatar_model")
+        guard = await self.guard("avatar_model")
         if guard is not None:
             return guard
         try:
@@ -602,7 +603,7 @@ class WorldAPI(CausalAPIMixin):
 
     async def avatar_post(self):
         async with self.plugin._migration_lock:
-            guard = self.guard("avatar", True)
+            guard = await self.guard("avatar", True)
             if guard is not None:
                 return guard
             body = await _body()
@@ -656,7 +657,7 @@ class WorldAPI(CausalAPIMixin):
 
     async def avatar_upload_post(self):
         async with self.plugin._migration_lock:
-            guard = self.guard("avatar_upload", True)
+            guard = await self.guard("avatar_upload", True)
             if guard is not None:
                 return guard
             body = await _body(12 * 1024 * 1024)
@@ -691,7 +692,7 @@ class WorldAPI(CausalAPIMixin):
                 return _err(str(exc))
 
     async def projects_get(self):
-        guard = self.guard("projects")
+        guard = await self.guard("projects")
         if guard is not None:
             return guard
         try:
@@ -741,7 +742,7 @@ class WorldAPI(CausalAPIMixin):
             return _err(str(exc))
 
     async def activity_get(self):
-        guard = self.guard("activity")
+        guard = await self.guard("activity")
         if guard is not None:
             return guard
         try:
@@ -789,7 +790,7 @@ class WorldAPI(CausalAPIMixin):
             return _err(str(exc))
 
     async def journal_feed_get(self):
-        guard = self.guard("journal_feed")
+        guard = await self.guard("journal_feed")
         if guard is not None:
             return guard
         try:
@@ -816,7 +817,7 @@ class WorldAPI(CausalAPIMixin):
 
     async def projects_post(self):
         async with self.plugin._migration_lock:
-            guard = self.guard("projects", True)
+            guard = await self.guard("projects", True)
             if guard is not None:
                 return guard
             body = await _body()
@@ -904,7 +905,7 @@ class WorldAPI(CausalAPIMixin):
 
     async def setup_post(self):
         async with self.plugin._migration_lock:
-            guard = self.guard("setup", True)
+            guard = await self.guard("setup", True)
             if guard is not None:
                 return guard
             body = await _body()
@@ -954,7 +955,7 @@ class WorldAPI(CausalAPIMixin):
         return result["scope"], result
 
     async def life_get(self):
-        guard = self.guard("life")
+        guard = await self.guard("life")
         if guard is not None:
             return guard
         try:
@@ -997,7 +998,7 @@ class WorldAPI(CausalAPIMixin):
             return _err(str(exc))
 
     async def life_post(self):
-        guard = self.guard("life", True)
+        guard = await self.guard("life", True)
         if guard is not None:
             return guard
         body = await _body()
@@ -1040,7 +1041,7 @@ class WorldAPI(CausalAPIMixin):
             return _err(str(exc))
 
     async def migration_get(self):
-        guard = self.guard("migration")
+        guard = await self.guard("migration")
         if guard is not None:
             return guard
         try:
@@ -1056,7 +1057,7 @@ class WorldAPI(CausalAPIMixin):
             return _err("无法预览迁移：" + str(exc))
 
     async def migration_post(self):
-        guard = self.guard("migration", True)
+        guard = await self.guard("migration", True)
         if guard is not None:
             return guard
         body = await _body()
@@ -1075,7 +1076,7 @@ class WorldAPI(CausalAPIMixin):
 
     async def persona_post(self):
         async with self.plugin._migration_lock:
-            guard = self.guard("persona", True)
+            guard = await self.guard("persona", True)
             if guard is not None:
                 return guard
             if self.plugin.conflicts():
@@ -1092,7 +1093,7 @@ class WorldAPI(CausalAPIMixin):
             return _ok({"persona_id": card.persona_id, "message": message})
 
     async def stream_get(self):
-        guard = self.guard("stream")
+        guard = await self.guard("stream")
         if guard is not None:
             return guard
         try:
@@ -1103,7 +1104,7 @@ class WorldAPI(CausalAPIMixin):
             return _err(str(exc))
 
     async def map_get(self):
-        guard = self.guard("map")
+        guard = await self.guard("map")
         if guard is not None:
             return guard
         try:
@@ -1123,7 +1124,7 @@ class WorldAPI(CausalAPIMixin):
 
     async def map_post(self):
         async with self.plugin._migration_lock:
-            guard = self.guard("map", True)
+            guard = await self.guard("map", True)
             if guard is not None:
                 return guard
             body = await _body()
@@ -1206,7 +1207,7 @@ class WorldAPI(CausalAPIMixin):
 
     async def weather_post(self):
         async with self.plugin._migration_lock:
-            guard = self.guard("weather", True)
+            guard = await self.guard("weather", True)
             if guard is not None:
                 return guard
             body = await _body()
@@ -1242,7 +1243,7 @@ class WorldAPI(CausalAPIMixin):
 
     async def scene_post(self):
         async with self.plugin._migration_lock:
-            guard = self.guard("scene", True)
+            guard = await self.guard("scene", True)
             if guard is not None:
                 return guard
             body = await _body()
@@ -1394,7 +1395,7 @@ class WorldAPI(CausalAPIMixin):
 
     async def visual_post(self):
         async with self.plugin._migration_lock:
-            guard = self.guard("visual", True)
+            guard = await self.guard("visual", True)
             if guard is not None:
                 return guard
             body = await _body()
@@ -1426,7 +1427,7 @@ class WorldAPI(CausalAPIMixin):
                 return _err(str(exc), 409)
 
     async def visual_get(self):
-        guard = self.guard("visual")
+        guard = await self.guard("visual")
         if guard is not None:
             return guard
         try:
@@ -1444,7 +1445,7 @@ class WorldAPI(CausalAPIMixin):
             return _err(str(exc))
 
     async def visual_asset_get(self):
-        guard = self.guard("visual_asset")
+        guard = await self.guard("visual_asset")
         if guard is not None:
             return guard
         try:
@@ -1458,7 +1459,7 @@ class WorldAPI(CausalAPIMixin):
 
     async def visual_asset_post(self):
         async with self.plugin._migration_lock:
-            guard = self.guard("visual_asset", True)
+            guard = await self.guard("visual_asset", True)
             if guard is not None:
                 return guard
             body = await _body(12 * 1024 * 1024)

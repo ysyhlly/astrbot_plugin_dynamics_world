@@ -150,8 +150,31 @@ async def test_upload_and_preview_handlers_obey_readonly_and_scope(
         "label": "test",
         "image_base64": base64.b64encode(picture()).decode(),
     }
+    admin_headers = {
+        "Host": "dashboard.local",
+        "Origin": "https://dashboard.local",
+        "Sec-Fetch-Site": "same-origin",
+    }
+
+    def _admin_req(method, *, query=None, body=None):
+        raw = NS(
+            state=NS(dashboard_g=NS(username="admin")),
+            method=method,
+            headers=admin_headers,
+            cookies={},
+        )
+        return NS(
+            query=query or {},
+            json=lambda **kwargs: body,
+            headers=admin_headers,
+            cookies={},
+            method=method,
+            username="admin",
+            _request=raw,
+        )
+
     monkeypatch.setattr(
-        transport, "request", NS(query={}, json=lambda **kwargs: payload, headers={})
+        transport, "request", _admin_req("POST", body=payload)
     )
     plugin.world.web.settings.raw.setdefault("web_panel", {})["allow_write"] = False
     result = await plugin.web.visual_asset_post()
@@ -163,7 +186,7 @@ async def test_upload_and_preview_handlers_obey_readonly_and_scope(
     asset = result["data"]["asset_id"]
     plugin.world.web.settings.raw["web_panel"]["allow_write"] = False
     monkeypatch.setattr(
-        transport, "request", NS(query={"umo": UMO, "asset_id": asset}, headers={})
+        transport, "request", _admin_req("GET", query={"umo": UMO, "asset_id": asset})
     )
     assert (await plugin.web.visual_asset_get())["data"]["width"] == 80
     assert (await plugin.web.visual_get())["data"]["can_write"] is False

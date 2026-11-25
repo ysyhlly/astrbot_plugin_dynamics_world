@@ -26,9 +26,28 @@ async def avatar_api(tmp_path, monkeypatch):
         })
 
         async def call(endpoint, *, body=None, **query):
-            request = SimpleNamespace(query={'umo': UMO, **query}, json=lambda **kwargs: body, headers={})
-            monkeypatch.setattr(transport, 'request', request)
             method = 'GET' if body is None else 'POST'
+            headers = {
+                'Host': 'dashboard.local',
+                'Origin': 'https://dashboard.local',
+                'Sec-Fetch-Site': 'same-origin',
+            }
+            raw = SimpleNamespace(
+                state=SimpleNamespace(dashboard_g=SimpleNamespace(username='admin')),
+                method=method,
+                headers=headers,
+                cookies={},
+            )
+            request = SimpleNamespace(
+                query={'umo': UMO, **query},
+                json=lambda **kwargs: body,
+                headers=headers,
+                cookies={},
+                method=method,
+                username='admin',
+                _request=raw,
+            )
+            monkeypatch.setattr(transport, 'request', request)
             return await routes[(f'/astrbot_plugin_dynamics_world/{endpoint}', (method,))]()
 
         yield plugin, call

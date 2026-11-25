@@ -108,6 +108,9 @@ def install_stubs() -> None:
     _mod("astrbot.core.agent")
     agent_msg = _mod("astrbot.core.agent.message")
 
+    import logging
+
+    api.logger = logging.getLogger("astrbot")
     api.AstrBotConfig = AstrBotConfig
     # Keep web tests independent of an installed Quart application's context.
     web.json_response = lambda data=None, **kwargs: {} if data is None else data
@@ -171,6 +174,9 @@ class FakeContext:
         self.plugin_data_dir = str(data_dir)
         self.persona_manager = None
         self.conversation_manager = None
+
+    def get_config(self):
+        return {"dashboard": {"username": "admin"}}
 
 # ---- 常用 fixture ----
 

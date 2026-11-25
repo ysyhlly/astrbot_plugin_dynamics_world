@@ -1,6 +1,8 @@
 """core/web_api.py：面板接口的读写、字段白名单与只读门。"""
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from astrbot_plugin_dynamics_world.world.core import web_api as web_api_module
@@ -11,9 +13,49 @@ from astrbot_plugin_dynamics_world.world.core.web_api import WorldBookWebAPI
 from conftest import run
 
 
+_ADMIN_HEADERS = {
+    "Host": "dashboard.local",
+    "Origin": "https://dashboard.local",
+    "Sec-Fetch-Site": "same-origin",
+}
+
+
+def _make_admin_request(
+    *,
+    username="admin",
+    method="POST",
+    headers=None,
+    cookies=None,
+    **extra,
+):
+    req_headers = dict(_ADMIN_HEADERS if headers is None else headers)
+    req_cookies = dict(cookies or {})
+    state = (
+        SimpleNamespace(dashboard_g=SimpleNamespace(username=username))
+        if username is not None
+        else SimpleNamespace()
+    )
+    raw = SimpleNamespace(
+        state=state,
+        method=method,
+        headers=req_headers,
+        cookies=req_cookies,
+    )
+    attrs = {
+        "username": username,
+        "method": method,
+        "headers": req_headers,
+        "cookies": req_cookies,
+        "_request": raw,
+    }
+    attrs.update(extra)
+    return FakeRequest(**attrs)
+
+
 @pytest.fixture
-def api(make_plugin):
+def api(make_plugin, monkeypatch):
     plugin = make_plugin()
+    monkeypatch.setattr(web_api_module, "request", _make_admin_request())
     return WorldBookWebAPI(plugin), plugin
 
 
@@ -41,7 +83,11 @@ class FakeRequest:
 
 
 def _stub_request(monkeypatch, **attrs):
-    monkeypatch.setattr(web_api_module, "request", FakeRequest(**attrs))
+    monkeypatch.setattr(
+        web_api_module,
+        "request",
+        _make_admin_request(method="GET", **attrs),
+    )
 
 
 def _data(response):

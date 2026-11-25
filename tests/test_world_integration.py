@@ -28,6 +28,7 @@ async def make_plugin(tmp_path, monkeypatch, **overrides):
     entries, routes = [], {}
     context = NS(
         get_all_stars=lambda: entries,
+        get_config=lambda: {"dashboard": {"username": "admin"}},
         register_web_api=lambda path, handler, methods, desc: routes.update(
             {(path, tuple(methods)): handler}
         ),
@@ -64,7 +65,7 @@ async def test_native_plugin_is_self_contained_and_cancels_loop(tmp_path, monkey
     assert ("/astrbot_plugin_dynamics_world/cabin_style", ("POST",)) in routes
     assert ("/astrbot_plugin_dynamics_world/journal_feed", ("GET",)) in routes
     assert ("/astrbot_plugin_dynamics_world/series_workspace/open/<target>", ("GET",)) in routes
-    assert ("/astrbot_plugin_dynamics_world/series_workspace/panel/<target>/<path:operation>", ("GET", "POST")) in routes
+    assert ("/astrbot_plugin_dynamics_world/series_workspace/panel/<target>/<path:operation>", ("GET", "POST", "PUT", "PATCH", "DELETE")) in routes
     assert ("/astrbot_plugin_dynamics_world/visual", ("POST",)) in routes
     seed(plugin)
     with pytest.raises(RuntimeError):
@@ -86,8 +87,8 @@ async def test_native_plugin_is_self_contained_and_cancels_loop(tmp_path, monkey
     assert plugin.life._narrative_task.done()
     assert not plugin.get_dynamics_capabilities()["ready"]
     assert plugin._series_panels.workspace.closed is True
-    assert plugin.web.guard("cabin_style") is not None
-    assert plugin.web.guard("cabin_style", True) is not None
+    assert (await plugin.web.guard("cabin_style")) is not None
+    assert (await plugin.web.guard("cabin_style", True)) is not None
 
 
 @pytest.mark.asyncio

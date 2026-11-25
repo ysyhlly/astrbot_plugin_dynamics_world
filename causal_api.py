@@ -4,7 +4,7 @@ from .world.core.web_api import _body, _err, _ok, _query
 
 class CausalAPIMixin:
     async def causal_get(self):
-        guard = self.guard("life")
+        guard = await self.guard("life")
         if guard is not None:
             return guard
         try:
@@ -23,7 +23,7 @@ class CausalAPIMixin:
 
     async def causal_post(self):
         async with self.plugin._migration_lock:
-            guard = self.guard("life", True)
+            guard = await self.guard("life", True)
             if guard is not None:
                 return guard
             try:
