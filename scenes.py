@@ -128,7 +128,8 @@ class SceneService:
             db.execute(cabin_life.DDL)
             db.executescript("""CREATE TABLE IF NOT EXISTS world_scene_state(identity TEXT PRIMARY KEY,revision INTEGER NOT NULL,state TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS world_scene_events(event_id TEXT PRIMARY KEY,identity TEXT NOT NULL,kind TEXT NOT NULL,occurred REAL NOT NULL,payload TEXT NOT NULL);
-            CREATE INDEX IF NOT EXISTS world_scene_event_scope ON world_scene_events(identity,occurred);""")
+            CREATE INDEX IF NOT EXISTS world_scene_event_scope ON world_scene_events(identity,occurred);
+            CREATE INDEX IF NOT EXISTS world_scene_events_occurred ON world_scene_events(occurred);""")
 
     def key(self, db, scope, mode=None):
         doc = self.engine.spatial.document(db, identity(scope))

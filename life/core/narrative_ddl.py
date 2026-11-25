@@ -3,11 +3,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import shutil
 import sqlite3
 import uuid
 from contextlib import closing
 from pathlib import Path
+
+try:
+    from astrbot.api import logger
+except Exception:  # pragma: no cover
+    logger = logging.getLogger(__name__)
 
 if __package__:
     from .narrative_types import (
@@ -31,6 +37,38 @@ else:
 class NarrativeSchemaMixin:
     """Database table creation, schema extension backups, clock v2 migration and legacy archive import."""
 
+    def _prune_migration_backups(self, *, keep_latest: int = 1) -> int:
+        """Keep at most ``keep_latest`` newest pre-migration .bak snapshots for this DB."""
+        parent = self.path.parent
+        if not parent.is_dir():
+            return 0
+        keep = max(0, int(keep_latest))
+        candidates: list[Path] = []
+        for pattern in (
+            f"{self.path.name}.pre-v20-*.bak",
+            f"{self.path.name}.pre-retry-*.bak",
+        ):
+            candidates.extend(p for p in parent.glob(pattern) if p.is_file())
+        if len(candidates) <= keep:
+            return 0
+
+        def _sort_key(path: Path) -> tuple[float, str]:
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                mtime = 0.0
+            return (mtime, path.name)
+
+        ordered = sorted(candidates, key=_sort_key, reverse=True)
+        removed = 0
+        for stale in ordered[keep:]:
+            try:
+                stale.unlink()
+                removed += 1
+            except OSError:
+                pass
+        return removed
+
     def _backup_before_v20_extension(self) -> None:
         """Take an SQLite-consistent snapshot before initializing v0.20 virtual world tables."""
         if not self.path.is_file():
@@ -51,6 +89,7 @@ class NarrativeSchemaMixin:
                 check = destination.execute("PRAGMA quick_check").fetchone()
                 if not check or check[0] != "ok":
                     raise sqlite3.DatabaseError("v20 migration backup failed quick_check")
+        self._prune_migration_backups(keep_latest=1)
 
     def _backup_before_retry_extension(self) -> None:
         """Take an SQLite-consistent scoped backup before adding retry columns."""
@@ -75,6 +114,7 @@ class NarrativeSchemaMixin:
                 check = destination.execute("PRAGMA quick_check").fetchone()
                 if not check or check[0] != "ok":
                     raise sqlite3.DatabaseError("Retry migration backup failed quick_check")
+        self._prune_migration_backups(keep_latest=1)
 
     def _initialize(self) -> None:
         with self._db() as db:
@@ -108,9 +148,16 @@ class NarrativeSchemaMixin:
                     failure_id TEXT PRIMARY KEY, event_ids TEXT NOT NULL,
                     reason_code TEXT NOT NULL, occurred REAL NOT NULL);
                 CREATE INDEX IF NOT EXISTS validation_failure_time ON validation_failures(occurred DESC);
+                CREATE TABLE IF NOT EXISTS validation_failure_events(
+                    event_id TEXT NOT NULL, failure_id TEXT NOT NULL, occurred REAL NOT NULL,
+                    PRIMARY KEY(event_id, occurred, failure_id));
+                CREATE INDEX IF NOT EXISTS validation_failure_events_time ON validation_failure_events(occurred);
+                CREATE INDEX IF NOT EXISTS validation_failure_events_failure ON validation_failure_events(failure_id);
                 CREATE TABLE IF NOT EXISTS diary(entry_id TEXT PRIMARY KEY,identity TEXT NOT NULL,
                     umo TEXT NOT NULL,occurred REAL NOT NULL,text TEXT NOT NULL,
                     fact_kind TEXT NOT NULL,source_ids TEXT NOT NULL,revision INTEGER NOT NULL);
+                CREATE INDEX IF NOT EXISTS diary_identity_occurred ON diary(identity,occurred DESC);
+                CREATE INDEX IF NOT EXISTS diary_occurred ON diary(occurred);
                 CREATE TABLE IF NOT EXISTS commitments(commitment_id TEXT PRIMARY KEY,
                     identity TEXT NOT NULL,umo TEXT NOT NULL,payload TEXT NOT NULL,status TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS intents(intent_id TEXT PRIMARY KEY,identity TEXT NOT NULL,
@@ -119,12 +166,14 @@ class NarrativeSchemaMixin:
                 CREATE INDEX IF NOT EXISTS intent_due ON intents(status,not_before,expires);
                 CREATE INDEX IF NOT EXISTS intent_scope_status_updated ON intents(identity,umo,status,updated);
                 CREATE INDEX IF NOT EXISTS intent_status_updated ON intents(status,updated);
+                CREATE INDEX IF NOT EXISTS intent_scope_sources ON intents(identity,umo,json_extract(payload,'$.source_ids'));
                 CREATE TABLE IF NOT EXISTS outreach_preferences(
                     identity TEXT NOT NULL,umo TEXT NOT NULL,user_id TEXT NOT NULL,
                     allowed INTEGER NOT NULL,occurred REAL NOT NULL,event_id TEXT NOT NULL,
                     PRIMARY KEY(identity,umo,user_id));
                 CREATE TABLE IF NOT EXISTS budgets(identity TEXT NOT NULL,hour INTEGER NOT NULL,
                     kind TEXT NOT NULL,used INTEGER NOT NULL,PRIMARY KEY(identity,hour,kind));
+                CREATE INDEX IF NOT EXISTS budgets_hour ON budgets(hour);
                 CREATE TABLE IF NOT EXISTS maintenance(identity TEXT NOT NULL,kind TEXT NOT NULL,
                     last REAL NOT NULL,PRIMARY KEY(identity,kind));
                 CREATE TABLE IF NOT EXISTS calls(call_id TEXT PRIMARY KEY,identity TEXT NOT NULL,
@@ -172,7 +221,57 @@ class NarrativeSchemaMixin:
             if not db.execute("SELECT 1 FROM metadata WHERE key='structured_contract_version'").fetchone():
                 db.execute("UPDATE events SET next_retry=0 WHERE status='pending' AND error='ValueError'")
                 db.execute("INSERT INTO metadata VALUES('structured_contract_version','1')")
+            if not db.execute("SELECT 1 FROM metadata WHERE key='validation_failure_events_v1'").fetchone():
+                rows = db.execute(
+                    "SELECT failure_id, event_ids, occurred FROM validation_failures"
+                ).fetchall()
+                backfill: list[tuple[str, str, float]] = []
+                for row in rows:
+                    try:
+                        parsed = json.loads(row["event_ids"])
+                    except Exception:
+                        continue
+                    if isinstance(parsed, list):
+                        for eid in parsed:
+                            if isinstance(eid, str) and eid:
+                                backfill.append((eid, row["failure_id"], float(row["occurred"])))
+                if backfill:
+                    db.executemany(
+                        "INSERT OR IGNORE INTO validation_failure_events(event_id, failure_id, occurred) VALUES(?,?,?)",
+                        backfill,
+                    )
+                db.execute("INSERT INTO metadata VALUES('validation_failure_events_v1','1')")
+            existing_tables = {
+                row[0]
+                for row in db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            optional_indexes = (
+                ("world_map_events", "CREATE INDEX IF NOT EXISTS world_map_events_scope ON world_map_events(identity,occurred)"),
+                ("world_map_events", "CREATE INDEX IF NOT EXISTS world_map_events_occurred ON world_map_events(occurred)"),
+                ("world_map_versions", "CREATE INDEX IF NOT EXISTS world_map_versions_created ON world_map_versions(created)"),
+                ("world_scene_events", "CREATE INDEX IF NOT EXISTS world_scene_events_occurred ON world_scene_events(occurred)"),
+                ("world_life_receipts", "CREATE INDEX IF NOT EXISTS world_life_receipts_occurred ON world_life_receipts(occurred)"),
+                ("world_resident_evaluations", "CREATE INDEX IF NOT EXISTS world_resident_evaluations_started ON world_resident_evaluations(started)"),
+            )
+            for table_name, index_sql in optional_indexes:
+                if table_name in existing_tables:
+                    db.execute(index_sql)
             db.execute("INSERT OR IGNORE INTO metadata VALUES('virtual_world_v20','1')")
+            auto_vacuum_mode = int((db.execute("PRAGMA auto_vacuum").fetchone() or [0])[0])
+            if auto_vacuum_mode == 0:
+                page_size = int((db.execute("PRAGMA page_size").fetchone() or [4096])[0])
+                freelist_count = int((db.execute("PRAGMA freelist_count").fetchone() or [0])[0])
+                freelist_mib = (freelist_count * page_size) / (1024 * 1024)
+                logger.warning(
+                    "[DynamicsWorld] narrative DB %s has auto_vacuum=NONE "
+                    "(freelist=%d pages, %.2f MiB); incremental_vacuum cannot reclaim pages "
+                    "until converted via enable_incremental_vacuum() or automatic maintenance threshold.",
+                    self.path,
+                    freelist_count,
+                    freelist_mib,
+                )
 
     def _migrate_clock(self, db):
         """Invalidate legacy group-refreshed deadlines once, with a durable receipt."""

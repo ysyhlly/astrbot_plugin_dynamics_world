@@ -1514,8 +1514,9 @@ class NarrativeEngine(
         isolate = False
         if str(head["error"]).startswith("validation."):
             previous = db.execute(
-                "SELECT event_ids FROM validation_failures WHERE EXISTS "
-                "(SELECT 1 FROM json_each(event_ids) WHERE value=?) ORDER BY occurred DESC LIMIT 1",
+                "SELECT vf.event_ids FROM validation_failure_events vfe "
+                "JOIN validation_failures vf ON vf.failure_id = vfe.failure_id "
+                "WHERE vfe.event_id = ? ORDER BY vfe.occurred DESC LIMIT 1",
                 (head["event_id"],),
             ).fetchone()
             failed_ids = set(json.loads(previous[0])) if previous else set()
@@ -1561,19 +1562,30 @@ class NarrativeEngine(
         """Compatibility helper for callers that only need eligible events."""
         return self._pending_state(db, scope, now)[0]
 
+    def _insert_validation_failure(
+        self, db, event_ids: list[str], reason_code: str, occurred: float
+    ) -> str:
+        """Persist a validation failure and its indexed event_id lookup rows."""
+        failure_id = str(uuid.uuid4())
+        ids = [str(eid) for eid in event_ids if isinstance(eid, str) and eid]
+        db.execute(
+            "INSERT INTO validation_failures VALUES(?,?,?,?)",
+            (failure_id, _json(ids), reason_code, occurred),
+        )
+        if ids:
+            db.executemany(
+                "INSERT OR IGNORE INTO validation_failure_events(event_id, failure_id, occurred) VALUES(?,?,?)",
+                [(eid, failure_id, occurred) for eid in ids],
+            )
+        return failure_id
+
     def _record_failure(self, events: list[dict], now: float, error: str) -> None:
         """Persist a bounded retry deadline without resolving any queue item."""
         if not events:
             return
         with self._db() as db:
-            db.execute(
-                "INSERT INTO validation_failures VALUES(?,?,?,?)",
-                (
-                    str(uuid.uuid4()),
-                    _json([e["event_id"] for e in events]),
-                    error[:100],
-                    now,
-                ),
+            self._insert_validation_failure(
+                db, [e["event_id"] for e in events], error[:100], now
             )
             for event in events:
                 row = db.execute(
@@ -2134,20 +2146,23 @@ class NarrativeEngine(
         started: float,
         status: str,
         kind: str,
+        *,
+        db=None,
     ) -> None:
-        with self._db() as db:
-            db.execute(
-                "INSERT INTO calls VALUES(?,?,?,?,?,?,?)",
-                (
-                    call_id,
-                    identity,
-                    umo,
-                    now,
-                    max(0.0, time.monotonic() - started),
-                    status,
-                    kind,
-                ),
-            )
+        row = (
+            call_id,
+            identity,
+            umo,
+            now,
+            max(0.0, time.monotonic() - started),
+            status,
+            kind,
+        )
+        if db is not None:
+            db.execute("INSERT INTO calls VALUES(?,?,?,?,?,?,?)", row)
+            return
+        with self._db() as conn:
+            conn.execute("INSERT INTO calls VALUES(?,?,?,?,?,?,?)", row)
 
     def _commit(
         self,
@@ -2357,14 +2372,12 @@ class NarrativeEngine(
                     "An intent cannot change ownership",
                 )
             # Identical source motivation cannot create unlimited follow-ups.
-            duplicates = db.execute(
-                "SELECT payload FROM intents WHERE identity=? AND umo=?",
-                (identity, scope["umo"]),
-            )
-            if any(
-                json.loads(row[0])["source_ids"] == item["source_ids"]
-                for row in duplicates
-            ):
+            duplicate = db.execute(
+                "SELECT 1 FROM intents WHERE identity=? AND umo=? "
+                "AND json_extract(payload, '$.source_ids')=? LIMIT 1",
+                (identity, scope["umo"], _json(item["source_ids"])),
+            ).fetchone()
+            if duplicate is not None:
                 continue
             if item.get("reminder_id"):
                 item["status"] = "cancelled"
@@ -3186,6 +3199,16 @@ class NarrativeEngine(
                                     "UPDATE events SET status='failed',error='stale_revision' WHERE event_id=?",
                                     (event_id,),
                                 )
+                                self._call(
+                                    call_id,
+                                    identity,
+                                    "",
+                                    now,
+                                    started,
+                                    "stale",
+                                    kind,
+                                    db=db,
+                                )
                                 stale_row = db.execute(
                                     "SELECT state FROM lives WHERE identity=?",
                                     (identity,),
@@ -3195,7 +3218,7 @@ class NarrativeEngine(
                                     if stale_row
                                     else {"plan": [], "plan_date": ""}
                                 )
-                                stale_resp = {
+                                return {
                                     "schema_version": 1,
                                     "status": "stale",
                                     "error": "stale_revision",
@@ -3208,10 +3231,6 @@ class NarrativeEngine(
                                         generating=False,
                                     ),
                                 }
-                                self._call(
-                                    call_id, identity, "", now, started, "stale", kind
-                                )
-                                return stale_resp
                             self._commit(
                                 db,
                                 global_scope,
@@ -3219,6 +3238,16 @@ class NarrativeEngine(
                                 [event],
                                 now,
                                 snapshot["revision"] + 1,
+                            )
+                            self._call(
+                                call_id,
+                                identity,
+                                "",
+                                now,
+                                started,
+                                "advanced",
+                                kind,
+                                db=db,
                             )
                             result_snap = self._snapshot(
                                 db, global_scope, self.clock()
@@ -3236,9 +3265,6 @@ class NarrativeEngine(
                                 self.clock(),
                                 generating=False,
                             )
-                        self._call(
-                            call_id, identity, "", now, started, "advanced", kind
-                        )
                         return {
                             "schema_version": 1,
                             "status": "regenerated",
@@ -3278,6 +3304,97 @@ class NarrativeEngine(
         finally:
             self._plan_regens.discard(identity)
 
+    def storage_vacuum_status(self) -> dict:
+        """Inspect SQLite auto_vacuum mode and reclaimable freelist size."""
+        conn = sqlite3.connect(self.path, timeout=5)
+        try:
+            conn.execute("PRAGMA busy_timeout=5000")
+            mode = int((conn.execute("PRAGMA auto_vacuum").fetchone() or [0])[0])
+            page_size = int((conn.execute("PRAGMA page_size").fetchone() or [4096])[0])
+            page_count = int((conn.execute("PRAGMA page_count").fetchone() or [0])[0])
+            freelist_count = int(
+                (conn.execute("PRAGMA freelist_count").fetchone() or [0])[0]
+            )
+            return {
+                "auto_vacuum": mode,
+                "page_size": page_size,
+                "page_count": page_count,
+                "freelist_count": freelist_count,
+                "freelist_bytes": freelist_count * page_size,
+                "needs_conversion": mode == 0,
+            }
+        finally:
+            conn.close()
+
+    def enable_incremental_vacuum(
+        self,
+        *,
+        force: bool = False,
+        min_freelist_bytes: int = 20 * 1024 * 1024,
+    ) -> dict:
+        """Convert a legacy auto_vacuum=NONE DB to INCREMENTAL via controlled VACUUM."""
+        conn = sqlite3.connect(self.path, timeout=5, isolation_level=None)
+        try:
+            conn.execute("PRAGMA busy_timeout=5000")
+            mode = int((conn.execute("PRAGMA auto_vacuum").fetchone() or [0])[0])
+            page_size = int((conn.execute("PRAGMA page_size").fetchone() or [4096])[0])
+            before_pages = int((conn.execute("PRAGMA page_count").fetchone() or [0])[0])
+            before_free = int(
+                (conn.execute("PRAGMA freelist_count").fetchone() or [0])[0]
+            )
+            before_free_bytes = before_free * page_size
+            if mode == 2:
+                return {
+                    "changed": False,
+                    "auto_vacuum": mode,
+                    "before_freelist_bytes": before_free_bytes,
+                    "after_freelist_bytes": before_free_bytes,
+                }
+            if not force and before_free_bytes < max(0, int(min_freelist_bytes)):
+                logger.info(
+                    "[DynamicsWorld] narrative DB %s has auto_vacuum=%d "
+                    "(freelist=%.2f MiB < threshold %.2f MiB); deferring VACUUM conversion.",
+                    self.path,
+                    mode,
+                    before_free_bytes / (1024 * 1024),
+                    max(0, int(min_freelist_bytes)) / (1024 * 1024),
+                )
+                return {
+                    "changed": False,
+                    "auto_vacuum": mode,
+                    "needs_conversion": mode == 0,
+                    "before_freelist_bytes": before_free_bytes,
+                    "after_freelist_bytes": before_free_bytes,
+                }
+            conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
+            conn.execute("VACUUM")
+            conn.execute("PRAGMA journal_mode=WAL")
+            after_mode = int((conn.execute("PRAGMA auto_vacuum").fetchone() or [0])[0])
+            after_pages = int((conn.execute("PRAGMA page_count").fetchone() or [0])[0])
+            after_free = int(
+                (conn.execute("PRAGMA freelist_count").fetchone() or [0])[0]
+            )
+            logger.info(
+                "[DynamicsWorld] converted narrative DB %s to auto_vacuum=%d "
+                "(pages %d -> %d, freelist %d -> %d)",
+                self.path,
+                after_mode,
+                before_pages,
+                after_pages,
+                before_free,
+                after_free,
+            )
+            return {
+                "changed": after_mode == 2,
+                "auto_vacuum": after_mode,
+                "before_pages": before_pages,
+                "after_pages": after_pages,
+                "before_freelist_bytes": before_free_bytes,
+                "after_freelist_bytes": after_free * page_size,
+            }
+        finally:
+            conn.close()
+
     def prune_history(
         self,
         *,
@@ -3286,12 +3403,17 @@ class NarrativeEngine(
         now: float | None = None,
         vacuum_pages: int = 64,
         max_batches: int = 20,
+        max_map_versions: int = 5,
+        max_backups: int = 1,
+        allow_auto_vacuum_conversion: bool = False,
+        auto_vacuum_threshold_bytes: int = 20 * 1024 * 1024,
     ) -> dict:
-        """Delete aged terminal history rows in bounded batches and incrementally vacuum."""
+        """Delete aged terminal history rows in bounded batches and reclaim storage."""
         ts = self.clock() if now is None else _timestamp(now)
         days = max(1, int(retention_days))
         limit = max(1, int(batch_size))
         batches = max(1, int(max_batches))
+        keep_maps = max(1, int(max_map_versions))
         cutoff = ts - days * 86400.0
         cutoff_hour = int(cutoff // 3600)
         deleted = {
@@ -3300,12 +3422,27 @@ class NarrativeEngine(
             "budgets": 0,
             "validation_failures": 0,
             "intents": 0,
+            "diary": 0,
+            "world_map_versions": 0,
+            "world_scene_events": 0,
+            "world_life_receipts": 0,
+            "world_resident_evaluations": 0,
+            "world_map_events": 0,
         }
-        statements = (
+        with self._db(notify=False) as db:
+            existing_tables = {
+                row[0]
+                for row in db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+        statements = [
             (
                 "events",
                 "DELETE FROM events WHERE rowid IN ("
-                "SELECT rowid FROM events WHERE status!='pending' AND created<? AND occurred<? LIMIT ?)",
+                "SELECT rowid FROM events "
+                "WHERE status IN ('processed','observed_only','historical_only','failed','blocked_policy') "
+                "AND created<? AND occurred<? LIMIT ?)",
                 (cutoff, cutoff, limit),
             ),
             (
@@ -3329,10 +3466,48 @@ class NarrativeEngine(
             (
                 "intents",
                 "DELETE FROM intents WHERE rowid IN ("
-                "SELECT rowid FROM intents WHERE status NOT IN ('pending','claimed') AND updated<? AND expires<? LIMIT ?)",
+                "SELECT rowid FROM intents "
+                "WHERE status IN ('sent','cancelled','expired','uncertain','failed') "
+                "AND updated<? AND expires<? LIMIT ?)",
                 (cutoff, cutoff, limit),
             ),
+            (
+                "diary",
+                "DELETE FROM diary WHERE rowid IN ("
+                "SELECT rowid FROM diary WHERE occurred<? LIMIT ?)",
+                (cutoff, limit),
+            ),
+        ]
+        optional_statements = (
+            (
+                "world_scene_events",
+                "DELETE FROM world_scene_events WHERE rowid IN ("
+                "SELECT rowid FROM world_scene_events WHERE occurred<? LIMIT ?)",
+                (cutoff, limit),
+            ),
+            (
+                "world_life_receipts",
+                "DELETE FROM world_life_receipts WHERE rowid IN ("
+                "SELECT rowid FROM world_life_receipts WHERE occurred<? LIMIT ?)",
+                (cutoff, limit),
+            ),
+            (
+                "world_resident_evaluations",
+                "DELETE FROM world_resident_evaluations WHERE rowid IN ("
+                "SELECT rowid FROM world_resident_evaluations WHERE started<? LIMIT ?)",
+                (cutoff, limit),
+            ),
+            (
+                "world_map_events",
+                "DELETE FROM world_map_events WHERE rowid IN ("
+                "SELECT rowid FROM world_map_events WHERE occurred<? LIMIT ?)",
+                (cutoff, limit),
+            ),
         )
+        for table, sql, params in optional_statements:
+            if table in existing_tables:
+                statements.append((table, sql, params))
+
         for table, sql, params in statements:
             for _ in range(batches):
                 with self._db(notify=False) as db:
@@ -3341,26 +3516,118 @@ class NarrativeEngine(
                 deleted[table] += count
                 if count < limit:
                     break
+
+        if "validation_failure_events" in existing_tables:
+            for _ in range(batches):
+                with self._db(notify=False) as db:
+                    cur = db.execute(
+                        "DELETE FROM validation_failure_events WHERE rowid IN ("
+                        "SELECT rowid FROM validation_failure_events WHERE occurred<? LIMIT ?)",
+                        (cutoff, limit),
+                    )
+                    count = max(0, int(cur.rowcount or 0))
+                if count < limit:
+                    break
+
+        if "world_map_versions" in existing_tables:
+            with self._db(notify=False) as db:
+                identities = [
+                    r[0]
+                    for r in db.execute(
+                        "SELECT DISTINCT identity FROM world_map_versions"
+                    ).fetchall()
+                ]
+            for ident in identities:
+                with self._db(notify=False) as db:
+                    cur_cap = db.execute(
+                        "DELETE FROM world_map_versions WHERE identity=? AND revision NOT IN ("
+                        "SELECT revision FROM world_map_versions WHERE identity=? ORDER BY revision DESC LIMIT ?)",
+                        (ident, ident, keep_maps),
+                    )
+                    deleted["world_map_versions"] += max(0, int(cur_cap.rowcount or 0))
+                    latest = db.execute(
+                        "SELECT MAX(revision) FROM world_map_versions WHERE identity=?",
+                        (ident,),
+                    ).fetchone()
+                    latest_rev = int(latest[0]) if latest and latest[0] is not None else None
+                    if latest_rev is not None:
+                        cur_ttl = db.execute(
+                            "DELETE FROM world_map_versions WHERE identity=? AND revision<? AND created<?",
+                            (ident, latest_rev, cutoff),
+                        )
+                        deleted["world_map_versions"] += max(0, int(cur_ttl.rowcount or 0))
+
+        backups_deleted = self._prune_migration_backups(keep_latest=max_backups)
         total_deleted = sum(deleted.values())
         vacuumed = False
-        if total_deleted > 0 and vacuum_pages > 0:
-            conn = None
-            try:
-                conn = sqlite3.connect(self.path, timeout=5, isolation_level=None)
-                conn.execute("PRAGMA busy_timeout=5000")
-                conn.execute(f"PRAGMA incremental_vacuum({int(vacuum_pages)})")
-                vacuumed = True
-            except sqlite3.Error as exc:
-                logger.debug(
-                    "[DynamicsWorld] incremental_vacuum skipped: %s", exc
-                )
-            finally:
-                if conn is not None:
-                    conn.close()
+        auto_vacuum_mode = 0
+        auto_vacuum_needed = False
+        auto_vacuum_converted = False
+        freelist_bytes = 0
+        conn = None
+        try:
+            conn = sqlite3.connect(self.path, timeout=5, isolation_level=None)
+            conn.execute("PRAGMA busy_timeout=5000")
+            auto_vacuum_mode = int(
+                (conn.execute("PRAGMA auto_vacuum").fetchone() or [0])[0]
+            )
+            page_size = int((conn.execute("PRAGMA page_size").fetchone() or [4096])[0])
+            freelist_count = int(
+                (conn.execute("PRAGMA freelist_count").fetchone() or [0])[0]
+            )
+            freelist_bytes = freelist_count * page_size
+            if auto_vacuum_mode == 2:
+                if (total_deleted > 0 or freelist_count > 0) and vacuum_pages > 0:
+                    conn.execute(f"PRAGMA incremental_vacuum({int(vacuum_pages)})")
+                    vacuumed = True
+            elif auto_vacuum_mode == 0:
+                threshold = max(0, int(auto_vacuum_threshold_bytes))
+                if allow_auto_vacuum_conversion or (
+                    threshold > 0 and freelist_bytes >= threshold
+                ):
+                    conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
+                    conn.execute("VACUUM")
+                    conn.execute("PRAGMA journal_mode=WAL")
+                    auto_vacuum_mode = int(
+                        (conn.execute("PRAGMA auto_vacuum").fetchone() or [0])[0]
+                    )
+                    freelist_count = int(
+                        (conn.execute("PRAGMA freelist_count").fetchone() or [0])[0]
+                    )
+                    freelist_bytes = freelist_count * page_size
+                    auto_vacuum_converted = auto_vacuum_mode == 2
+                    vacuumed = auto_vacuum_converted
+                    logger.info(
+                        "[DynamicsWorld] auto-converted legacy narrative DB %s to auto_vacuum=INCREMENTAL during prune",
+                        self.path,
+                    )
+                else:
+                    auto_vacuum_needed = True
+                    if total_deleted > 0 or freelist_count > 0:
+                        logger.warning(
+                            "[DynamicsWorld] narrative DB %s has auto_vacuum=NONE (freelist=%.2f MiB); "
+                            "skipped no-op incremental_vacuum. Run enable_incremental_vacuum(force=True) "
+                            "or wait until freelist reaches %.2f MiB.",
+                            self.path,
+                            freelist_bytes / (1024 * 1024),
+                            threshold / (1024 * 1024),
+                        )
+        except sqlite3.Error as exc:
+            logger.warning(
+                "[DynamicsWorld] vacuum maintenance skipped: %s", exc
+            )
+        finally:
+            if conn is not None:
+                conn.close()
         return {
             **deleted,
+            "backups_deleted": backups_deleted,
             "total_deleted": total_deleted,
             "vacuumed": vacuumed,
+            "auto_vacuum": auto_vacuum_mode,
+            "auto_vacuum_needed": auto_vacuum_needed,
+            "auto_vacuum_converted": auto_vacuum_converted,
+            "freelist_bytes": freelist_bytes,
             "retention_days": days,
         }
 

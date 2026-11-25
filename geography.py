@@ -113,10 +113,7 @@ def switch_mode(spatial, scope, mode, expected_revision, document=None):
             "INSERT INTO world_maps VALUES(?,?,?,?) ON CONFLICT(identity) DO UPDATE SET revision=excluded.revision,document=excluded.document,created=excluded.created",
             (key, doc["revision"], encode(doc), now),
         )
-        db.execute(
-            "INSERT INTO world_map_versions VALUES(?,?,?,?)",
-            (key, doc["revision"], encode(doc), now),
-        )
+        spatial.record_map_version(db, key, doc, now, old_doc=old)
         spatial._save(db, key, position, position_revision + 1)
         if spatial.engine.scenes is not None:
             spatial.engine.scenes.pause(

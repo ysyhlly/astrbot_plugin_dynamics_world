@@ -50,6 +50,8 @@ class CausalLifeService(BackgroundResidentsMixin):
                 db.execute("DROP TABLE world_life_receipts_legacy")
             db.execute("""CREATE INDEX IF NOT EXISTS world_life_receipt_scope
                 ON world_life_receipts(identity, occurred)""")
+            db.execute("""CREATE INDEX IF NOT EXISTS world_life_receipts_occurred
+                ON world_life_receipts(occurred)""")
             db.execute("""CREATE TABLE IF NOT EXISTS world_life_requests(
                 identity TEXT NOT NULL, request_id TEXT NOT NULL, digest TEXT NOT NULL,
                 result TEXT NOT NULL, PRIMARY KEY(identity,request_id))""")

@@ -28,6 +28,44 @@ def encode(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
 
 
+MAX_MAP_VERSIONS = 5
+
+
+def _map_content_digest(doc: dict) -> str:
+    """Stable content hash for map version deduplication (excludes revision/world_id)."""
+    payload = {
+        k: v
+        for k, v in doc.items()
+        if k not in {"revision", "world_id", "_content_sha256", "image_ref_sha256", "graph_ref_sha256"}
+    }
+    raw = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _compact_map_version_doc(doc: dict, old_doc: dict | None, content_sha256: str) -> dict:
+    """Avoid duplicating unchanged multi-MB image/graph blobs in world_map_versions."""
+    compact = dict(doc)
+    compact["_content_sha256"] = content_sha256
+    if isinstance(old_doc, dict):
+        img = doc.get("image")
+        if isinstance(img, str) and img and img == old_doc.get("image"):
+            compact["image"] = ""
+            compact["image_ref_sha256"] = hashlib.sha256(img.encode("utf-8")).hexdigest()
+        graph = doc.get("graph")
+        if graph is not None and graph == old_doc.get("graph"):
+            compact.pop("graph", None)
+            compact["graph_ref_sha256"] = hashlib.sha256(
+                encode(graph).encode("utf-8")
+            ).hexdigest()
+    return compact
+
+
 def place_id(name):
     return "place_" + hashlib.sha256(name.strip().encode()).hexdigest()[:16]
 
@@ -63,8 +101,11 @@ class SpatialState:
             db.executescript("""
               CREATE TABLE IF NOT EXISTS world_maps(identity TEXT PRIMARY KEY,revision INTEGER NOT NULL,document TEXT NOT NULL,created REAL NOT NULL);
               CREATE TABLE IF NOT EXISTS world_map_versions(identity TEXT NOT NULL,revision INTEGER NOT NULL,document TEXT NOT NULL,created REAL NOT NULL,PRIMARY KEY(identity,revision));
+              CREATE INDEX IF NOT EXISTS world_map_versions_created ON world_map_versions(created);
               CREATE TABLE IF NOT EXISTS world_positions(identity TEXT PRIMARY KEY,revision INTEGER NOT NULL,state TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS world_map_events(id TEXT PRIMARY KEY,identity TEXT NOT NULL,kind TEXT NOT NULL,payload TEXT NOT NULL,occurred REAL NOT NULL);
+              CREATE INDEX IF NOT EXISTS world_map_events_scope ON world_map_events(identity,occurred);
+              CREATE INDEX IF NOT EXISTS world_map_events_occurred ON world_map_events(occurred);
               CREATE TABLE IF NOT EXISTS world_mode_saves(identity TEXT NOT NULL,mode TEXT NOT NULL,document TEXT NOT NULL,position TEXT NOT NULL,suspended REAL NOT NULL,PRIMARY KEY(identity,mode));
             """)
 
@@ -112,6 +153,47 @@ class SpatialState:
             (uuid.uuid4().hex, key, kind, encode(payload), now),
         )
 
+    def record_map_version(
+        self,
+        db,
+        map_owner: str,
+        doc: dict,
+        now: float,
+        *,
+        old_doc: dict | None = None,
+        max_versions: int = MAX_MAP_VERSIONS,
+    ) -> bool:
+        """Archive a deduplicated, blob-compacted map version and enforce retention cap."""
+        digest = _map_content_digest(doc)
+        prev = db.execute(
+            "SELECT revision, document FROM world_map_versions "
+            "WHERE identity=? ORDER BY revision DESC LIMIT 1",
+            (map_owner,),
+        ).fetchone()
+        if prev is not None:
+            try:
+                prev_doc = json.loads(prev["document"])
+            except Exception:
+                prev_doc = None
+            if isinstance(prev_doc, dict):
+                prev_digest = prev_doc.get("_content_sha256")
+                if not isinstance(prev_digest, str) or not prev_digest:
+                    prev_digest = _map_content_digest(prev_doc)
+                if prev_digest == digest:
+                    return False
+        stored_doc = _compact_map_version_doc(doc, old_doc, digest)
+        db.execute(
+            "INSERT INTO world_map_versions VALUES(?,?,?,?)",
+            (map_owner, int(doc["revision"]), encode(stored_doc), now),
+        )
+        keep = max(1, int(max_versions))
+        db.execute(
+            "DELETE FROM world_map_versions WHERE identity=? AND revision NOT IN ("
+            "SELECT revision FROM world_map_versions WHERE identity=? ORDER BY revision DESC LIMIT ?)",
+            (map_owner, map_owner, keep),
+        )
+        return True
+
     def install(
         self, scope, document, expected_revision=0, *, audit_kind="map.generated"
     ):
@@ -140,10 +222,7 @@ class SpatialState:
                 "INSERT INTO world_maps VALUES(?,?,?,?) ON CONFLICT(identity) DO UPDATE SET revision=excluded.revision,document=excluded.document,created=excluded.created",
                 (map_owner, revision + 1, encode(doc), now),
             )
-            db.execute(
-                "INSERT INTO world_map_versions VALUES(?,?,?,?)",
-                (map_owner, revision + 1, encode(doc), now),
-            )
+            self.record_map_version(db, map_owner, doc, now, old_doc=old)
             if position.get("place_id") not in {p["id"] for p in doc["places"]}:
                 position["place_id"] = None
             position.update(journey=None, plan=None)

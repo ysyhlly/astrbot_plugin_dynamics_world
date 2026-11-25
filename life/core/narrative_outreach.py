@@ -861,14 +861,8 @@ class NarrativeOutreachMixin:
             ):
                 return False, 0
             for code in rejected:
-                db.execute(
-                    "INSERT INTO validation_failures VALUES(?,?,?,?)",
-                    (
-                        str(uuid.uuid4()),
-                        _json(list(sources)),
-                        "outreach." + str(code)[:80],
-                        now,
-                    ),
+                self._insert_validation_failure(
+                    db, list(sources), "outreach." + str(code)[:80], now
                 )
             for item in intents:
                 if not self._care_current(db, item):
@@ -921,14 +915,8 @@ class NarrativeOutreachMixin:
         self, sources: dict, error: str, now: float
     ) -> None:
         with self._db() as db:
-            db.execute(
-                "INSERT INTO validation_failures VALUES(?,?,?,?)",
-                (
-                    str(uuid.uuid4()),
-                    _json(list(sources)),
-                    "outreach." + str(error)[:80],
-                    now,
-                ),
+            self._insert_validation_failure(
+                db, list(sources), "outreach." + str(error)[:80], now
             )
 
     def _outreach_finalize_sync(

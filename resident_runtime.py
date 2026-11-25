@@ -208,6 +208,7 @@ class ResidentRunner:
                 call_id TEXT PRIMARY KEY, identity TEXT NOT NULL, actor_id TEXT NOT NULL,
                 started REAL NOT NULL, status TEXT NOT NULL, evidence TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS world_resident_evaluated ON world_resident_evaluations(identity,started);
+                CREATE INDEX IF NOT EXISTS world_resident_evaluations_started ON world_resident_evaluations(started);
             """)
 
     def enabled(self):
