@@ -1,5 +1,12 @@
 # 更新日志
 
+## v0.23.0-rc.10 — 2026-11-25
+
+- 安全加固（Batch 1）：世界模块 Web API 全面强制 `require_series_admin` 与 CSRF 校验。
+- 数据与存储修复（Batch 2）：消除 `narrative` 事务自死锁并治理存储膨胀。
+- 性能与渲染优化（Batch 3）：修复明信片资源泄漏、修正前缀缓存哈希与预算语义，降低 3D 场景阴影渲染开销。
+- 工程与发布治理（Batch 4）：收紧发布打包过滤、解除 CI 版本钉死、统一时区与别名配置并同步系列共享资产。
+
 ## v0.23.0-rc.9 — 2026-11-24
 
 - 彻底消除主事件循环同步阻塞：`weather.py`、`resident_runtime.py`、`narrative.py` 管理接口与 `web_api.py` 全部下沉 `asyncio.to_thread`，`narrative_outreach` 改用轻量 `_outreach_snapshot`，`VisualProfiles.assets()` 按 `(mtime_ns, size)` 缓存。
