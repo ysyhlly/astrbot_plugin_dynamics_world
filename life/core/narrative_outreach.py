@@ -19,6 +19,7 @@ if __package__:
         _json,
         _text,
         _timestamp,
+        is_budget_busy_error,
         normalize_scope,
     )
 else:
@@ -38,6 +39,7 @@ else:
     _json = _types_mod._json
     _text = _types_mod._text
     _timestamp = _types_mod._timestamp
+    is_budget_busy_error = _types_mod.is_budget_busy_error
     normalize_scope = _types_mod.normalize_scope
 
     def is_series_in_quiet_hours(context) -> bool:
@@ -109,9 +111,15 @@ class NarrativeOutreachMixin:
         if scope:
             scope = normalize_scope(scope)
             key += ":" + _identity(scope) + ":" + scope["umo"]
-        with self._db() as db:
-            db.execute("INSERT INTO metadata VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                       (key, "true" if paused else "false"))
+
+        def _persist_pause():
+            with self._db() as db:
+                db.execute(
+                    "INSERT INTO metadata VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (key, "true" if paused else "false"),
+                )
+
+        await asyncio.to_thread(_persist_pause)
         return {"schema_version": 1, "outreach_paused": bool(paused)}
 
     @staticmethod
@@ -841,6 +849,51 @@ class NarrativeOutreachMixin:
                 "recent_intents": recent_intents,
             }
 
+    def _outreach_validate_and_commit_sync(
+        self,
+        raw: dict,
+        scope: dict,
+        identity: str,
+        umo: str,
+        sources: dict,
+        now: float,
+    ) -> tuple[bool, int, list[str], str]:
+        """Validate outreach candidates and commit intents off the asyncio event loop."""
+        intents: list[dict] = []
+        rejected: list[str] = []
+        for field, validator in (
+            ("care_waits", self._care_wait),
+            ("chat_openers", self._social_chat),
+        ):
+            values = raw.get(field, [])
+            if not isinstance(values, list) or len(values) > 2:
+                rejected.append("outreach_candidate_limit")
+                continue
+            for value in values:
+                try:
+                    if not isinstance(value, dict):
+                        raise NarrativeValidationError(
+                            "outreach_candidate_shape", "Candidate must be an object"
+                        )
+                    intents.append(validator(value, scope, sources, now))
+                except (ValueError, TypeError, AttributeError) as exc:
+                    rejected.append(getattr(exc, "code", type(exc).__name__))
+        if raw.get("no_change") is True and intents:
+            raise NarrativeValidationError(
+                "outreach_no_change_conflict", "no_change cannot create intents"
+            )
+        next_status = ("partial" if intents else "invalid") if rejected else "ok"
+        committed, added = self._outreach_commit_intents_sync(
+            scope,
+            identity,
+            umo,
+            intents,
+            rejected,
+            sources,
+            now,
+        )
+        return committed, added, rejected, next_status
+
     def _outreach_commit_intents_sync(
         self,
         scope: dict,
@@ -1051,6 +1104,7 @@ class NarrativeOutreachMixin:
                 status = "ok"
                 added = 0
                 rejected = []
+                busy_retry_delay: float | None = None
                 sources = {e["event_id"]: e for e in events}
                 try:
                     raw = await asyncio.wait_for(
@@ -1069,35 +1123,12 @@ class NarrativeOutreachMixin:
                         raise NarrativeValidationError(
                             "outreach_effects_only", "Unexpected outreach effects"
                         )
-                    intents = []
-                    for field, validator in (
-                        ("care_waits", self._care_wait),
-                        ("chat_openers", self._social_chat),
-                    ):
-                        values = raw.get(field, [])
-                        if not isinstance(values, list) or len(values) > 2:
-                            rejected.append("outreach_candidate_limit")
-                            continue
-                        for value in values:
-                            try:
-                                if not isinstance(value,dict):
-                                    raise NarrativeValidationError("outreach_candidate_shape","Candidate must be an object")
-                                intents.append(validator(value, scope, sources, now))
-                            except (ValueError,TypeError,AttributeError) as exc:
-                                rejected.append(getattr(exc,"code",type(exc).__name__))
-                    if raw.get("no_change") is True and intents:
-                        raise NarrativeValidationError(
-                            "outreach_no_change_conflict", "no_change cannot create intents"
-                        )
-                    if rejected:
-                        status = "partial" if intents else "invalid"
-                    committed, added = await asyncio.to_thread(
-                        self._outreach_commit_intents_sync,
+                    committed, added, rejected, status = await asyncio.to_thread(
+                        self._outreach_validate_and_commit_sync,
+                        raw,
                         scope,
                         identity,
                         umo,
-                        intents,
-                        rejected,
                         sources,
                         now,
                     )
@@ -1106,26 +1137,44 @@ class NarrativeOutreachMixin:
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
-                    status = "timeout" if isinstance(exc, TimeoutError) else "invalid"
-                    if self._is_policy_refusal(exc):
-                        status = "policy_refusal"
-                    error = getattr(exc, "code", type(exc).__name__)
-                    await asyncio.to_thread(
-                        self._outreach_record_failure_sync, sources, str(error), now
+                    if is_budget_busy_error(exc):
+                        status = "budget_busy"
+                        retry_after = float(getattr(exc, "retry_after", 30.0) or 30.0)
+                        busy_retry_delay = min(120.0, max(15.0, retry_after))
+
+                        def _refund_outreach_budget():
+                            with self._db() as db:
+                                self._refund_budget(
+                                    db, identity, "outreach", now, umo=umo
+                                )
+
+                        await asyncio.to_thread(_refund_outreach_budget)
+                    else:
+                        status = "timeout" if isinstance(exc, TimeoutError) else "invalid"
+                        if self._is_policy_refusal(exc):
+                            status = "policy_refusal"
+                        error = getattr(exc, "code", type(exc).__name__)
+                        await asyncio.to_thread(
+                            self._outreach_record_failure_sync, sources, str(error), now
+                        )
+                if status == "budget_busy":
+                    next_no_change_streak = int(marker.get("no_change_streak", 0))
+                    next_at = now + (busy_retry_delay or 30.0)
+                else:
+                    next_no_change_streak = (
+                        (
+                            int(marker.get("no_change_streak", 0)) + 1
+                            if marker.get("fingerprint") == fingerprint
+                            and marker.get("status") == "ok"
+                            else 1
+                        )
+                        if status in {"ok", "partial"} and added == 0
+                        else 0
                     )
-                next_no_change_streak = (
-                    (
-                        int(marker.get("no_change_streak", 0)) + 1
-                        if marker.get("fingerprint") == fingerprint
-                        and marker.get("status") == "ok"
-                        else 1
-                    )
-                    if status in {"ok", "partial"} and added == 0
-                    else 0
-                )
+                    next_at = now + (300 if status in {"ok", "partial"} else 900)
                 marker_payload = {
                     "last_at": now,
-                    "next_at": now + (300 if status in {"ok", "partial"} else 900),
+                    "next_at": next_at,
                     "fingerprint": fingerprint,
                     "status": "ok" if status == "partial" else status,
                     "candidates": added,

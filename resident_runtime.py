@@ -12,6 +12,7 @@ import time
 import uuid
 from datetime import datetime
 
+from .life.core.narrative_types import is_budget_busy_error
 from .series_panels import resolve_series_timezone
 from .spatial import encode, identity
 
@@ -618,22 +619,37 @@ class ResidentRunner:
                 reason = "推演取消，未提交行动"
                 raise
             except Exception as exc:
-                status = (
-                    "timeout"
-                    if isinstance(exc, TimeoutError)
-                    else "policy_refusal"
-                    if engine._is_policy_refusal(exc)
-                    else "invalid"
-                )
-                reason = (
-                    str(exc)[:180]
-                    if isinstance(exc, ValueError)
-                    else type(exc).__name__
-                )
+                if is_budget_busy_error(exc):
+                    status = "budget_busy"
+                    reason = f"provider_budget_busy:{getattr(exc, 'reason', 'busy')}"
+                else:
+                    status = (
+                        "timeout"
+                        if isinstance(exc, TimeoutError)
+                        else "policy_refusal"
+                        if engine._is_policy_refusal(exc)
+                        else "invalid"
+                    )
+                    reason = (
+                        str(exc)[:180]
+                        if isinstance(exc, ValueError)
+                        else type(exc).__name__
+                    )
             finally:
                 def _finalize_tick_sync():
                     with engine._db() as db:
-                        if status not in {"advanced", "no_change"}:
+                        if status == "budget_busy":
+                            evidence.update(error=reason)
+                            db.execute(
+                                "UPDATE world_resident_evaluations SET status=?,evidence=? WHERE call_id=?",
+                                (status, encode(evidence), cid),
+                            )
+                            db.execute(
+                                "UPDATE budgets SET used = MAX(0, used - 1) "
+                                "WHERE identity=? AND hour=? AND kind=?",
+                                (identity(scope), int(now // 3600), "resident_global"),
+                            )
+                        elif status not in {"advanced", "no_change"}:
                             evidence.update(error=reason)
                             db.execute(
                                 "UPDATE world_resident_evaluations SET status=?,evidence=? WHERE call_id=?",
@@ -647,7 +663,9 @@ class ResidentRunner:
                                     last_reason="评估未提交：" + reason,
                                 )
                                 causal.save(db, scope, rev, doc, bump=False)
-                    engine._call(cid, identity(scope), "", now, started, status, "resident")
+                        engine._call(
+                            cid, identity(scope), "", now, started, status, "resident", db=db
+                        )
 
                 await asyncio.shield(asyncio.to_thread(_finalize_tick_sync))
             return {

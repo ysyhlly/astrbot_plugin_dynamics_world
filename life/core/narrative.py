@@ -46,6 +46,7 @@ if __package__:
         _json,
         _text,
         _timestamp,
+        is_budget_busy_error,
         normalize_scope,
     )
     from .narrative_validation import NarrativeValidationMixin
@@ -82,6 +83,7 @@ else:
     _json = _types_mod._json
     _text = _types_mod._text
     _timestamp = _types_mod._timestamp
+    is_budget_busy_error = _types_mod.is_budget_busy_error
     normalize_scope = _types_mod.normalize_scope
     _identity = _types_mod._identity
 
@@ -1441,6 +1443,26 @@ class NarrativeEngine(
         except (TypeError, ValueError):
             return 6
 
+    @staticmethod
+    def _budget_bucket_kind(kind: str, umo: str = "") -> str:
+        if kind == "extra" and umo:
+            return "extra:" + hashlib.sha256(umo.encode()).hexdigest()[:16]
+        if kind == "outreach" and umo:
+            return "outreach:" + hashlib.sha256(umo.encode()).hexdigest()[:16]
+        return kind
+
+    def _refund_budget(
+        self, db, identity: str, kind: str, now: float, *, umo: str = ""
+    ) -> None:
+        """Refund a pre-reserved hourly budget slot when deferred by ProviderBudgetBusy."""
+        hour = int(now // 3600)
+        bucket = self._budget_bucket_kind(kind, umo)
+        db.execute(
+            "UPDATE budgets SET used = MAX(0, used - 1) "
+            "WHERE identity=? AND hour=? AND kind=?",
+            (identity, hour, bucket),
+        )
+
     def _reserve(
         self, db, identity: str, kind: str, now: float, *, umo: str = ""
     ) -> bool:
@@ -1453,12 +1475,8 @@ class NarrativeEngine(
             maximum = self._outreach_hourly_budget_cap()
         else:
             maximum = 6
-        if kind == "extra" and umo:
-            # Separate conversation queues must not consume each other's six
-            # inference slots. Global life/weather retain their original budgets.
-            kind = "extra:" + hashlib.sha256(umo.encode()).hexdigest()[:16]
-        elif kind == "outreach" and umo:
-            kind = "outreach:" + hashlib.sha256(umo.encode()).hexdigest()[:16]
+        # Separate conversation queues must not consume each other's inference slots.
+        kind = self._budget_bucket_kind(kind, umo)
         row = db.execute(
             "SELECT used FROM budgets WHERE identity=? AND hour=? AND kind=?",
             (identity, hour, kind),
@@ -2029,10 +2047,19 @@ class NarrativeEngine(
                 raw = await asyncio.wait_for(
                     self.model(copy.deepcopy(request)), timeout
                 )
-                change = self._validate_change(raw, request)
+                change = await asyncio.to_thread(self._validate_change, raw, request)
             except asyncio.CancelledError:
-                self._call(
-                    call_id, identity, scope["umo"], now, started, "cancelled", kind
+                await asyncio.shield(
+                    asyncio.to_thread(
+                        self._call,
+                        call_id,
+                        identity,
+                        scope["umo"],
+                        now,
+                        started,
+                        "cancelled",
+                        kind,
+                    )
                 )
                 raise
             except Exception as exc:
@@ -2051,6 +2078,35 @@ class NarrativeEngine(
                     return self._result(
                         "policy_refusal", await self.get_snapshot(scope)
                     )
+                if is_budget_busy_error(exc):
+                    retry_after = float(getattr(exc, "retry_after", 30.0) or 30.0)
+                    retry_delay = min(60.0, max(5.0, retry_after))
+
+                    def _defer_budget_busy_sync():
+                        retry_at = self.clock() + retry_delay
+                        with self._db() as db:
+                            self._refund_budget(
+                                db, identity, kind, now, umo=scope["umo"]
+                            )
+                            self._call(
+                                call_id,
+                                identity,
+                                scope["umo"],
+                                now,
+                                started,
+                                "budget_busy",
+                                kind,
+                                db=db,
+                            )
+                            for event in pending:
+                                db.execute(
+                                    "UPDATE events SET next_retry=MAX(next_retry, ?) "
+                                    "WHERE event_id=? AND status='pending'",
+                                    (retry_at, event["event_id"]),
+                                )
+
+                    await asyncio.to_thread(_defer_budget_busy_sync)
+                    return self._result("budget_busy", await self.get_snapshot(scope))
                 requested_status = getattr(exc, "status_code", "")
                 status = (
                     requested_status
@@ -3134,6 +3190,26 @@ class NarrativeEngine(
                             "status": "policy_refusal",
                             "error": "policy_refusal",
                             "message": "模型拒绝了本次日程生成请求，请稍后重试。",
+                            "plan_status": plan_st,
+                        }
+                    if is_budget_busy_error(exc):
+                        def _record_busy():
+                            with self._db() as db:
+                                self._call(
+                                    call_id, identity, "", now, started, "budget_busy", kind, db=db
+                                )
+                                db.execute(
+                                    "UPDATE events SET status='failed',error='budget_busy' WHERE event_id=?",
+                                    (event_id,),
+                                )
+                            return self.get_plan_status(global_scope, generating=False)
+
+                        plan_st = await asyncio.to_thread(_record_busy)
+                        return {
+                            "schema_version": 1,
+                            "status": "budget_busy",
+                            "error": "budget_busy",
+                            "message": "共享模型预算正忙，请稍后重试。",
                             "plan_status": plan_st,
                         }
                     requested_status = getattr(exc, "status_code", "")

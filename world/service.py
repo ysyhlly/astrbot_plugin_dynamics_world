@@ -2,6 +2,7 @@
 # Refresh owned dependencies before importing them during a scoped hot reload.
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -136,6 +137,55 @@ class WorldService:
         self.settings = Settings(config)
         self.store = WorldBookStore(str(data_dir / "worldbook_store.json"))
         self.web = WorldBookWebAPI(self)
+        self._match_flush_task: asyncio.Task | None = None
+
+    def _schedule_match_flush(self) -> None:
+        """Coalesce deferred record_match writes onto a background worker thread."""
+        if not getattr(self.store, "_dirty", False):
+            return
+        task = self._match_flush_task
+        if task is not None and not task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self.store.flush_debounced(force=False)
+            return
+
+        async def _flush_loop() -> None:
+            try:
+                while getattr(self.store, "_dirty", False):
+                    delay = self.store.seconds_until_flush()
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    if not getattr(self.store, "_dirty", False):
+                        break
+                    await asyncio.to_thread(self.store.flush_debounced, force=False)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("worldbook deferred flush failed: %s", exc)
+            finally:
+                if self._match_flush_task is asyncio.current_task():
+                    self._match_flush_task = None
+
+        self._match_flush_task = loop.create_task(_flush_loop())
+
+    async def flush_pending_writes(self) -> None:
+        """Cancel pending debounce timer and persist any dirty state off the event loop."""
+        task = self._match_flush_task
+        self._match_flush_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        if getattr(self.store, "_dirty", False):
+            try:
+                await asyncio.to_thread(self.store.flush_debounced, force=True)
+            except Exception as exc:
+                logger.warning("worldbook shutdown flush failed: %s", exc)
 
     async def initialize(self):
         # A new world starts empty; importing a character is always deliberate.
@@ -241,6 +291,7 @@ class WorldService:
 
     async def terminate(self):
         try:
+            await self.flush_pending_writes()
             self.store.save()
         except Exception as e:
             logger.warning("worldbook terminate save failed: %s", e)
@@ -1352,6 +1403,8 @@ class WorldService:
             max_entries=self.settings.max_entries,
             allow_auto_scenario=self.settings.auto_scenario,
             dedupe_same_content=self.settings.dedupe_same_content,
+            max_constant_entries=self.settings.max_constant_entries,
+            max_total_chars=self.settings.max_inject_chars,
         )
         scenario = state.scenario.strip() or matches.auto_scenario
         source_ids = [f"worldbook:card:{card.id}"]
@@ -1596,6 +1649,8 @@ class WorldService:
                     max_entries=self.max_entries,
                     allow_auto_scenario=self.auto_scenario,
                     dedupe_same_content=cfg_style.dedupe_same_content,
+                    max_constant_entries=cfg_style.max_constant_entries,
+                    max_total_chars=cfg_style.max_inject_chars,
                 )
                 if self.auto_scenario:
                     auto_scenario = result.auto_scenario
@@ -1608,13 +1663,15 @@ class WorldService:
                     matched_uids = [m.entry.uid for m in result.matched]
 
             if wb_block or matched_uids or auto_scenario != state.scenario_auto:
-                # 内容没有变化时 store.record_match 不会写盘
+                # 仅在内存更新状态并由后台线程防抖落盘，避免在事件循环同步 json.dump + fsync
                 self.store.record_match(
                     sid,
                     matched_uids,
                     wb_block or card_block,
                     scenario_auto=auto_scenario,
+                    persist_now=False,
                 )
+                self._schedule_match_flush()
 
             if not card_block and not wb_block:
                 return

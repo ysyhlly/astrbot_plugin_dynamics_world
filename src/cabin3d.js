@@ -394,6 +394,31 @@ export function createCabin3D(host, {onSelect, onHover = () => {}, onInspect = n
     resize(); render();
   }
 
+  let shadowDirty = true;
+  const lastShadowSnap = {ax: NaN, az: NaN, cx: NaN, cz: NaN, door: NaN, sx: NaN, sy: NaN, sz: NaN};
+  function markShadowDirty() {shadowDirty = true;}
+  function syncShadowDirty() {
+    const ap = avatar.placement?.()?.position;
+    const ax = ap ? ap[0] : NaN, az = ap ? ap[2] : NaN;
+    const cx = world.cat.position.x, cz = world.cat.position.z;
+    const door = world.frontDoorPivot.rotation.y;
+    const sx = sun.position.x, sy = sun.position.y, sz = sun.position.z;
+    const moved = (a, b) => (Number.isFinite(a) !== Number.isFinite(b)) || (Number.isFinite(a) && Math.abs(a - b) > 0.002);
+    if (
+      moved(ax, lastShadowSnap.ax) || moved(az, lastShadowSnap.az)
+      || moved(cx, lastShadowSnap.cx) || moved(cz, lastShadowSnap.cz)
+      || moved(door, lastShadowSnap.door)
+      || moved(sx, lastShadowSnap.sx) || moved(sy, lastShadowSnap.sy) || moved(sz, lastShadowSnap.sz)
+    ) {
+      lastShadowSnap.ax = ax; lastShadowSnap.az = az;
+      lastShadowSnap.cx = cx; lastShadowSnap.cz = cz;
+      lastShadowSnap.door = door;
+      lastShadowSnap.sx = sx; lastShadowSnap.sy = sy; lastShadowSnap.sz = sz;
+      shadowDirty = true;
+    }
+    return shadowDirty;
+  }
+
   function ambientTick(now) {
     ambientFrame = 0;
     if (disposed || !active || !onScreen || document.hidden) return;
@@ -415,7 +440,11 @@ export function createCabin3D(host, {onSelect, onHover = () => {}, onInspect = n
         cam.updateCozyCam(now / 1000, dt, avatar.placement(), world.cat.position);
       }
       updateParticles(now, dt);
-      if (now - shadowAt >= 110) {shadowAt = now; sun.shadow.needsUpdate = true;}
+      if (syncShadowDirty() && now - shadowAt >= 110) {
+        shadowAt = now;
+        shadowDirty = false;
+        sun.shadow.needsUpdate = true;
+      }
       adaptQuality(late);
       render();
     }
@@ -443,6 +472,12 @@ export function createCabin3D(host, {onSelect, onHover = () => {}, onInspect = n
   let multi = false, origin = null;
   const hitTargets = [world.walls];
   for (const prop of world.props.values()) hitTargets.push(prop.group);
+  const pickTargets = [
+    ...hitTargets,
+    world.bed, world.desk, world.chair, world.shelf, world.kitchen, world.washstand, world.cat,
+  ].filter(Boolean);
+  const floorPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+  const floorHitPoint = new THREE.Vector3();
 
   function resize() {
     const width = host.clientWidth, height = host.clientHeight;
@@ -463,14 +498,15 @@ export function createCabin3D(host, {onSelect, onHover = () => {}, onInspect = n
     pointer.set((event.clientX - rect.left) / rect.width * 2 - 1, -(event.clientY - rect.top) / rect.height * 2 + 1);
     scene.updateMatrixWorld();
     raycaster.setFromCamera(pointer, camera);
-    const first = raycaster.intersectObjects(scene.children, true).find(
+    const first = raycaster.intersectObjects(pickTargets, true).find(
       r => {
         if(!r.object.isMesh || r.object===particleMesh || r.object===world.cornerAO || r.object===world.contactShadows || r.object===world.windowSunPatch)return false;
         for(let node=r.object;node;node=node.parent)if(!node.visible)return false;
         return true;
       },
     );
-    return first ? first.point : null;
+    if (first) return first.point;
+    return raycaster.ray.intersectPlane(floorPlane, floorHitPoint) ? floorHitPoint.clone() : null;
   }
 
   function hit(event) {
@@ -609,6 +645,8 @@ export function createCabin3D(host, {onSelect, onHover = () => {}, onInspect = n
       world.mealSet.visible = indoor && p.pose === 'eat';
       world.restingBroom.visible = !(indoor && p.pose === 'sweep');
       atmosphere.setStudying(indoor && (p.pose === 'write' || p.pose === 'read'));
+      markShadowDirty();
+      sun.shadow.needsUpdate = true;
       if (world.cookFx.visible || world.washFx.visible) kickAmbient();
       render();
     },
@@ -617,21 +655,22 @@ export function createCabin3D(host, {onSelect, onHover = () => {}, onInspect = n
     projectActor() {return avatar.project(camera, host);},
     projectActorHead() {return avatar.projectHead(camera, host);},
     onFrame(fn) {if (typeof fn !== 'function') return () => {}; frameListeners.add(fn); return () => frameListeners.delete(fn);},
-    setNight(value) {atmosphere.setNight(!!value); night = atmosphere.state.night; render();},
-    setTimeMode(mode) {atmosphere.setTimeMode(mode); night = atmosphere.state.night; kickAmbient(); render();},
-    setWeatherOverride(kind) {atmosphere.setWeatherOverride(kind); kickAmbient(); render();},
+    setNight(value) {atmosphere.setNight(!!value); night = atmosphere.state.night; markShadowDirty(); sun.shadow.needsUpdate = true; render();},
+    setTimeMode(mode) {atmosphere.setTimeMode(mode); night = atmosphere.state.night; markShadowDirty(); sun.shadow.needsUpdate = true; kickAmbient(); render();},
+    setWeatherOverride(kind) {atmosphere.setWeatherOverride(kind); markShadowDirty(); kickAmbient(); render();},
     setEnvironment(env, srvTime, items) {
       atmosphere.setEnvironment(env, srvTime, items);
       night = atmosphere.state.night;
       if (env?.room_design) applyRoomDesign(env.room_design, items || [], srvTime);
+      markShadowDirty(); sun.shadow.needsUpdate = true;
       kickAmbient(); render();
     },
-    setRoomDesign(rd, items, srvTime) {applyRoomDesign(rd, items, srvTime); kickAmbient(); render();},
-    setKeepsakes(ks) {roomState.applyKeepsakesState(ks); render();},
-    setCatState(cs, immediate = false) {roomState.applyCatState(cs, immediate); kickAmbient(); render();},
-    setCompanionCues(comp) {roomState.applyCompanionCues(comp); kickAmbient(); render();},
-    setSeason(s) {world.garden.setSeason(s);world.styles.weather(night,world.garden.diagnostics().snow);render();},
-    setEcology(eco) {world.garden.setEcology(eco); render();},
+    setRoomDesign(rd, items, srvTime) {applyRoomDesign(rd, items, srvTime); markShadowDirty(); sun.shadow.needsUpdate = true; kickAmbient(); render();},
+    setKeepsakes(ks) {roomState.applyKeepsakesState(ks); markShadowDirty(); sun.shadow.needsUpdate = true; render();},
+    setCatState(cs, immediate = false) {roomState.applyCatState(cs, immediate); markShadowDirty(); sun.shadow.needsUpdate = true; kickAmbient(); render();},
+    setCompanionCues(comp) {roomState.applyCompanionCues(comp); render();},
+    setSeason(s) {world.garden.setSeason(s);world.styles.weather(night,world.garden.diagnostics().snow);markShadowDirty();render();},
+    setEcology(eco) {world.garden.setEcology(eco); markShadowDirty(); render();},
     setMailbox(mb) {world.garden.setMailbox(mb); kickAmbient(); render();},
     setCozyCam(v) {cam.setCozyCam(v); if (cam.cozyCam) kickAmbient(); render();},
     captureDataURL() {
@@ -738,6 +777,7 @@ export function createCabin3D(host, {onSelect, onHover = () => {}, onInspect = n
         }
       });
       for (const t of world.textures) t.dispose();
+      world.disposeMaterials?.();
       for (const geometry of world.geometries.values()) geometry.dispose();
       particleGeo.dispose(); particleMat.dispose();
       world.occluderMaterial.dispose();

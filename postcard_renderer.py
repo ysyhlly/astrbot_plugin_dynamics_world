@@ -454,59 +454,84 @@ class PostcardRenderer:
         async with self._pool_lock:
             await self._shutdown_pool_locked()
 
+    async def _safe_shutdown_pool(self, *, timeout: float = 3.0) -> None:
+        """Acquire pool lock and tear down Playwright/Chromium cleanly even on cancellation."""
+        async def _do():
+            async with self._pool_lock:
+                await self._shutdown_pool_locked()
+
+        try:
+            await asyncio.wait_for(asyncio.shield(_do()), timeout=timeout)
+        except BaseException:
+            pass
+
     async def _ensure_warm_page(self, bundle_path: Path):
         from playwright.async_api import async_playwright
 
         mtime = bundle_path.stat().st_mtime
+        whale_art_path = bundle_path.with_name("deepseek-whale-maid.jpg")
         async with self._pool_lock:
             if self._closed:
                 return None
             need_reload = self._page is None or self._browser is None or (hasattr(self._page, "is_closed") and self._page.is_closed()) or self._bundle_mtime != mtime
             if need_reload:
-                if self._browser is None:
-                    self._pw = await async_playwright().start()
-                    self._browser = await self._pw.chromium.launch(headless=True, args=CHROMIUM_ARGS)
-                if self._page is not None:
+                try:
+                    if self._browser is None:
+                        self._pw = await async_playwright().start()
+                        self._browser = await self._pw.chromium.launch(headless=True, args=CHROMIUM_ARGS)
+                    if self._page is not None:
+                        try:
+                            await self._page.close()
+                        except Exception:
+                            pass
+                        self._page = None
+                    self._page = await self._browser.new_page(viewport={"width": 720, "height": 460})
+                    bundle_js = await asyncio.to_thread(bundle_path.read_bytes)
+                    module_url = "data:text/javascript;base64," + base64.b64encode(bundle_js).decode("ascii")
+                    whale_art_url = ""
+                    if whale_art_path.is_file():
+                        whale_bytes = await asyncio.to_thread(whale_art_path.read_bytes)
+                        whale_art_url = "data:image/jpeg;base64," + base64.b64encode(whale_bytes).decode("ascii")
+                    html = (
+                        "<!doctype html><html><body style='margin:0;overflow:hidden;background:#1b1714'>"
+                        "<div id='stage' style='width:720px;height:460px;position:relative'></div></body></html>"
+                    )
+                    await self._page.set_content(html)
+                    boot_ok = await self._page.evaluate(
+                        """async ([modUrl, whaleUrl]) => {
+                            if (whaleUrl) window.__CABIN_WHALE_ART_URL__ = whaleUrl;
+                            const mod = await import(modUrl);
+                            if (!mod || typeof mod.createCabin3D !== 'function') return false;
+                            const stage = document.getElementById('stage');
+                            const cabin = mod.createCabin3D(stage, { reducedMotion: true });
+                            if (!cabin) return false;
+                            try {
+                                const gl = cabin.canvas?.getContext('webgl2') || cabin.canvas?.getContext('webgl');
+                                const dbg = gl?.getExtension('WEBGL_debug_renderer_info');
+                                const rdr = dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) || '') : '';
+                                if (/swiftshader|llvmpipe|software/i.test(rdr)) {
+                                    cabin.setQualityMode?.('low');
+                                }
+                            } catch {}
+                            cabin.setEffects?.(false);
+                            cabin.setActive?.(false);
+                            window.__cabin = cabin;
+                            window.__modelKey = '';
+                            window.__guestKey = '';
+                            return Boolean(stage.querySelector('canvas'));
+                        }""",
+                        [module_url, whale_art_url],
+                    )
+                    if not boot_ok:
+                        await self._shutdown_pool_locked()
+                        return None
+                    self._bundle_mtime = mtime
+                except BaseException:
                     try:
-                        await self._page.close()
-                    except Exception:
+                        await asyncio.wait_for(asyncio.shield(self._shutdown_pool_locked()), timeout=3.0)
+                    except BaseException:
                         pass
-                self._page = await self._browser.new_page(viewport={"width": 720, "height": 460})
-                bundle_js = await asyncio.to_thread(bundle_path.read_bytes)
-                module_url = "data:text/javascript;base64," + base64.b64encode(bundle_js).decode("ascii")
-                html = (
-                    "<!doctype html><html><body style='margin:0;overflow:hidden;background:#1b1714'>"
-                    "<div id='stage' style='width:720px;height:460px;position:relative'></div></body></html>"
-                )
-                await self._page.set_content(html)
-                boot_ok = await self._page.evaluate(
-                    """async (modUrl) => {
-                        const mod = await import(modUrl);
-                        if (!mod || typeof mod.createCabin3D !== 'function') return false;
-                        const stage = document.getElementById('stage');
-                        const cabin = mod.createCabin3D(stage, { reducedMotion: true });
-                        if (!cabin) return false;
-                        try {
-                            const gl = cabin.canvas?.getContext('webgl2') || cabin.canvas?.getContext('webgl');
-                            const dbg = gl?.getExtension('WEBGL_debug_renderer_info');
-                            const rdr = dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) || '') : '';
-                            if (/swiftshader|llvmpipe|software/i.test(rdr)) {
-                                cabin.setQualityMode?.('low');
-                            }
-                        } catch {}
-                        cabin.setEffects?.(false);
-                        cabin.setActive?.(false);
-                        window.__cabin = cabin;
-                        window.__modelKey = '';
-                        window.__guestKey = '';
-                        return Boolean(stage.querySelector('canvas'));
-                    }""",
-                    module_url,
-                )
-                if not boot_ok:
-                    await self._shutdown_pool_locked()
-                    return None
-                self._bundle_mtime = mtime
+                    raise
             self._last_used = time.monotonic()
             if self._reaper_task is None or self._reaper_task.done():
                 self._reaper_task = asyncio.create_task(self._reaper_loop())
@@ -538,6 +563,11 @@ class PostcardRenderer:
             avatar_sel = snapshot.get("avatar_selection") or {}
             guest_model = snapshot.get("guest_avatar_model")
             guest_tex = int(snapshot.get("guest_texture_index") or 0)
+            cabin_style = str(
+                snapshot.get("cabin_style")
+                or (snapshot.get("cabin") or {}).get("style")
+                or "cottage"
+            ).strip() or "cottage"
 
             data_url = await page.evaluate(
                 """async (cfg) => {
@@ -564,6 +594,9 @@ class PostcardRenderer:
                     }
                     const applyAll = () => {
                         const tm = cfg.hour < 5.5 || cfg.hour >= 19.5 ? 'night' : cfg.hour < 7.2 ? 'dawn' : cfg.hour >= 17.2 ? 'dusk' : 'day';
+                        if (cfg.cabinStyle && typeof cabin.setCabinStyle === 'function') {
+                            cabin.setCabinStyle(cfg.cabinStyle);
+                        }
                         cabin.setTimeMode?.('auto');
                         if (cfg.snapshot?.environment) {
                             cabin.setEnvironment?.(cfg.snapshot.environment, cfg.snapshot.server_time, cfg.snapshot.scene?.items || []);
@@ -590,7 +623,7 @@ class PostcardRenderer:
                     };
                     if (typeof cabin.batch === 'function') cabin.batch(applyAll);
                     else applyAll();
-                    if (texLoaded) {
+                    if (texLoaded || cfg.cabinStyle === 'whale_coast') {
                         await new Promise(r => setTimeout(r, 80));
                     }
                     cabin.setActive?.(false);
@@ -614,6 +647,7 @@ class PostcardRenderer:
                     "avatarSelection": avatar_sel,
                     "guestModel": guest_model,
                     "guestTex": guest_tex,
+                    "cabinStyle": cabin_style,
                     "shotPlan": shot_plan,
                 },
             )
@@ -624,10 +658,15 @@ class PostcardRenderer:
             raw_png = await page.locator("#stage canvas").first.screenshot(type="png", animations="disabled")
             self._last_used = time.monotonic()
             return Image.open(BytesIO(raw_png))
+        except asyncio.CancelledError:
+            await self._safe_shutdown_pool()
+            raise
         except Exception:
-            async with self._pool_lock:
-                await self._shutdown_pool_locked()
+            await self._safe_shutdown_pool()
             return None
+        except BaseException:
+            await self._safe_shutdown_pool()
+            raise
 
     async def render(
         self,

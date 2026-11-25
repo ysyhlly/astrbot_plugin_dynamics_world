@@ -40,10 +40,19 @@ function assemble(T,scene,id,anchors,invalidate){
   function art(parent,kind,w,h,x,y,z){
     let map;
     if(kind==='whaleOriginal'){
-      portraitStatus='loading';
-      map=new T.TextureLoader().load(new URL('./deepseek-whale-maid.jpg',import.meta.url).href,
-        ()=>{if(!disposed){portraitStatus='ready';invalidate();}},undefined,
-        ()=>{if(!disposed){portraitStatus='error';invalidate();}});
+      let portraitUrl=(typeof globalThis!=='undefined'&&typeof globalThis.__CABIN_WHALE_ART_URL__==='string')?globalThis.__CABIN_WHALE_ART_URL__:'';
+      if(!portraitUrl&&typeof import.meta?.url==='string'&&!import.meta.url.startsWith('data:')){
+        try{portraitUrl=new URL('./deepseek-whale-maid.jpg',import.meta.url).href;}catch{}
+      }
+      if(portraitUrl){
+        portraitStatus='loading';
+        map=new T.TextureLoader().load(portraitUrl,
+          ()=>{if(!disposed){portraitStatus='ready';invalidate();}},undefined,
+          ()=>{if(!disposed){portraitStatus='error';invalidate();}});
+      }else{
+        portraitStatus='fallback';
+        map=new T.CanvasTexture(styleCanvas(id,kind));
+      }
     }else map=new T.CanvasTexture(styleCanvas(id,kind));
     map.colorSpace=T.SRGBColorSpace;map.magFilter=T.NearestFilter;
     const wall=kind!=='view';

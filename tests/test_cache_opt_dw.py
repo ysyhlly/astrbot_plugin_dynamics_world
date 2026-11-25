@@ -1389,7 +1389,11 @@ async def test_phase4_static_contexts_anchor_for_narrative_and_resident_calls(
         c1, c2 = captured
         assert c1["system_prompt"] == c2["system_prompt"]
         assert c1["prompt"] != c2["prompt"]
-        expected_hash = hashlib.sha256(c1["system_prompt"].encode("utf-8")).hexdigest()[:12]
+        from astrbot_plugin_dynamics_world.life.core.narrative_prompt import (
+            compute_narrative_prefix_hash,
+        )
+
+        expected_hash = compute_narrative_prefix_hash(c1["system_prompt"])
         expected_contexts = [
             {
                 "role": "user",

@@ -597,8 +597,27 @@ export function buildCabinWorld(THREE, scene, {getHovered, getNight, particleMes
     contactShadows.instanceMatrix.needsUpdate=true;
   }
 
+  function disposeMaterials() {
+    const disposedMats = new Set();
+    for (const mat of materials.values()) {
+      if (mat && !disposedMats.has(mat)) {
+        disposedMats.add(mat);
+        mat.dispose?.();
+      }
+    }
+    materials.clear();
+    for (const mat of texturedMaterials.values()) {
+      if (mat && !disposedMats.has(mat)) {
+        disposedMats.add(mat);
+        mat.dispose?.();
+      }
+    }
+    texturedMaterials.clear();
+    surfaceCache.clear();
+  }
+
   return {
-    styles,placeFixedFurniture,
+    styles,placeFixedFurniture,disposeMaterials,
     walls, windowGroup, windowSunPatch, daySky, nightSky, sunDisk, skyMaterial, starMaterial,
     curtains, motes, bed, sleepDetails, zzz, desk, chair, steamA, steamB, steamMaterial,
     lamp, bulbMaterial, warm, readingLight, fairyBulbMaterial, shelf, shelfStand, shelfVolumesGroup,

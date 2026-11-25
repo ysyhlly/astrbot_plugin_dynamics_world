@@ -137,11 +137,12 @@ def _life_cues(db, scope, now, life_service=None):
         except Exception:
             horizons_desk = []
         try:
-            legacy_state, _ = life_service._select_current_state(life_service._now())
+            now_dt = life_service._now()
+            legacy_state, _ = life_service._select_current_state(now_dt)
             if legacy_state:
-                from .life.core.state import select_current_slot
+                from .life.core.state import minute_of_day, select_current_slot
 
-                slot = select_current_slot(legacy_state, life_service._now())
+                slot = select_current_slot(legacy_state.timeline, minute_of_day(now_dt))
                 if slot and getattr(slot.entry, "outfit", ""):
                     outfit_now = str(slot.entry.outfit)[:80]
         except Exception:
@@ -424,7 +425,7 @@ def compute_domain_revisions(
             (ecology.get("season") or {}).get("solar_term"),
             ecology.get("revision"),
             (ecology.get("veg_patch") or {}).get("stage"),
-            (ecology.get("flower_bed") or {}).get("stage"),
+            (ecology.get("flowerbed") or {}).get("stage"),
             (ecology.get("cat") or {}).get("spot"),
             round(float((ecology.get("vitality") or {}).get("energy") or 0), 1),
             round(float((ecology.get("vitality") or {}).get("inspiration") or 0), 1),

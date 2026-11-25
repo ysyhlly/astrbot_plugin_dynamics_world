@@ -27,6 +27,49 @@ class NarrativeValidationError(ValueError):
         self.code = code
 
 
+class NarrativeProviderBusy(RuntimeError):
+    """Shared ProviderBudget temporarily deferred this background LLM call."""
+
+    status_code = "budget_busy"
+    is_budget_busy = True
+
+    def __init__(
+        self,
+        message: str = "Shared provider budget busy",
+        *,
+        retry_after: float = 30.0,
+        reason: str = "busy",
+    ):
+        super().__init__(message)
+        try:
+            wait = float(retry_after)
+        except (TypeError, ValueError):
+            wait = 30.0
+        self.retry_after = max(5.0, wait if math.isfinite(wait) else 30.0)
+        self.reason = str(reason or "busy")
+
+
+def is_budget_busy_error(exc: BaseException | None) -> bool:
+    """Return True for NarrativeProviderBusy or shared ProviderBudgetBusyError."""
+    if exc is None:
+        return False
+    if isinstance(exc, NarrativeProviderBusy) or getattr(exc, "is_budget_busy", False):
+        return True
+    if getattr(exc, "status_code", "") == "budget_busy":
+        return True
+    cls_name = type(exc).__name__
+    if cls_name == "ProviderBudgetBusyError":
+        return True
+    if __package__:
+        try:
+            from ...series_panels import is_provider_budget_busy_error
+
+            return bool(is_provider_budget_busy_error(exc))
+        except Exception:
+            pass
+    return False
+
+
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
 

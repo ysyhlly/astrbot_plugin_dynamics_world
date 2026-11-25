@@ -173,6 +173,14 @@ class Settings:
         return self.integer("max_entries", 10, 1)
 
     @property
+    def max_constant_entries(self) -> int:
+        return self.integer("max_constant_entries", 20, 0)
+
+    @property
+    def max_inject_chars(self) -> int:
+        return self.integer("max_inject_chars", 6000, 0)
+
+    @property
     def scan_history_turns(self) -> int:
         return self.integer("scan_history_turns", 4, 0)
 

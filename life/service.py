@@ -37,8 +37,9 @@ from .core.narrative_io import WorldIOBusy, WorldIOClosed
 from .core.narrative_prompt import (
     build_narrative_prompt_parts,
     build_narrative_prompt_segments,
+    compute_narrative_prefix_hash,
 )
-from .core.narrative_types import AVAILABILITIES, _identity
+from .core.narrative_types import AVAILABILITIES, NarrativeProviderBusy, _identity
 from .core.state import (
     NATURAL_SLOT_NAMES,
     OPTIONAL_TIMELINE_FIELDS,
@@ -343,7 +344,7 @@ class LifeService:
         from .core.narrative_schema import narrative_schema
 
         prefix_hash = (
-            hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()[:12]
+            compute_narrative_prefix_hash(system_prompt)
             if system_prompt
             else ""
         )
@@ -413,8 +414,12 @@ class LifeService:
             )
         except Exception as exc:
             if is_provider_budget_busy_error(exc):
-                raise NarrativeProviderUnavailable(
-                    f"Shared provider budget busy ({getattr(exc, 'reason', 'busy')})"
+                retry_after = getattr(exc, "retry_after", 30.0)
+                reason = str(getattr(exc, "reason", "busy") or "busy")
+                raise NarrativeProviderBusy(
+                    f"Shared provider budget busy ({reason})",
+                    retry_after=retry_after,
+                    reason=reason,
                 ) from exc
             raise
         current = await self._character(request["scope"])

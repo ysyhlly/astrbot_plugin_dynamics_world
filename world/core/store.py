@@ -317,6 +317,18 @@ class WorldBookStore:
             self._store.active_book_ids = [str(x).strip() for x in book_ids if str(x).strip()]
             self.save()
 
+    def flush_debounced(self, *, force: bool = False) -> bool:
+        """Persist deferred hot-path writes (thread-safe; safe for asyncio.to_thread)."""
+        return self._persist(force=force)
+
+    def seconds_until_flush(self) -> float:
+        """Remaining debounce delay before the next deferred flush should run."""
+        with self._lock:
+            if not self._dirty:
+                return 0.0
+            elapsed = time.monotonic() - self._last_save
+            return max(0.0, SAVE_DEBOUNCE_SECONDS - elapsed)
+
     def record_match(
         self,
         session_id: str,
@@ -324,11 +336,14 @@ class WorldBookStore:
         preview: str,
         scenario: str | None = None,
         scenario_auto: str | None = None,
+        *,
+        persist_now: bool = True,
     ) -> bool:
         """记录本轮命中（每轮请求都会调用）。
 
         - 内容与上次完全一致时不产生任何写盘；
-        - 变了也按 SAVE_DEBOUNCE_SECONDS 合并写入，避免连发消息时反复全量重写。
+        - 变了也按 SAVE_DEBOUNCE_SECONDS 合并写入，避免连发消息时反复全量重写；
+        - 热路径传 ``persist_now=False`` 时仅更新内存脏标记，由后台线程异步合并落盘。
         返回是否产生了新的持久化改动。
         """
         session_id = str(session_id or "").strip() or "default"
@@ -348,7 +363,8 @@ class WorldBookStore:
             )
             if not changed:
                 # 内容没变：不产生新改动，但把上一次被防抖推迟的写入补上
-                self._persist(force=False)
+                if persist_now:
+                    self._persist(force=False)
                 return False
             state.last_matched = matched
             state.last_inject_preview = preview
@@ -357,7 +373,8 @@ class WorldBookStore:
             if scenario_auto is not None:
                 state.scenario_auto = str(scenario_auto)
             self._dirty = True
-            self._persist(force=False)
+            if persist_now:
+                self._persist(force=False)
             return True
 
     # ---- character cards ----

@@ -626,16 +626,53 @@ def _prepare_narrative_projection(request: dict, character: dict) -> tuple[str, 
     # Universal invariant character profile + static world come FIRST so all modes
     # (global tick, scoped advance, outreach, plan regen) share a byte-identical prefix;
     # mode-specific rules follow AFTER.
-    system_prompt = (
+    character_prefix = (
         "角色资料：\n"
         + json.dumps(allowed, ensure_ascii=False, separators=(",", ":"), sort_keys=False)
     )
+    system_prompt = character_prefix
     if static_world:
         system_prompt += "\n静态世界基础信息：\n" + json.dumps(
             static_world, ensure_ascii=False, separators=(",", ":"), sort_keys=False
         )
     system_prompt += "\n" + rules
-    return system_prompt, projected, {"background_actor_profiles": actor_profiles}
+    return (
+        system_prompt,
+        projected,
+        {
+            "background_actor_profiles": actor_profiles,
+            "static_prefix": character_prefix,
+        },
+    )
+
+
+def extract_invariant_narrative_prefix(system_prompt: str) -> str:
+    """Extract the mode-invariant leading character profile prefix shared by all modes.
+
+    All 4 narrative modes (global tick, scoped advance, outreach, plan regen) begin with
+    ``角色资料：\\n<json>``. Hashing only this invariant prefix ensures every mode for the
+    same character shares a single ``session_id`` / ``cache_anchor`` bucket.
+    """
+    text = str(system_prompt or "")
+    if not text:
+        return ""
+    if text.startswith("角色资料：\n"):
+        lines = text.split("\n", 2)
+        if len(lines) >= 2:
+            return lines[0] + "\n" + lines[1]
+    return text
+
+
+def compute_narrative_prefix_hash(
+    system_prompt: str, static_prefix: str | None = None
+) -> str:
+    """Hash ONLY the mode-invariant character + static world prefix for cross-mode cache sharing."""
+    base = (
+        static_prefix
+        if isinstance(static_prefix, str) and static_prefix
+        else extract_invariant_narrative_prefix(system_prompt)
+    )
+    return hashlib.sha256(base.encode("utf-8")).hexdigest()[:12] if base else ""
 
 
 def _extract_shared_tier1(projected: dict, extras: dict) -> tuple[dict, dict]:
@@ -769,7 +806,9 @@ def build_narrative_prompt_segments(
     """
     system_prompt, projected, extras = _prepare_narrative_projection(request, character)
     shared_tier1, dynamic_projected = _extract_shared_tier1(projected, extras)
-    prefix_hash = hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()[:12]
+    prefix_hash = compute_narrative_prefix_hash(
+        system_prompt, extras.get("static_prefix")
+    )
     anchor = f"[cache_anchor task=dynamics_world.narrative prefix={prefix_hash}]"
     if shared_tier1:
         shared_context_block = (

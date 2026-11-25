@@ -341,6 +341,8 @@ class Main(Star):
             keepsakes = engine.keepsakes.snapshot(db, scope, raw_scene, now)
             mailbox = engine.mailbox.snapshot(db, scope, now, character)
             world_space = engine.world_spaces.snapshot(db, scope, now) if engine.world_spaces is not None else {}
+            from . import cabin_life
+            cabin_style = str(cabin_life.preference(db, scene_key).get("style") or "cottage")
             from .web_api import _life_cues
             cues = _life_cues(db, scope, now, self.life)
 
@@ -367,6 +369,7 @@ class Main(Star):
 
         return {
             "character": {"id": (character or {}).get("card_id", ""), "name": (character or {}).get("name", "角色")},
+            "cabin_style": cabin_style,
             "actor": actor,
             "environment": env,
             "scene": scene,

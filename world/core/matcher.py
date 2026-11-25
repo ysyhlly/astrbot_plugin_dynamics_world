@@ -117,6 +117,36 @@ def _default_style() -> Settings:
     return Settings({})
 
 
+DEFAULT_MAX_CONSTANT_ENTRIES = 20
+DEFAULT_MAX_INJECT_CHARS = 6000
+
+
+def _entry_char_cost(entry: WorldEntry) -> int:
+    return (
+        len((entry.name or "").strip())
+        + len((entry.content or "").strip())
+        + len((entry.behavior or "").strip())
+    )
+
+
+def _truncate_matched_entry(match: MatchedEntry, budget: int) -> MatchedEntry:
+    """Return a shallow copy of MatchedEntry truncated to fit ``budget`` characters."""
+    entry = match.entry
+    title_len = len((entry.name or "").strip())
+    remaining = max(32, budget - title_len)
+    behavior = (entry.behavior or "").strip()
+    content = (entry.content or "").strip()
+    if behavior and len(behavior) > remaining // 3:
+        behavior = behavior[: max(16, remaining // 3) - 1] + "…"
+    content_budget = max(16, remaining - len(behavior))
+    if len(content) > content_budget:
+        content = content[: max(1, content_budget - 1)] + "…"
+    clipped = WorldEntry.from_dict(entry.to_dict())
+    clipped.content = content
+    clipped.behavior = behavior
+    return MatchedEntry(book=match.book, entry=clipped, reasons=list(match.reasons))
+
+
 def match_entries(
     books: Iterable[WorldBook],
     text: str,
@@ -125,6 +155,8 @@ def match_entries(
     max_entries: int = 12,
     allow_auto_scenario: bool = True,
     dedupe_same_content: bool = True,
+    max_constant_entries: int = DEFAULT_MAX_CONSTANT_ENTRIES,
+    max_total_chars: int = DEFAULT_MAX_INJECT_CHARS,
 ) -> MatchResult:
     """根据文本与当前场景匹配世界书条目。
 
@@ -185,6 +217,8 @@ def match_entries(
             candidates,
             max_entries=max_entries,
             dedupe_same_content=dedupe_same_content,
+            max_constant_entries=max_constant_entries,
+            max_total_chars=max_total_chars,
         ),
         auto_scenario=auto_scenario,
         scanned_text=text[:500],
@@ -227,14 +261,17 @@ def _select_entries(
     *,
     max_entries: int,
     dedupe_same_content: bool = True,
+    max_constant_entries: int = DEFAULT_MAX_CONSTANT_ENTRIES,
+    max_total_chars: int = DEFAULT_MAX_INJECT_CHARS,
 ) -> list[MatchedEntry]:
-    """去重并按「常驻全部保留 + 关键词按 priority 截断」生成最终注入顺序。
+    """去重并按「常驻优先 + 关键词按 priority 截断 + 总字符/常驻上限」生成最终注入顺序。
 
     Args:
         candidates: 关键词命中的候选条目。
-        max_entries: 关键词条目上限。常驻条目永不被截断
-            （_conf_schema.json 承诺「常驻条目始终注入」）。
+        max_entries: 关键词条目上限。
         dedupe_same_content: 正文与行为都相同的条目只保留优先级最高的一条。
+        max_constant_entries: 常驻条目最大注入条数（0 表示不限）。
+        max_total_chars: 本轮全部注入条目的总字符预算上限（0 表示不限）。
 
     Returns:
         按注入顺序排列的条目：先常驻，再关键词。
@@ -249,6 +286,8 @@ def _select_entries(
         ),
     )
     limit = max(1, int(max_entries))
+    const_limit = max(0, int(max_constant_entries))
+    char_budget = max(0, int(max_total_chars))
     seen_content: set[str] = set()
     constants: list[MatchedEntry] = []
     others: list[MatchedEntry] = []
@@ -259,10 +298,32 @@ def _select_entries(
                 continue
             seen_content.add(content_key)
         if m.entry.constant:
-            constants.append(m)
+            if const_limit == 0 or len(constants) < const_limit:
+                constants.append(m)
         elif len(others) < limit:
             others.append(m)
-    return constants + others
+    selected = constants + others
+    if char_budget <= 0 or not selected:
+        return selected
+
+    bounded: list[MatchedEntry] = []
+    used_chars = 0
+    for m in selected:
+        cost = _entry_char_cost(m.entry)
+        if used_chars + cost <= char_budget:
+            bounded.append(m)
+            used_chars += cost
+        elif not bounded:
+            clipped = _truncate_matched_entry(m, char_budget)
+            bounded.append(clipped)
+            used_chars += _entry_char_cost(clipped.entry)
+            break
+        elif char_budget - used_chars >= 120:
+            clipped = _truncate_matched_entry(m, char_budget - used_chars)
+            bounded.append(clipped)
+            used_chars += _entry_char_cost(clipped.entry)
+            break
+    return bounded
 
 
 def build_injection_text(
