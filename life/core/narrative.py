@@ -101,7 +101,13 @@ else:
     def resolve_series_timezone(
         context, explicit_tz: str = "", default_tz: str = "Asia/Shanghai"
     ):
-        return CHINA
+        name = resolve_series_timezone_name(context, explicit_tz=explicit_tz, default_tz=default_tz)
+        try:
+            from zoneinfo import ZoneInfo
+
+            return ZoneInfo(name)
+        except Exception:
+            return CHINA
     NarrativeOutreachMixin = _outreach_mod.NarrativeOutreachMixin
     NarrativeSchemaMixin = _schema_mod.NarrativeSchemaMixin
     NarrativeValidationMixin = _validation_mod.NarrativeValidationMixin

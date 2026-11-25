@@ -1,4 +1,4 @@
-import {apiGet,apiPost,readyBridge} from './api.js';
+import {apiGet,apiPost,getSeriesTimezone,readyBridge} from './api.js';
 import {msg,setText,tr} from './series-ui.js';
 import {messages} from './series-messages.js';
 import {CABIN_STYLES,cabinPlan} from './cabin-plans.js?v=homes.1';
@@ -43,8 +43,9 @@ export function createCabinStylePicker(getRenderer){
   function updateInfo(){
     if(style==='cottage'){note(null);return;}
     if(!details?.bound||!canWrite){note(msg('当前仅预览外观'));return;}
+    const tz=String(details?.timezone||'').trim()||getSeriesTimezone();
     const plan=(details.upcoming||[]).map(a=>{
-      const fmt={timeZone:'Asia/Shanghai',hour:'2-digit',minute:'2-digit'};
+      const fmt={timeZone:tz,hour:'2-digit',minute:'2-digit'};
       const date=new Intl.DateTimeFormat('en-CA',{timeZone:fmt.timeZone});
       if(date.format(a.start*1000)!==date.format(Date.now()))Object.assign(fmt,{month:'2-digit',day:'2-digit'});
       const hm=new Intl.DateTimeFormat('en-GB',fmt).format(a.start*1000);

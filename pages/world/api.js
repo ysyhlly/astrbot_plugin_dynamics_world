@@ -69,20 +69,53 @@ export async function readyBridge() {
   return active;
 }
 
-export function formatTs(seconds) {
+let configuredTimezone = "";
+
+export function setSeriesTimezone(timezone) {
+  const value = String(timezone || "").trim();
+  if (!value) {
+    configuredTimezone = "";
+    return;
+  }
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value });
+    configuredTimezone = value;
+  } catch {
+    // Ignore invalid IANA timezone names and keep fallback.
+  }
+}
+
+export function getSeriesTimezone() {
+  if (configuredTimezone) return configuredTimezone;
+  const bridge = ensureBridge();
+  const ctxTz = String(bridge?.getContext?.()?.timezone || "").trim();
+  if (ctxTz) return ctxTz;
+  return "Asia/Shanghai";
+}
+
+export function formatTs(seconds, timezone = "") {
   const value = Number(seconds);
   if (!Number.isFinite(value) || value <= 0) return "—";
+  const tz = String(timezone || "").trim() || getSeriesTimezone();
+  const options = {
+    hour12: false,
+    timeZone: tz,
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  };
   try {
-    return new Date(value * 1000).toLocaleString(getLanguage(), {
-      hour12: false,
-      timeZone: "Asia/Shanghai",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
+    return new Date(value * 1000).toLocaleString(getLanguage(), options);
   } catch {
-    return "—";
+    try {
+      return new Date(value * 1000).toLocaleString(getLanguage(), {
+        ...options,
+        timeZone: "Asia/Shanghai",
+      });
+    } catch {
+      return "—";
+    }
   }
 }
 

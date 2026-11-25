@@ -376,8 +376,11 @@ def test_p1_build_release_excludes_unused_azgaar_assets_and_keeps_core(tmp_path)
 
     with zipfile.ZipFile(out_zip) as zf:
         names = set(zf.namelist())
+        prefix_dir = "astrbot_plugin_dynamics_world/"
+        assert all(n.startswith(prefix_dir) for n in names)
         for prefix in (
             "icons-charges-",
+            "icons-goods-",
             "view-3d-renderer",
             "Dropbox-sdk",
             "notes-editor",
@@ -388,21 +391,22 @@ def test_p1_build_release_excludes_unused_azgaar_assets_and_keeps_core(tmp_path)
             "ui-tour",
         ):
             assert not any(
-                n.startswith("vendor/azgaar/") and n.rsplit("/", 1)[-1].startswith(prefix)
+                n.startswith(prefix_dir + "vendor/azgaar/")
+                and n.rsplit("/", 1)[-1].startswith(prefix)
                 for n in names
             ), f"Unexpected excluded Azgaar asset leaked: {prefix}"
         assert not any(
-            n.startswith("vendor/azgaar/heightmaps/") and n.endswith(".png")
+            n.startswith(prefix_dir + "vendor/azgaar/heightmaps/")
             for n in names
         )
         # Core headless rendering files must remain intact.
         for required in (
-            "vendor/azgaar/index.html",
-            "vendor/azgaar/index-CH0Rm5id.js",
-            "vendor/azgaar/app-BvZbQ29j.js",
-            "vendor/azgaar/layers-BiK81IJP.js",
-            "vendor/azgaar/en-BpPoOois.js",
-            "vendor/azgaar/zh-r7nepuD_.js",
+            prefix_dir + "vendor/azgaar/index.html",
+            prefix_dir + "vendor/azgaar/index-CH0Rm5id.js",
+            prefix_dir + "vendor/azgaar/app-BvZbQ29j.js",
+            prefix_dir + "vendor/azgaar/layers-BiK81IJP.js",
+            prefix_dir + "vendor/azgaar/en-BpPoOois.js",
+            prefix_dir + "vendor/azgaar/zh-r7nepuD_.js",
         ):
             assert required in names
 

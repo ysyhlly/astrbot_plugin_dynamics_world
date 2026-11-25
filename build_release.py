@@ -31,8 +31,11 @@ def release_metadata(root):
     return raw.replace(marker, revision)
 
 
+_DEFAULT_PLUGIN_DIR_NAME = "astrbot_plugin_dynamics_world"
+
 _AZGAAR_EXCLUDED_PREFIXES = (
     "icons-charges-",
+    "icons-goods-",
     "view-3d-renderer",
     "view-3d-",
     "Dropbox-sdk",
@@ -46,18 +49,59 @@ _AZGAAR_EXCLUDED_PREFIXES = (
     "ui-tour",
 )
 
+_AZGAAR_EXCLUDED_IMAGES = {
+    "waves.png",
+    "preview.png",
+    "tour-button-icon.png",
+    "kiwiroo.png",
+    "Discord.png",
+    "Reddit.png",
+    "Pinterest.png",
+    "Twitter.png",
+    "Facebook.png",
+}
+
+
+def _archive_root_name(root: Path) -> str:
+    """Resolve the single top-level plugin folder name for installable archives."""
+    meta = root / "metadata.yaml"
+    if meta.is_file():
+        for raw_line in meta.read_text("utf-8", errors="ignore").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("name:"):
+                name = line.split(":", 1)[1].strip().strip("\"'")
+                if name and "/" not in name and "\\" not in name and name not in {".", ".."}:
+                    return name
+                break
+    return root.name or _DEFAULT_PLUGIN_DIR_NAME
+
 
 def _is_excluded_azgaar_asset(rel: Path) -> bool:
     """Exclude interactive-only Azgaar assets unused by headless map_renderer.py."""
     if rel.parts[:2] != ("vendor", "azgaar"):
         return False
-    if rel.parts[:4] == ("vendor", "azgaar", "images", "textures"):
+    if rel.parts[:4] in {
+        ("vendor", "azgaar", "images", "textures"),
+        ("vendor", "azgaar", "images", "icons"),
+        ("vendor", "azgaar", "images", "style-presets"),
+    }:
         return True
-    if rel.parts[:3] == ("vendor", "azgaar", "heightmaps") and rel.suffix.lower() == ".png":
+    if rel.parts[:3] in {
+        ("vendor", "azgaar", "styles"),
+        ("vendor", "azgaar", "heightmaps"),
+    }:
+        return True
+    if (
+        len(rel.parts) == 4
+        and rel.parts[:3] == ("vendor", "azgaar", "images")
+        and rel.parts[3] in _AZGAAR_EXCLUDED_IMAGES
+    ):
         return True
     if len(rel.parts) == 3:
         name = rel.parts[2]
-        if name == "dropbox.html" or any(
+        if name in {"dropbox.html", "sw.js"} or any(
             name.startswith(prefix) for prefix in _AZGAAR_EXCLUDED_PREFIXES
         ):
             return True
@@ -67,10 +111,12 @@ def _is_excluded_azgaar_asset(rel: Path) -> bool:
 def build(root, output):
     root = Path(root).resolve()
     output = Path(output).resolve()
+    top_level_dir = _archive_root_name(root)
     buffer = io.BytesIO()
     files = []
     excluded = {
         ".git",
+        ".github",
         "__pycache__",
         ".pytest_cache",
         ".ruff_cache",
@@ -81,6 +127,19 @@ def build(root, output):
         "dist",
         "release",
         ".venv",
+        "src",
+    }
+    excluded_files = {
+        "nul",
+        "cmd_config.json",
+        "worldbook_store.json",
+        ".env",
+        ".gitignore",
+        ".gitattributes",
+        "requirements-dev.txt",
+        "build_release.py",
+        "package.json",
+        "package-lock.json",
     }
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
         for path in sorted(root.rglob("*")):
@@ -92,15 +151,8 @@ def build(root, output):
             ):
                 continue
             if (
-                path.name
-                in {
-                    "nul",
-                    "cmd_config.json",
-                    "worldbook_store.json",
-                    ".env",
-                    "requirements-dev.txt",
-                }
-                or path.suffix in {".sqlite3", ".db", ".pyc", ".zip"}
+                path.name in excluded_files
+                or path.suffix in {".sqlite3", ".db", ".pyc", ".zip", ".bak"}
                 or path.name.endswith("_config.json")
             ):
                 continue
@@ -120,12 +172,13 @@ def build(root, output):
                         raise ValueError(
                             f"{rel}:{node.lineno}: runtime must use astrbot.api.logger"
                         )
-            info = zipfile.ZipInfo(rel.as_posix(), date_time=(1980, 1, 1, 0, 0, 0))
+            arcname = f"{top_level_dir}/{rel.as_posix()}"
+            info = zipfile.ZipInfo(arcname, date_time=(1980, 1, 1, 0, 0, 0))
             info.compress_type = zipfile.ZIP_DEFLATED
             info.create_system = 3
             info.external_attr = 0o100644 << 16
             archive.writestr(info, release_metadata(root) if rel.as_posix() == "metadata.yaml" else path.read_bytes())
-            files.append(rel.as_posix())
+            files.append(arcname)
     data = buffer.getvalue()
     if len(data) > 16_000_000:
         raise ValueError("Release archive exceeds the 16 MB market limit")
@@ -136,6 +189,7 @@ def build(root, output):
         "MiB": round(len(data) / 1048576, 2),
         "sha256": hashlib.sha256(data).hexdigest(),
         "files": len(files),
+        "top_level_dir": top_level_dir,
         "output": str(output),
     }
 

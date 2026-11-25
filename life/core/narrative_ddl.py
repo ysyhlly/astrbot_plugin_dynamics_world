@@ -3,17 +3,34 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import shutil
 import sqlite3
 import uuid
 from contextlib import closing
 from pathlib import Path
 
+
+class _NullLogger:
+    def debug(self, *args, **kwargs):
+        pass
+
+    def info(self, *args, **kwargs):
+        pass
+
+    def warning(self, *args, **kwargs):
+        pass
+
+    def error(self, *args, **kwargs):
+        pass
+
+    def exception(self, *args, **kwargs):
+        pass
+
+
 try:
     from astrbot.api import logger
 except Exception:  # pragma: no cover
-    logger = logging.getLogger(__name__)
+    logger = _NullLogger()
 
 if __package__:
     from .narrative_types import (

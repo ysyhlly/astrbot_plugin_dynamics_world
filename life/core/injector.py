@@ -41,7 +41,7 @@ def build_injection_text(
     Args:
         state: 当前自然日期的生活状态。
         current_match: 匹配当前本地时间的时间线条目。
-        now: 当前北京时间。
+        now: 当前配置时区的本地时间。
 
     Returns:
         要注入到 LLM 请求中的文本。

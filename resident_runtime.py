@@ -44,6 +44,38 @@ def fingerprint(card):
     return hashlib.sha256(repr(card).encode()).hexdigest()
 
 
+def _peer_name_candidates(peer: dict, peer_card: dict | None = None) -> list[str]:
+    """Collect explicit name/alias tokens for acquaintance matching from resident data & card."""
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def _add(raw):
+        if isinstance(raw, str):
+            val = raw.strip()
+            if len(val) >= 2 and val not in seen:
+                seen.add(val)
+                candidates.append(val)
+        elif isinstance(raw, (list, tuple, set)):
+            for item in raw:
+                _add(item)
+
+    name = str(peer.get("name") or "").strip()
+    _add(name)
+    if name:
+        for part in re.split(r"[\s·・\-_/()（）]+", name):
+            _add(part)
+    for source in (peer, peer_card if isinstance(peer_card, dict) else None):
+        if not isinstance(source, dict):
+            continue
+        for key in ("aliases", "nicknames", "short_name", "nickname", "known_as"):
+            _add(source.get(key))
+        ext = source.get("extensions")
+        if isinstance(ext, dict):
+            for key in ("aliases", "nicknames", "short_name", "nickname"):
+                _add(ext.get(key))
+    return candidates
+
+
 def _truncate_resident_card(card: dict) -> dict[str, str]:
     """Enforce per-field/total caps and deduplicate repeated lines across resident card fields."""
     private: dict[str, str] = {}
@@ -245,10 +277,17 @@ class ResidentRunner:
             )
             if spoken:
                 return spoken
-            # Explicit established acquaintances in this actor's own background only.
-            aliases = {"樱羽艾玛": "艾玛", "二阶堂希罗": "希罗", "月代雪": "月代雪"}
-            if aliases.get(peer["name"]) and aliases[peer["name"]] in own_text:
-                return peer["name"]
+            # Explicit established acquaintances mentioned in this actor's own background.
+            peer_card = None
+            card_id = peer.get("card_id")
+            if card_id:
+                try:
+                    peer_card = causal.card_resolver(card_id)
+                except Exception:
+                    peer_card = None
+            for token in _peer_name_candidates(peer, peer_card):
+                if token in own_text:
+                    return peer["name"]
             return "尚未获知姓名的居民"
 
         invitations = [

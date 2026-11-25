@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .causal_api import CausalAPIMixin
 from .migration import preview
+from .series_panels import resolve_series_timezone_name
 from .world.core.web_api import _body, _err, _ok, _query
 from .world_stream import (
     WorldEventBus,
@@ -91,6 +92,9 @@ class WorldAPI(CausalAPIMixin):
 
             result = await asyncio.to_thread(_read)
             result["can_write"] = self.plugin.world.web.settings.web_panel_allow_write
+            result["timezone"] = resolve_series_timezone_name(
+                getattr(self.plugin, "context", None)
+            )
             return _ok(result)
         except (ValueError, TypeError) as exc:
             return _err(str(exc))
@@ -552,6 +556,9 @@ class WorldAPI(CausalAPIMixin):
                 "compatibility": p.onboarding.compatibility(),
                 "companions": self._companion_summary(_query("umo")),
                 "capabilities": p.get_dynamics_capabilities(),
+                "timezone": resolve_series_timezone_name(
+                    getattr(p, "context", None)
+                ),
             }
         )
 
@@ -965,6 +972,9 @@ class WorldAPI(CausalAPIMixin):
                 k: character.get(k) for k in ("name", "persona_id", "scenario")
             }
             data["scope"] = scope
+            data["timezone"] = resolve_series_timezone_name(
+                getattr(self.plugin, "context", None)
+            )
             if self.plugin.config.get("mode") == "legacy":
                 state, target_date = self.plugin.life._select_current_state(
                     self.plugin.life._now()

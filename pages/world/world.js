@@ -1,4 +1,4 @@
-import { apiGet, apiPost, escapeHtml as esc, formatTs } from "./api.js";
+import { apiGet, apiPost, escapeHtml as esc, formatTs, setSeriesTimezone } from "./api.js";
 import { getSharedScope, msg, setSharedScope, setText, tr } from "./series-ui.js";
 import { worldStream } from "./world-stream.js?v=round2.1";
 
@@ -28,6 +28,7 @@ function renderRuntime(data) {
 export async function refreshWorld() {
   try {
     const data = await apiGet("world");
+    if (data?.timezone) setSeriesTimezone(data.timezone);
     currentWorld = data;
     renderRuntime(data);
     $("dwScopes").innerHTML = data.sessions.map(x=>`<option value="${esc(x)}"></option>`).join("");
@@ -67,6 +68,7 @@ export async function refreshLife() {
   try {
     const data = await apiGet("life", {umo});
     if (serial !== lifeSerial || umo !== $("dwScope").value.trim()) return;
+    if (data?.timezone) setSeriesTimezone(data.timezone);
     currentLife = {umo,data};
     renderLife(data);
   } catch (error) {

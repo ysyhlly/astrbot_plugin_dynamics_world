@@ -36,7 +36,6 @@ jobs:
         uses: actions/checkout@v5
         with:
           repository: ysyhlly/astrbot_plugin_chat_dynamics
-          ref: 2a39bcf5525fa7e03908e9249f3aaeab1e87acd4
           path: AstrBot/data/plugins/astrbot_plugin_chat_dynamics
           persist-credentials: false
 
@@ -48,6 +47,11 @@ jobs:
           cache-dependency-path: |
             AstrBot/requirements.txt
             AstrBot/data/plugins/${{ github.event.repository.name }}/requirements*.txt
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
 
       - name: Install dependencies
         run: |
@@ -65,6 +69,44 @@ jobs:
       - name: Ruff check
         working-directory: AstrBot/data/plugins/${{ github.event.repository.name }}
         run: python -m ruff check .
+
+      - name: Run frontend JS unit tests
+        working-directory: AstrBot/data/plugins/${{ github.event.repository.name }}
+        run: node --test tests/test_avatar_state.mjs
+
+      - name: Verify release package hygiene and structure
+        working-directory: AstrBot/data/plugins/${{ github.event.repository.name }}
+        run: |
+          python build_release.py "$RUNNER_TEMP/install.zip"
+          python - "$RUNNER_TEMP/install.zip" <<'PY'
+          import sys, zipfile
+          zpath = sys.argv[1]
+          prefix = "astrbot_plugin_dynamics_world/"
+          banned_parts = {".git", ".github", "tests", "src", "node_modules", "__pycache__"}
+          banned_files = {
+              "build_release.py", "package.json", "package-lock.json",
+              ".gitignore", ".gitattributes", "requirements-dev.txt",
+          }
+          with zipfile.ZipFile(zpath) as zf:
+              names = zf.namelist()
+          assert names, "Empty release archive"
+          for name in names:
+              assert name.startswith(prefix), f"Missing top-level plugin dir: {name}"
+              rel = name[len(prefix):]
+              parts = rel.split("/")
+              assert not (set(parts) & banned_parts), f"Banned dir leaked: {name}"
+              assert parts[-1] not in banned_files, f"Banned dev file leaked: {name}"
+              assert not rel.endswith((".sqlite3", ".db", ".pyc", ".bak")), f"Runtime artifact leaked: {name}"
+          for required in (
+              prefix + "main.py",
+              prefix + "metadata.yaml",
+              prefix + "_conf_schema.json",
+              prefix + "pages/world/cabin3d.min.js",
+              prefix + "vendor/azgaar/index.html",
+          ):
+              assert required in names, f"Missing required runtime asset: {required}"
+          print(f"Verified {len(names)} packaged files under {prefix}")
+          PY
 
       - name: Run unit tests
         working-directory: AstrBot/data/plugins/${{ github.event.repository.name }}
