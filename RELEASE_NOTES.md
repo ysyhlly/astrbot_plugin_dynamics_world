@@ -1,4 +1,9 @@
-# astrbot_plugin_dynamics_world v0.23.0-rc.11
+# astrbot_plugin_dynamics_world v0.23.0
+
+## v0.23.0 — 2026-11-26
+
+- **正式版发布（GA）**：整合全部 `v0.23.0-rc.x` 角色生活、3D 实况小屋、双地图与天气、安全/存储/性能优化。
+- **3D 小屋与 CI 修复**：补齐 `src/cabin3d.js` 中 `THREE.Plane` 具名导入并重打 `cabin3d.min.js`，补充全量 `THREE.*` 绑定回归检查；`package.json` 声明 `"type": "module"` 以兼容 Node 20 CI。
 
 ## v0.23.0-rc.11 — 2026-11-26
 

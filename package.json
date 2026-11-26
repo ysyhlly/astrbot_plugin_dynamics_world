@@ -1,6 +1,7 @@
 {
   "name": "dynamics-world-cabin",
   "private": true,
+  "type": "module",
   "scripts": {
     "build:cabin": "esbuild src/cabin3d.js --bundle --format=esm --platform=browser --target=es2022 --minify --legal-comments=eof --outfile=pages/world/cabin3d.min.js"
   },

@@ -1,5 +1,10 @@
 # 更新日志
 
+## v0.23.0 — 2026-11-26
+
+- **正式版发布（GA）**：整合全部 `v0.23.0-rc.x` 角色生活、3D 实况小屋、双地图与天气、安全/存储/性能优化。
+- **3D 小屋与 CI 修复**：补齐 `src/cabin3d.js` 中 `THREE.Plane` 具名导入并重打 `cabin3d.min.js`，补充全量 `THREE.*` 绑定回归检查；`package.json` 声明 `"type": "module"` 以兼容 Node 20 CI。
+
 ## v0.23.0-rc.11 — 2026-11-26
 
 - 修复 3D 像素小屋启动崩溃：`src/cabin3d.js` 补齐 `THREE.Plane` 具名导入与绑定，重新构建 `pages/world/cabin3d.min.js` 并将 `pages/world/pixel-cabin.js` 模块缓存参数升级至 `?v=homes.2`，同时补充全部 `THREE.*` / `T.*` 符号绑定静态回归检查。
