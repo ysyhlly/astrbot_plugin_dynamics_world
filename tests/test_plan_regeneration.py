@@ -108,6 +108,107 @@ class PlanRegenerationTest(unittest.TestCase):
             res = asyncio.run(engine.regenerate_daily_plan(scope))
             self.assertEqual(res["status"], "paused")
 
+    def test_hourly_top_of_hour_rounding_and_full_day_trim_normalized(self):
+        # Simulate hourly tick right after 01:00:00 with fractional seconds (01:00:25.97)
+        now = dt.datetime(2026, 11, 27, 1, 0, 25, 970000, tzinfo=CHINA).timestamp()
+        midnight = dt.datetime(2026, 11, 27, 0, 0, tzinfo=CHINA).timestamp()
+        one_am = dt.datetime(2026, 11, 27, 1, 0, tzinfo=CHINA).timestamp()
+        eight_am = dt.datetime(2026, 11, 27, 8, 0, tzinfo=CHINA).timestamp()
+        day_end = dt.datetime(2026, 11, 28, 0, 0, tzinfo=CHINA).timestamp()
+        scope = {"platform": "test", "umo": "test:GroupMessage:1", "persona_id": "p_test", "instance_id": "p_test"}
+
+        async def rounded_model(req):
+            return {
+                "schema_version": 1,
+                "no_change": False,
+                "daily_plan": [
+                    # Already-elapsed same-day block (00:00 -> 01:00)
+                    {"start": midnight, "end": one_am, "activity": "深夜睡前整理"},
+                    # Rounded-down top-of-hour spanning block (01:00:00 < 01:00:25.97 < 08:00:00)
+                    {"start": one_am, "end": eight_am, "activity": "安稳熟睡到早晨"},
+                    {"start": eight_am, "end": day_end, "activity": "日常写作阅读与休息"},
+                ],
+                "next_check": now + 3600,
+            }
+
+        with tempfile.TemporaryDirectory() as d:
+            engine = self._make_engine(Path(d), rounded_model, now)
+            tick = asyncio.run(engine.tick())
+            self.assertEqual(tick["results"][0]["status"], "advanced")
+            admin = asyncio.run(engine.get_narrative_admin(scope))
+            self.assertEqual(admin["plan_date"], "2026-11-27")
+            self.assertEqual(len(admin["daily_plan"]), 2)
+            self.assertEqual(admin["daily_plan"][0]["start"], now)
+            self.assertEqual(admin["daily_plan"][0]["end"], eight_am)
+            self.assertEqual(admin["plan_status"]["status"], "ready")
+
+    def test_hourly_retries_once_on_wrong_day_daily_plan(self):
+        now = dt.datetime(2026, 11, 27, 1, 0, 25, 500000, tzinfo=CHINA).timestamp()
+        yesterday_start = dt.datetime(2026, 11, 26, 8, 0, tzinfo=CHINA).timestamp()
+        yesterday_end = dt.datetime(2026, 11, 26, 12, 0, tzinfo=CHINA).timestamp()
+        day_end = dt.datetime(2026, 11, 28, 0, 0, tzinfo=CHINA).timestamp()
+        scope = {"platform": "test", "umo": "test:GroupMessage:1", "persona_id": "p_test", "instance_id": "p_test"}
+        seen = []
+
+        async def retry_model(req):
+            seen.append(req)
+            if len(seen) == 1:
+                return {
+                    "schema_version": 1,
+                    "no_change": False,
+                    "daily_plan": [
+                        {"start": yesterday_start, "end": yesterday_end, "activity": "昨日旧安排"},
+                    ],
+                }
+            bounds = req["previous_validation_failure"]["plan_window_int"]
+            return {
+                "schema_version": 1,
+                "no_change": False,
+                "daily_plan": [
+                    {"start": bounds["min_start"], "end": bounds["max_end"], "activity": "今日剩余安排"},
+                ],
+            }
+
+        with tempfile.TemporaryDirectory() as d:
+            engine = self._make_engine(Path(d), retry_model, now)
+            tick = asyncio.run(engine.tick())
+            self.assertEqual(len(seen), 2)
+            self.assertEqual(tick["results"][0]["status"], "advanced")
+            admin = asyncio.run(engine.get_narrative_admin(scope))
+            self.assertEqual(admin["plan_date"], "2026-11-27")
+            self.assertEqual(admin["daily_plan"][0]["end"], day_end)
+
+    def test_regenerate_daily_plan_survives_concurrent_resident_causal_revision(self):
+        now = dt.datetime(2026, 11, 27, 1, 59, 11, tzinfo=CHINA).timestamp()
+        scope = {"platform": "test", "umo": "test:GroupMessage:1", "persona_id": "p_test", "instance_id": "inst"}
+        global_scope = dict(scope, umo="", platform="")
+        engine_holder = {}
+
+        async def model_with_resident_tick(req):
+            # Simulate independent resident_runner bumping world_life_documents.revision mid-call
+            eng = engine_holder["engine"]
+            with eng._db() as db:
+                rev, doc = eng.causal.load(db, global_scope)
+                eng.causal.save(db, global_scope, rev, doc, bump=True)
+            w = req["plan_window"]
+            return {
+                "schema_version": 1,
+                "no_change": False,
+                "source_ids": [req["events"][0]["event_id"]],
+                "daily_plan": [
+                    {"start": w["start"] + 49, "end": w["end"], "activity": "熟睡与白日日常"},
+                ],
+                "next_check": w["start"] + 3600,
+            }
+
+        with tempfile.TemporaryDirectory() as d:
+            engine = self._make_engine(Path(d), model_with_resident_tick, now)
+            engine_holder["engine"] = engine
+            res = asyncio.run(engine.regenerate_daily_plan(scope))
+            self.assertEqual(res["status"], "regenerated")
+            self.assertEqual(res["plan_date"], "2026-11-27")
+            self.assertEqual(res["plan_status"]["status"], "ready")
+
 
 if __name__ == "__main__":
     unittest.main()

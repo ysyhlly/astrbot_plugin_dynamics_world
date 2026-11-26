@@ -11,6 +11,7 @@ import copy
 import datetime as dt
 import hashlib
 import json
+import math
 import re
 import sqlite3
 import threading
@@ -2024,11 +2025,13 @@ class NarrativeEngine(
                 r for r in care_waits if r.get("recipient_user_id") in participants
             ]
             if failed and failed["error"].startswith("validation."):
-                request["previous_validation_failure"] = {
-                    "reason_code": failed["error"],
-                    "attempt": failed["retry_attempt"],
-                    "instruction": "Correct this field using only current evidence; omit unsupported effects. no_change is valid.",
-                }
+                request["previous_validation_failure"] = self._plan_validation_failure_hint(
+                    failed["error"],
+                    int(failed["retry_attempt"] or 0),
+                    now,
+                    day_end,
+                    regen=False,
+                )
             for key in ("moods", "nicknames", "corrections"):
                 request["snapshot"]["humanlike"][key] = [
                     r
@@ -2050,10 +2053,37 @@ class NarrativeEngine(
                     1.0,
                     min(float(self.config.get("narrative_timeout_seconds", 90)), 90.0),
                 )
-                raw = await asyncio.wait_for(
-                    self.model(copy.deepcopy(request)), timeout
+                max_attempts = (
+                    2 if (not scope["umo"] and request.get("needs_daily_plan")) else 1
                 )
-                change = await asyncio.to_thread(self._validate_change, raw, request)
+                change = None
+                for attempt_idx in range(max_attempts):
+                    raw = await asyncio.wait_for(
+                        self.model(copy.deepcopy(request)), timeout
+                    )
+                    normalized_raw = self._normalize_llm_daily_plan(raw, request)
+                    try:
+                        change = await asyncio.to_thread(
+                            self._validate_change, normalized_raw, request
+                        )
+                        break
+                    except NarrativeValidationError as v_exc:
+                        if (
+                            attempt_idx + 1 < max_attempts
+                            and v_exc.code
+                            == "a_daily_plan_must_be_future_only_in_today_s_china_date"
+                        ):
+                            request["previous_validation_failure"] = (
+                                self._plan_validation_failure_hint(
+                                    "validation." + v_exc.code,
+                                    attempt_idx + 1,
+                                    now,
+                                    day_end,
+                                    regen=False,
+                                )
+                            )
+                            continue
+                        raise
             except asyncio.CancelledError:
                 await asyncio.shield(
                     asyncio.to_thread(
@@ -2242,8 +2272,15 @@ class NarrativeEngine(
             ).fetchone()[0]
         )
         if self.causal is not None:
+            needs_causal_lock = bool(
+                change.get("world_updates")
+                or change.get("agenda_changes")
+                or change.get("plan_id")
+                or change.get("served_residents")
+            )
             if (
-                change.get("causal_revision") is not None
+                needs_causal_lock
+                and change.get("causal_revision") is not None
                 and self.causal.load(db, scope)[0] != change["causal_revision"]
             ):
                 raise ValueError("生活日程或居民在推演期间已变化")
@@ -2981,6 +3018,99 @@ class NarrativeEngine(
                 db, global_scope, life, now, generating=generating
             )
 
+    def _plan_validation_failure_hint(
+        self,
+        reason_code: str,
+        attempt: int,
+        now: float,
+        day_end: float,
+        *,
+        regen: bool = False,
+    ) -> dict:
+        hint: dict[str, Any] = {
+            "reason_code": reason_code,
+            "attempt": attempt,
+            "instruction": (
+                "Return only valid daily_plan entries strictly within plan_window (start < end, non-overlapping) and optional state/next_check; omit world_action and movement."
+                if regen
+                else "Correct this field using only current evidence; omit unsupported effects. no_change is valid."
+            ),
+        }
+        if reason_code == "validation.a_daily_plan_must_be_future_only_in_today_s_china_date":
+            min_start = math.ceil(now)
+            max_end = int(day_end)
+            hint["plan_window_int"] = {"min_start": min_start, "max_end": max_end}
+            hint["instruction"] = (
+                f"Every daily_plan entry MUST satisfy {min_start} <= start < end <= {max_end} "
+                f"(integer epoch seconds within today's remaining window). Do NOT round start down to HH:00:00, "
+                f"do NOT drop decimals below plan_window.start, do NOT reuse yesterday's timestamps, "
+                f"and do NOT let end exceed {max_end}."
+            )
+        return hint
+
+    def _normalize_llm_daily_plan(self, raw: Any, request: dict) -> Any:
+        """Trim/clamp same-day already-elapsed starts (e.g. HH:00:00 rounding or float truncation).
+
+        Never alters wrong-date entries (start < day_start) or midnight-crossing entries (end > day_end),
+        so strict date/horizon validation remains authoritative.
+        """
+        if (
+            not isinstance(raw, dict)
+            or not isinstance(raw.get("daily_plan"), list)
+            or (request.get("scope") or {}).get("umo")
+            or not request.get("needs_daily_plan")
+        ):
+            return raw
+        now = float(request["now"])
+        tz = self._timezone()
+        day = dt.datetime.fromtimestamp(now, tz).date()
+        day_start = dt.datetime.combine(day, dt.time(), tz).timestamp()
+        day_end = dt.datetime.combine(
+            day + dt.timedelta(days=1), dt.time(), tz
+        ).timestamp()
+        items = raw["daily_plan"]
+        normalized: list[Any] = []
+        changed = False
+        dropped_past_today = 0
+        for item in items:
+            if not isinstance(item, dict):
+                normalized.append(item)
+                continue
+            s = item.get("start")
+            e = item.get("end")
+            if (
+                isinstance(s, bool)
+                or isinstance(e, bool)
+                or not isinstance(s, (int, float))
+                or not isinstance(e, (int, float))
+                or not (math.isfinite(s) and math.isfinite(e))
+            ):
+                normalized.append(item)
+                continue
+            # Preserve cross-day / tomorrow errors for strict rejection.
+            if s < day_start or e > day_end:
+                normalized.append(item)
+                continue
+            if day_start <= s < now < e <= day_end:
+                patched = dict(item)
+                patched["start"] = now
+                normalized.append(patched)
+                changed = True
+                continue
+            if day_start <= s < e <= now:
+                dropped_past_today += 1
+                changed = True
+                continue
+            normalized.append(item)
+        if not changed:
+            return raw
+        # Only drop fully-elapsed same-day entries if future entries remain; otherwise keep original so validator rejects.
+        if dropped_past_today and not normalized:
+            return raw
+        patched_raw = dict(raw)
+        patched_raw["daily_plan"] = normalized
+        return patched_raw
+
     async def regenerate_daily_plan(
         self,
         scope: dict,
@@ -3077,17 +3207,12 @@ class NarrativeEngine(
                             "INSERT INTO events VALUES(?,?,?,?,?,?,'pending','',?,0,0)",
                             (ev_id, identity, "", now, now, _json(ev), now),
                         )
-                        c_rev = (
-                            self.causal.load(db, global_scope)[0]
-                            if self.causal is not None
-                            else None
-                        )
-                        return None, (snap, lf, dy, ev_id, ev, c_rev)
+                        return None, (snap, lf, dy, ev_id, ev)
 
                 paused_resp, prep = await asyncio.to_thread(_prepare_regen_sync)
                 if paused_resp is not None:
                     return paused_resp
-                snapshot, life, diary, event_id, event, causal_rev = prep
+                snapshot, life, diary, event_id, event = prep
                 tz = self._timezone()
                 tz_name = self._timezone_name()
                 local_date = dt.datetime.fromtimestamp(now, tz).date()
@@ -3120,8 +3245,9 @@ class NarrativeEngine(
                     "weather_reassessment": False,
                     "offline_catchup": False,
                 }
-                if causal_rev is not None:
-                    request["causal_revision"] = causal_rev
+                # Do NOT bind causal_revision here: plan_only_keys strips world_updates,
+                # agenda_changes, and plan_id, so concurrent resident_runner ticks must
+                # never abort manual daily_plan regeneration with a false revision conflict.
                 request["snapshot"]["humanlike"] = copy.deepcopy(snapshot["humanlike"])
                 started = time.monotonic()
                 call_id = str(uuid.uuid4())
@@ -3154,6 +3280,7 @@ class NarrativeEngine(
                             if isinstance(raw, dict)
                             else raw
                         )
+                        sanitized = self._normalize_llm_daily_plan(sanitized, request)
                         try:
                             change = self._validate_change(sanitized, request)
                             if not change.get("daily_plan"):
@@ -3167,11 +3294,15 @@ class NarrativeEngine(
                                 "unsupported_narrative_response",
                                 "empty_daily_plan_on_regeneration",
                             }:
-                                request["previous_validation_failure"] = {
-                                    "reason_code": "validation." + v_exc.code,
-                                    "attempt": 1,
-                                    "instruction": "Return only valid daily_plan entries strictly within plan_window (start < end, non-overlapping) and optional state/next_check; omit world_action and movement.",
-                                }
+                                request["previous_validation_failure"] = (
+                                    self._plan_validation_failure_hint(
+                                        "validation." + v_exc.code,
+                                        1,
+                                        now,
+                                        day_end,
+                                        regen=True,
+                                    )
+                                )
                                 continue
                             raise
                 except asyncio.CancelledError:

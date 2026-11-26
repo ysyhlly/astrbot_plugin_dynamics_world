@@ -102,7 +102,7 @@ humanlike每条source_ids只能引用本批事件；moods/nicknames只引用该�
 next_check:未来复查的epoch时间；
 daily_plan:[{start,end,activity}]（仅全局needs_daily_plan=true时允许，时间只能在今日未来）。
 daily_plan直接使用程序提供的plan_window数值，不自行计算日期、时区或午夜。
-每个条目满足plan_window.start <= start < end <= plan_window.end；end是区间的排除边界，允许等于给定午夜数值。
+每个条目满足plan_window.start <= start < end <= plan_window.end（首条 start 请向上取整或直接取 >= plan_window.start 的未来整分，不要向下圆整到已过去的整点如 HH:00:00 或截断小数）；end是区间的排除边界，允许等于给定午夜数值。
 距离午夜很近时仍给出就寝准备或安静歇息的短条目衔接睡眠，不返回空计划让角色呆站；不把明天的安排放进今天的daily_plan。
 manual_plan_regeneration=true 时仅重新生成今日剩余时段的 daily_plan（非空，可附带 state 与 next_check），不要返回 world_action、movement、agenda_changes 或 world_updates，不要返回 no_change=true；已有已完成经历不改写。
 daily_plan 是有依据的当日安排，时间在 plan_window 内且不重叠。允许留白、休息与改变主意，不为填满全天制造活动。
@@ -443,7 +443,7 @@ PLAN_REGENERATION_RULES = """你是受角色设定、既有状态与时间连续
 规则：
 1. 仅返回 JSON 对象，schema_version=1，包含非空 daily_plan、no_change=false、source_ids（引用本批 event_id），可附带 state（activity_code/availability/subjective_state/summary/valid_until）与 next_check。
 2. 禁止返回 world_action、movement、agenda_changes、world_updates、diary、commitments、contact_intents、care_waits 或 humanlike；禁止返回 no_change=true。
-3. daily_plan:[{start,end,activity}] 严格使用程序提供的 plan_window 数值（plan_window.start <= start < end <= plan_window.end，不重叠，最多12条），不自行计算日期、时区或午夜；不把明天安排放进今天。
+3. daily_plan:[{start,end,activity}] 严格使用程序提供的 plan_window 数值（plan_window.start <= start < end <= plan_window.end，首条 start 必须 >= plan_window.start，不要向下圆整到已过去的整点或截断小数，不重叠，最多12条），不自行计算日期、时区或午夜；不把明天安排放进今天。
 4. 结合角色性格、当前兴趣、天气、已有约定与 regeneration_hint（若有）合理安排三餐、阅读/写作/游戏/散步、整理、歇息与夜间就寝睡眠；距离午夜很近时仍给出就寝准备或安静歇息短条目。夜间时段（约22点至次日晨起）应安排就寝与睡眠，不深夜无故站立，也不把计划睡觉当成已经睡过。
 5. 每条 activity 用一句具体自然的话描述在做什么（不超过120字），不写空泛的“休息”“待着”。activity_code:writing/gaming/resting/sleeping/eating/reading/walking/chores/unknown；availability:available/busy/asleep/unknown；valid_until 与 next_check 在 now 之后 24 小时内。
 6. 若提供 previous_validation_failure，修正指出字段，严格满足 plan_window 边界与非重叠约束。
