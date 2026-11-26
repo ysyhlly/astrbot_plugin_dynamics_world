@@ -127,6 +127,9 @@ globalThis.window = {{
 }};
 globalThis.localStorage = globalThis.window.localStorage;
 globalThis.location = {{ search: '' }};
+if (typeof globalThis.navigator === 'undefined') {{
+  Object.defineProperty(globalThis, 'navigator', {{ value: {{ language: 'zh-CN' }}, configurable: true }});
+}}
 globalThis.document = {{
   readyState: 'complete',
   body: {{}},
