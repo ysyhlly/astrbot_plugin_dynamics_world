@@ -3,7 +3,7 @@ import {
   ACESFilmicToneMapping, AdditiveBlending, Box3, BoxGeometry, BufferGeometry, CanvasTexture, Color,
   DirectionalLight, DynamicDrawUsage, Euler, Float32BufferAttribute, Fog, Group, HalfFloatType,
   HemisphereLight, InstancedMesh, MathUtils, Matrix4, Mesh, MeshBasicMaterial, MeshStandardMaterial,
-  NearestFilter, PCFShadowMap, PerspectiveCamera, PlaneGeometry, PointLight, Quaternion, Raycaster,
+  NearestFilter, PCFShadowMap, PerspectiveCamera, Plane, PlaneGeometry, PointLight, Quaternion, Raycaster,
   RepeatWrapping, SRGBColorSpace, Scene, Spherical, TextureLoader, Vector2, Vector3, WebGLRenderTarget,
   WebGLRenderer,
 } from 'three';
@@ -24,7 +24,7 @@ const THREE = {
   ACESFilmicToneMapping, AdditiveBlending, Box3, BoxGeometry, BufferGeometry, CanvasTexture, Color,
   DirectionalLight, DynamicDrawUsage, Euler, Float32BufferAttribute, Fog, Group, HalfFloatType,
   HemisphereLight, InstancedMesh, MathUtils, Matrix4, Mesh, MeshBasicMaterial, MeshStandardMaterial,
-  NearestFilter, PCFShadowMap, PerspectiveCamera, PlaneGeometry, PointLight, Quaternion, Raycaster,
+  NearestFilter, PCFShadowMap, PerspectiveCamera, Plane, PlaneGeometry, PointLight, Quaternion, Raycaster,
   RepeatWrapping, SRGBColorSpace, Scene, Spherical, TextureLoader, Vector2, Vector3, WebGLRenderTarget,
   WebGLRenderer,
 };

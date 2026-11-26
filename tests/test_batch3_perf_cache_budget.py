@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import json
+import re
 import sys
 import types
 from pathlib import Path
@@ -679,3 +680,18 @@ def test_cabin_3d_perf_and_disposal_contracts():
     assert "startsWith('data:')" in styles
     assert "__CABIN_WHALE_ART_URL__" in bundle
     assert "disposeMaterials" in bundle
+
+    # Every THREE.* / T.* symbol referenced by src/cabin3d.js and pages/world/*.js must be bound on THREE
+    three_block = re.search(r"const THREE\s*=\s*\{([^}]+)\}", cabin3d)
+    assert three_block, "const THREE = {...} block missing from src/cabin3d.js"
+    bound_three = set(re.findall(r"\b([A-Za-z0-9_]+)\b", three_block.group(1)))
+    assert "Plane" in bound_three
+    missing_three: dict[str, list[str]] = {}
+    for js_file in [root / "src" / "cabin3d.js", *sorted((root / "pages" / "world").glob("*.js"))]:
+        if js_file.name == "cabin3d.min.js":
+            continue
+        text = js_file.read_text(encoding="utf-8")
+        for symbol in re.findall(r"\b(?:THREE|T)\.([A-Z][A-Za-z0-9_]*)\b", text):
+            if symbol not in bound_three:
+                missing_three.setdefault(symbol, []).append(js_file.name)
+    assert not missing_three, f"Unbound THREE symbols: {missing_three}"

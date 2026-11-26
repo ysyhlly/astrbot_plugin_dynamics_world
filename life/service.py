@@ -4,7 +4,6 @@
 
 import asyncio
 import datetime
-import hashlib
 import inspect
 import json
 import re

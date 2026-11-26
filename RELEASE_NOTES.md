@@ -1,4 +1,9 @@
-# astrbot_plugin_dynamics_world v0.23.0-rc.10
+# astrbot_plugin_dynamics_world v0.23.0-rc.11
+
+## v0.23.0-rc.11 — 2026-11-26
+
+- 修复 3D 像素小屋启动崩溃：`src/cabin3d.js` 补齐 `THREE.Plane` 具名导入与绑定，重新构建 `pages/world/cabin3d.min.js` 并将 `pages/world/pixel-cabin.js` 模块缓存参数升级至 `?v=homes.2`，补充 `THREE.*` / `T.*` 符号绑定回归检查。
+- 规范与测试修复：清理 `life/service.py` 未使用导入并通过 `ruff` 静态门禁，同步 `tests/test_series_shared_coordination.py` 对 `NarrativeProviderBusy` 异常类型的断言。
 
 ## v0.23.0-rc.10 — 2026-11-25
 

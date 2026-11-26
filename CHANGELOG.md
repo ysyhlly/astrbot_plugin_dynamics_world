@@ -1,5 +1,10 @@
 # 更新日志
 
+## v0.23.0-rc.11 — 2026-11-26
+
+- 修复 3D 像素小屋启动崩溃：`src/cabin3d.js` 补齐 `THREE.Plane` 具名导入与绑定，重新构建 `pages/world/cabin3d.min.js` 并将 `pages/world/pixel-cabin.js` 模块缓存参数升级至 `?v=homes.2`，同时补充全部 `THREE.*` / `T.*` 符号绑定静态回归检查。
+- 规范与测试修复：清理 `life/service.py` 未使用的 `hashlib` 导入以通过 `ruff` 门禁，并同步 `tests/test_series_shared_coordination.py` 对 `NarrativeProviderBusy` 异常类型的断言。
+
 ## v0.23.0-rc.10 — 2026-11-25
 
 - 安全加固（Batch 1）：世界模块 Web API 全面强制 `require_series_admin` 与 CSRF 校验。

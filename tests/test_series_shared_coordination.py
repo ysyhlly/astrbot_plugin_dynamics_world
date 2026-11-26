@@ -10,11 +10,11 @@ import pytest
 
 from astrbot_plugin_dynamics_world.life.core.generator import Generator
 from astrbot_plugin_dynamics_world.life.core.narrative import NarrativeEngine
-from astrbot_plugin_dynamics_world.life.core.state import DataManager
-from astrbot_plugin_dynamics_world.life.service import (
-    LifeService,
-    NarrativeProviderUnavailable,
+from astrbot_plugin_dynamics_world.life.core.narrative_types import (
+    NarrativeProviderBusy,
 )
+from astrbot_plugin_dynamics_world.life.core.state import DataManager
+from astrbot_plugin_dynamics_world.life.service import LifeService
 from astrbot_plugin_dynamics_world.series_hooks import build_series_scope_status
 from astrbot_plugin_dynamics_world.series_panels import (
     is_series_group_excluded,
@@ -194,7 +194,7 @@ async def test_world_narrative_model_uses_shared_budget_and_raises_unavailable_o
         "recent_diary": [],
         "plan": [],
     }
-    with pytest.raises(NarrativeProviderUnavailable, match="Shared provider budget busy"):
+    with pytest.raises(NarrativeProviderBusy, match="Shared provider budget busy"):
         await svc._narrative_model(req)
     assert busy_budget.calls[0]["plugin_id"] == "astrbot_plugin_dynamics_world"
 
