@@ -277,6 +277,21 @@
 .cabin-quick-note .cabin-quick-input{flex:1 1 120px;min-width:0;min-height:32px;padding:5px 9px;font-size:12px;border-radius:8px}
 .cabin-quick-note .cabin-quick-select{flex:1 1 92px;min-width:0;min-height:32px;padding:4px 8px;font-size:12px;border-radius:8px;border:1px solid var(--wb-border);background:var(--wb-surface);color:var(--wb-text)}
 .cabin-booklet-reader{max-height:132px;overflow:auto;padding:9px 11px;border-radius:10px;background:var(--wb-surface-2);border:1px solid var(--wb-border);font:12px/1.65 var(--wb-sans);color:var(--wb-text);white-space:pre-wrap}
+.cabin-keepsake-gallery{display:grid;gap:7px;max-height:178px;overflow-y:auto}
+.cabin-keepsake-tile{
+  display:flex;align-items:flex-start;gap:9px;padding:8px 9px;border-radius:11px;
+  background:var(--wb-surface-2);border:1px solid var(--wb-border);
+}
+.cabin-keepsake-thumb{width:48px;height:48px;object-fit:cover;border-radius:8px;flex:none;border:1px solid var(--wb-border)}
+.cabin-keepsake-meta{min-width:0;flex:1;display:grid;gap:3px}
+.cabin-keepsake-head{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.cabin-keepsake-head strong{font-size:12px;color:var(--wb-text)}
+.cabin-keepsake-source{
+  display:inline-flex;align-items:center;padding:1px 7px;border-radius:999px;font-size:10px;font-weight:600;
+  background:var(--ds-accent-soft,#e3f0e7);color:var(--ds-accent,#246246);
+}
+.cabin-keepsake-meta small{font-size:11px;color:var(--wb-text-soft);line-height:1.4;overflow-wrap:anywhere}
+.cabin-keepsake-jump{justify-self:start;min-height:24px!important;padding:2px 8px!important;font-size:10.5px!important;border-radius:999px!important}
 .cabin-inspect-btn-row{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
 .cabin-inspect-btn-row .wb-button{border-radius:999px;min-height:30px;padding:4px 11px;font-size:11.5px}
 

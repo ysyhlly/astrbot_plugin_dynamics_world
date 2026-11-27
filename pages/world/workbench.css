@@ -539,4 +539,12 @@ body[data-stage-mode="cabin-drawer"] .dw-cabin-language {display:inline-flex;}
   border-color:var(--wb-accent);background:var(--wb-accent-soft);color:var(--wb-accent);font-weight:600;
 }
 .wb-book-chip input {margin:0;accent-color:var(--wb-accent);}
+.dw-resident-avatar {
+  width:30px;height:30px;font-size:13px;background:#9c6b3d!important;color:#fff!important;
+  border:2px solid #fff;box-shadow:0 2px 8px rgba(32,24,16,.28);
+}
+.causal-neighbor-wizard {display:grid;gap:10px;}
+.causal-neighbor-chips {display:grid;gap:6px;}
+.causal-neighbor-form {display:grid;gap:8px;padding-top:6px;border-top:1px solid var(--wb-border);}
+.causal-neighbor-form label {display:grid;gap:4px;font-size:12px;}
 @media(prefers-reduced-motion:reduce) {*,*::before,*::after {animation:none!important;transition:none!important;scroll-behavior:auto!important;}}

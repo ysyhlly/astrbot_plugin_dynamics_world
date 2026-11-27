@@ -1,13 +1,52 @@
 """Cozy non-punitive garden flowerbed, vegetable patch and kitchen pantry cycle."""
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import uuid
+from datetime import datetime
 
-from .series_panels import resolve_series_timezone_name
+from .series_panels import resolve_series_timezone, resolve_series_timezone_name
 from .spatial import encode, identity
 from .vitality import cat_state_for, compute_vitality, season_for
+
+SOLAR_TERM_TEAS = {
+    "立春": "春风樱花酪配明前龙井",
+    "雨水": "杏仁云片糕配白毫银针",
+    "惊蛰": "蜜渍梨花酥配早春碧螺春",
+    "春分": "青团红豆沙配明前绿茶",
+    "清明": "艾草青团配雨前龙井",
+    "谷雨": "牡丹鲜花饼配谷雨春茶",
+    "立夏": "乌米甜团配清香茉莉花茶",
+    "小满": "桑葚酸奶糕配冷泡洋甘菊",
+    "芒种": "青梅琥珀冻配薄荷青茶",
+    "夏至": "冰镇绿豆糕配冷萃薄荷茶",
+    "小暑": "荷叶莲子露配白牡丹冷茶",
+    "大暑": "蜜桃冰酪配薄荷甘菊冰茶",
+    "立秋": "冰糖炖梨盏配蜜桃乌龙",
+    "处暑": "桂花糯米藕配凤凰单丛",
+    "白露": "白露米酒桂花糕配清露茶",
+    "秋分": "栗子蓉月饼配金桂乌龙",
+    "寒露": "芝麻核桃酥配炭焙铁观音",
+    "霜降": "柿霜小点配熟普桂花茶",
+    "立冬": "红豆栗子羊羹配暖姜花茶",
+    "小雪": "烤红薯布丁配焙茶拿铁",
+    "大雪": "肉桂苹果派配红茶牛奶",
+    "冬至": "桂花酒酿小圆子配陈皮普洱",
+    "小寒": "黑芝麻核桃糊配烤橘红茶",
+    "大寒": "姜糖枣泥糕配暖胃花草茶",
+}
+SEASON_DEFAULT_TEAS = {
+    "spring": "春日花瓣茶点配清香绿茶",
+    "summer": "薄荷青梅凉糕配冷泡花草茶",
+    "autumn": "桂花栗子小点配暖香乌龙",
+    "winter": "红豆羊羹配温热姜蜜花茶",
+}
+
+
+def _tea_party_treat(solar_term: str, season_code: str) -> str:
+    return SOLAR_TERM_TEAS.get(solar_term) or SEASON_DEFAULT_TEAS.get(season_code, "院落限定手作茶点")
 
 ECOLOGY_KINDS = {"water_garden", "harvest_garden", "prepare_meal", "brew_tea", "eat_meal", "drink_tea"}
 ECOLOGY_LABELS = {
@@ -290,6 +329,150 @@ class EcologyService:
         eco["last_settled_at"] = now
         self.save(db, key, rev, eco, now, bump=True)
         return result
+
+    def coop_water(
+        self,
+        scope: dict,
+        *,
+        user_id: str,
+        display_name: str,
+        note: str = "",
+        cooldown_seconds: int = 300,
+        daily_limit: int = 3,
+        env: dict | None = None,
+        now: float | None = None,
+    ) -> dict:
+        """Group member cooperative garden watering with cooldown, daily cap & solar-term tea party trigger."""
+        ts = float(self.engine.clock() if now is None else now)
+        uid = str(user_id or display_name or "member")[:80]
+        uname = str(display_name or user_id or "群友").strip()[:32]
+        clean_note = " ".join(str(note or "").split()).strip()[:90]
+        tz_name = (env or {}).get("timezone") or resolve_series_timezone_name(
+            getattr(self.engine, "host_context", None)
+        )
+        tz = resolve_series_timezone(getattr(self.engine, "host_context", None), explicit_tz=tz_name)
+        date_str = datetime.fromtimestamp(ts, tz).strftime("%Y-%m-%d")
+        season = season_for(ts, tz_name)
+        solar_term = str(season.get("solar_term") or season.get("season_label") or "时令")
+
+        with self.engine._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            key, rev, eco = self.load(db, scope)
+            coop = eco.get("coop_watering")
+            if not isinstance(coop, dict) or coop.get("date") != date_str:
+                prev_tea_key = str((coop or {}).get("last_tea_party_key") or "") if isinstance(coop, dict) else ""
+                coop = {
+                    "date": date_str,
+                    "participants": [],
+                    "total_today": 0,
+                    "last_tea_party_key": prev_tea_key,
+                }
+            participants = [p for p in (coop.get("participants") or []) if isinstance(p, dict)]
+            me = next((p for p in participants if p.get("user_id") == uid), None)
+            if me is not None:
+                last_at = float(me.get("last_at") or 0.0)
+                if cooldown_seconds > 0 and ts - last_at < cooldown_seconds:
+                    wait = max(1, int(cooldown_seconds - (ts - last_at)))
+                    raise ValueError(f"你刚刚给小院浇过水啦，请 {wait} 秒后再来照料")
+                if daily_limit > 0 and int(me.get("count") or 0) >= daily_limit:
+                    raise ValueError(f"今天你已经浇水 {daily_limit} 次啦，花草喝饱水正晒太阳呢")
+                me["count"] = int(me.get("count") or 0) + 1
+                me["last_at"] = ts
+                me["name"] = uname
+                if clean_note:
+                    me["note"] = clean_note
+            else:
+                me = {"user_id": uid, "name": uname, "count": 1, "last_at": ts, "note": clean_note}
+                participants.append(me)
+
+            coop["participants"] = participants[-24:]
+            coop["total_today"] = int(coop.get("total_today") or 0) + 1
+
+            prev_flower_stage = str(eco["flowerbed"].get("stage") or "growing")
+            for name, final_stage in (("flowerbed", "blooming"), ("veg_patch", "ripe")):
+                plot = eco[name]
+                plot["watered_at"] = ts
+                plot["progress"] = min(1.0, round(float(plot.get("progress", 0.0) or 0.0) + 0.18, 3))
+                plot["stage"] = _stage_for(plot["progress"], final_stage)
+
+            flower_bloomed = eco["flowerbed"]["progress"] >= 0.85
+            tea_party_key = f"{date_str}:{solar_term}"
+            already_hosted = coop.get("last_tea_party_key") == tea_party_key
+            tea_party: dict | None = None
+            if (flower_bloomed and (prev_flower_stage != "blooming" or not already_hosted)) or (
+                not already_hosted and coop["total_today"] >= 2 and eco["flowerbed"]["progress"] >= 0.65
+            ):
+                treat_name = _tea_party_treat(solar_term, str(season.get("season") or "spring"))
+                names = [str(p.get("name") or "群友") for p in participants[-6:]]
+                sig_line = "、".join(names)
+                coop["last_tea_party_key"] = tea_party_key
+                tea_item = {
+                    "id": f"teaparty_{date_str}_{uuid.uuid4().hex[:6]}",
+                    "title": f"{solar_term}茶会 · {treat_name}",
+                    "kind": "tea",
+                    "ingredients": ["洋甘菊", "薄荷叶"],
+                    "at": ts,
+                    "participants": names,
+                }
+                eco["recent_meals"] = (list(eco.get("recent_meals") or []) + [dict(tea_item, status="prepared")])[-6:]
+                if self.engine.keepsakes is not None:
+                    self.engine.keepsakes.place_item(
+                        db,
+                        scope,
+                        {
+                            "id": tea_item["id"],
+                            "title": f"{solar_term}限定茶点",
+                            "kind": "tea",
+                            "sender": sig_line[:32],
+                            "summary": f"{solar_term}节气茶会：{treat_name}（共种伙伴：{sig_line}）",
+                            "preferred_slot": "table_snack",
+                        },
+                        ts,
+                    )
+                    self.engine.keepsakes.record_keyframe(
+                        db,
+                        scope,
+                        "solar_tea_party",
+                        f"举办了{solar_term}节气茶会，在庭院桌摆上{treat_name}（共种：{sig_line}）",
+                        {},
+                        ts,
+                    )
+                tea_party = {
+                    "triggered": True,
+                    "solar_term": solar_term,
+                    "treat_name": treat_name,
+                    "participants": names,
+                    "caption": f"{solar_term}节气茶会 · {treat_name}（共种：{sig_line[:22]}）",
+                }
+            elif self.engine.keepsakes is not None:
+                self.engine.keepsakes.record_keyframe(
+                    db,
+                    scope,
+                    "coop_water",
+                    f"{uname}来给小院花圃与菜畦浇了水" + (f"：{clean_note}" if clean_note else ""),
+                    {},
+                    ts,
+                )
+
+            eco["coop_watering"] = coop
+            eco["last_settled_at"] = ts
+            self.save(db, key, rev, eco, ts, bump=True)
+
+        return {
+            "ok": True,
+            "user_name": uname,
+            "flower_progress": int(round(float(eco["flowerbed"]["progress"]) * 100)),
+            "veg_progress": int(round(float(eco["veg_patch"]["progress"]) * 100)),
+            "flower_stage": eco["flowerbed"]["stage"],
+            "veg_stage": eco["veg_patch"]["stage"],
+            "participants": [str(p.get("name") or "") for p in coop["participants"]],
+            "total_today": coop["total_today"],
+            "solar_term": solar_term,
+            "tea_party": tea_party or {"triggered": False},
+        }
+
+    async def coop_water_async(self, scope: dict, **kwargs) -> dict:
+        return await asyncio.to_thread(self.coop_water, scope, **kwargs)
 
     def candidates(self, db, scope, scene_state: dict, actor: dict, now: float) -> list[dict]:
         home_places = {r["place_id"] for r in scene_state.get("rooms", {}).values()}

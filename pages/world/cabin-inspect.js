@@ -610,19 +610,77 @@ export function createCabinInspector(stage,{onResetFocus,onOpenDrawer,onCycleTim
    );
   }else if(key==='shelf'){
    appendFurnitureArrange('shelf',data,canWrite);
+   const slotEntries=Object.entries(ks.slots||{}).filter(([,it])=>it&&typeof it==='object'&&it.title);
+   if(slotEntries.length){
+    const gallery=document.createElement('div');
+    gallery.className='cabin-keepsake-gallery';
+    const slotLabels=ks.slot_labels||{};
+    for(const [slotId,item] of slotEntries.slice(0,6)){
+     const tile=document.createElement('div');
+     tile.className='cabin-keepsake-tile';
+     if(item.image_data_url){
+      const img=document.createElement('img');
+      img.className='cabin-keepsake-thumb';
+      img.src=item.image_data_url;
+      img.alt=item.title;
+      tile.append(img);
+     }
+     const meta=document.createElement('div');
+     meta.className='cabin-keepsake-meta';
+     const headRow=document.createElement('div');
+     headRow.className='cabin-keepsake-head';
+     const nameEl=document.createElement('strong');
+     nameEl.textContent=item.title;
+     headRow.append(nameEl);
+     if(item.source_label||item.source_plugin){
+      const badge=document.createElement('span');
+      badge.className='cabin-keepsake-source';
+      badge.textContent=item.source_label||item.source_plugin;
+      headRow.append(badge);
+     }
+     meta.append(headRow);
+     const sub=document.createElement('small');
+     sub.textContent=[slotLabels[slotId]||slotId,item.sender?`来自 ${item.sender}`:'',item.summary||''].filter(Boolean).join(' · ').slice(0,84);
+     meta.append(sub);
+     if(item.deep_link||item.source_plugin){
+      const jumpBtn=makeBtn('溯源查看 ↗','',()=>{
+       hideCard();
+       const target=item.source_plugin||'';
+       if(target&&target!=='astrbot_plugin_dynamics_world'&&window.DynamicsSeriesNavigation?.open){
+        window.DynamicsSeriesNavigation.open(target);
+       }else{
+        const view=item.deep_link&&!item.deep_link.includes('/')?item.deep_link:'activity';
+        onOpenDrawer?.(view);
+       }
+      });
+      jumpBtn.classList.add('cabin-keepsake-jump');
+      meta.append(jumpBtn);
+     }
+     tile.append(meta);
+     gallery.append(tile);
+    }
+    actions.append(gallery);
+   }
    const vols=Array.isArray(ks.bookshelf_volumes)?ks.bookshelf_volumes:[];
    if(vols.length){
     const bookBar=document.createElement('div');
     bookBar.className='cabin-inspect-btn-row';
     const readerBox=document.createElement('div');
     readerBox.className='cabin-booklet-reader';
+    const formatVolText=vol=>{
+     const base=`《${vol.title}》：${vol.content||vol.excerpt||'（手稿正文已归档）'}`;
+     const bms=Array.isArray(vol.bookmarks)?vol.bookmarks:[];
+     if(!bms.length)return base;
+     return base+'\n\n🔖 群友夹页书签：\n'+bms.map(b=>`• ${b.sender_name||'读者'}：${b.review}`).join('\n');
+    };
     const activeVol=vols.find(v=>v.id===openBookId)||vols[0];
     openBookId=activeVol.id;
-    readerBox.textContent=`《${activeVol.title}》：${activeVol.content||activeVol.excerpt||'（手稿正文已归档）'}`;
+    readerBox.textContent=formatVolText(activeVol);
     for(const vol of vols.slice(0,6)){
-     const btn=makeBtn(`📖 ${vol.title}`,vol.id===openBookId?'primary':'',()=>{
+     const bmCount=Array.isArray(vol.bookmarks)?vol.bookmarks.length:0;
+     const btn=makeBtn(`📖 ${vol.title}${bmCount?` (${bmCount}签)`:''}`,vol.id===openBookId?'primary':'',()=>{
       openBookId=vol.id;
-      readerBox.textContent=`《${vol.title}》：${vol.content||vol.excerpt||'（手稿正文已归档）'}`;
+      readerBox.textContent=formatVolText(vol);
       bookBar.querySelectorAll('button').forEach((b,idx)=>{
        b.classList.toggle('primary',vols[idx]?.id===openBookId);
       });

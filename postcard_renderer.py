@@ -106,10 +106,203 @@ def parse_shot_override(raw_text: str) -> tuple[str, str]:
         "陈列": "keepsake",
         "keepsake": "keepsake",
         "shelf": "keepsake",
+        "旅途": "travel",
+        "旅行": "travel",
+        "风景": "travel",
+        "travel": "travel",
     }
     if head in mapping:
         return mapping[head], rest
     return "auto", text
+
+
+def is_actor_away(snapshot: dict) -> bool:
+    """Return True when the character is travelling or located outside any home place."""
+    scene = snapshot.get("scene") or {}
+    actor = snapshot.get("actor") or {}
+    if scene.get("phase") == "travelling" or actor.get("phase") == "travelling":
+        return True
+    if actor.get("journey"):
+        return True
+    rooms = scene.get("rooms") or []
+    home_places = {r.get("place_id") for r in rooms if isinstance(r, dict) and r.get("place_id")}
+    cur_place = scene.get("place_id") or actor.get("place_id")
+    return bool(home_places and cur_place and cur_place not in home_places)
+
+
+def render_travel_postcard_image(snapshot: dict, *, caption: str = "") -> bytes:
+    """Render a dual-map Travel Scenery Postcard (local map/route + live weather + avatar + postmark)."""
+    W, H = 800, 640
+    card = Image.new("RGB", (W, H), (247, 241, 228))
+    draw = ImageDraw.Draw(card, "RGBA")
+    # Vintage postcard border & airmail stripes
+    draw.rounded_rectangle((14, 14, W - 14, H - 14), radius=18, outline=(198, 184, 160), width=2)
+    for sx in range(28, W - 36, 36):
+        color = (182, 78, 72) if (sx // 36) % 2 == 0 else (66, 108, 142)
+        draw.rectangle((sx, 20, sx + 18, 25), fill=color)
+
+    scene = snapshot.get("scene") or {}
+    actor = snapshot.get("actor") or {}
+    journey = actor.get("journey") if isinstance(actor.get("journey"), dict) else None
+    env = snapshot.get("environment") or {}
+    cur = env.get("current") or {}
+    map_doc = snapshot.get("map") if isinstance(snapshot.get("map"), dict) else {}
+    char_name = str((snapshot.get("character") or {}).get("name") or "旅人")[:18]
+
+    tz = resolve_series_timezone(None, explicit_tz=str(env.get("timezone") or ""))
+    now = float(snapshot.get("server_time") or datetime.now().timestamp())
+    local = datetime.fromtimestamp(now, tz)
+
+    # Map viewport box
+    mx0, my0, mx1, my1 = 36, 44, 520, 446
+    mw, mh = mx1 - mx0, my1 - my0
+    map_bg = Image.new("RGB", (mw, mh), (232, 224, 204))
+    mdraw = ImageDraw.Draw(map_bg, "RGBA")
+
+    # Try embedding cropped virtual map image if available
+    embedded_map = False
+    raw_img = str(map_doc.get("image") or "")
+    if raw_img.startswith("data:image/") and "," in raw_img:
+        try:
+            raw_bytes = base64.b64decode(raw_img.split(",", 1)[1])
+            with Image.open(BytesIO(raw_bytes)) as src_map:
+                src_map = src_map.convert("RGB")
+                sw, sh = src_map.size
+                doc_w = float(map_doc.get("width") or sw or 1200)
+                doc_h = float(map_doc.get("height") or sh or 800)
+                pos = actor.get("position")
+                if isinstance(pos, (list, tuple)) and len(pos) == 2:
+                    cx = max(0.0, min(1.0, float(pos[0]) / max(1.0, doc_w))) * sw
+                    cy = max(0.0, min(1.0, float(pos[1]) / max(1.0, doc_h))) * sh
+                else:
+                    cx, cy = sw * 0.5, sh * 0.5
+                crop_w = min(sw, max(360, int(sw * 0.55)))
+                crop_h = min(sh, int(crop_w * (mh / mw)))
+                left = int(max(0, min(sw - crop_w, cx - crop_w / 2)))
+                top = int(max(0, min(sh - crop_h, cy - crop_h / 2)))
+                cropped = src_map.crop((left, top, left + crop_w, top + crop_h)).resize((mw, mh), Image.Resampling.BILINEAR)
+                map_bg.paste(cropped, (0, 0))
+                mdraw = ImageDraw.Draw(map_bg, "RGBA")
+                embedded_map = True
+        except Exception:
+            embedded_map = False
+
+    if not embedded_map:
+        # Stylized parchment contour map
+        for gy in range(24, mh, 34):
+            mdraw.line((0, gy, mw, gy), fill=(214, 204, 182, 130), width=1)
+        for gx in range(24, mw, 34):
+            mdraw.line((gx, 0, gx, mh), fill=(214, 204, 182, 130), width=1)
+        mdraw.arc((-60, 120, 320, 440), 200, 355, fill=(142, 174, 184, 170), width=10)
+        mdraw.polygon([(60, 290), (140, 210), (220, 290)], fill=(176, 188, 162, 130))
+        mdraw.polygon([(260, 240), (350, 145), (440, 240)], fill=(166, 178, 152, 140))
+
+    # Draw dashed journey route & origin/destination pins
+    p_start = (92, mh - 96)
+    p_end = (mw - 92, 98)
+    progress = float(actor.get("progress") or (0.55 if journey else 1.0))
+    progress = max(0.08, min(1.0, progress))
+    cur_x = int(p_start[0] + (p_end[0] - p_start[0]) * progress)
+    cur_y = int(p_start[1] + (p_end[1] - p_start[1]) * progress)
+    steps = 16
+    for i in range(steps):
+        if i % 2 == 0:
+            t0, t1 = i / steps, min(1.0, (i + 0.7) / steps)
+            x0 = int(p_start[0] + (p_end[0] - p_start[0]) * t0)
+            y0 = int(p_start[1] + (p_end[1] - p_start[1]) * t0)
+            x1 = int(p_start[0] + (p_end[0] - p_start[0]) * t1)
+            y1 = int(p_start[1] + (p_end[1] - p_start[1]) * t1)
+            mdraw.line((x0, y0, x1, y1), fill=(42, 108, 82, 235), width=4)
+
+    mdraw.ellipse((p_start[0] - 7, p_start[1] - 7, p_start[0] + 7, p_start[1] + 7), fill=(154, 118, 72), outline=(255, 255, 255), width=2)
+    mdraw.ellipse((p_end[0] - 8, p_end[1] - 8, p_end[0] + 8, p_end[1] + 8), fill=(186, 76, 68), outline=(255, 255, 255), width=2)
+    mdraw.ellipse((cur_x - 14, cur_y - 14, cur_x + 14, cur_y + 14), fill=(38, 104, 78), outline=(252, 248, 238), width=3)
+    mdraw.text((cur_x - 6, cur_y - 9), char_name[:1], fill=(255, 252, 244), font=_load_font(15))
+
+    dest_name = str(
+        (journey or {}).get("destination_name")
+        or scene.get("destination")
+        or actor.get("place_name")
+        or scene.get("place_name")
+        or "远方地标"
+    )[:18]
+    origin_name = str(actor.get("origin_name") or "小屋出发")[:14]
+    map_mode_tag = "现实地图 · 旅途足迹" if map_doc.get("map_type") == "real" else "世界地图 · 旅途风景"
+    mdraw.rounded_rectangle((12, 12, 210, 42), radius=10, fill=(32, 46, 38, 196))
+    mdraw.text((22, 18), map_mode_tag, fill=(244, 240, 228), font=_load_font(14))
+    mdraw.rounded_rectangle((p_end[0] - 76, p_end[1] + 14, p_end[0] + 76, p_end[1] + 40), radius=8, fill=(252, 247, 236, 224))
+    mdraw.text((p_end[0] - 66, p_end[1] + 18), dest_name, fill=(58, 44, 34), font=_load_font(14))
+    if journey:
+        mdraw.text((p_start[0] - 28, p_start[1] + 14), origin_name, fill=(84, 68, 52), font=_load_font(13))
+
+    card.paste(map_bg, (mx0, my0))
+    draw.rectangle((mx0, my0, mx1, my1), outline=(182, 168, 146), width=2)
+
+    # Right sidebar: Weather + Character Medallion + Postmark Stamp
+    rx0, rx1 = 540, W - 36
+    draw.rounded_rectangle((rx0, 44, rx1, 206), radius=14, fill=(253, 250, 244), outline=(216, 206, 188), width=2)
+    wx_effect = str(cur.get("effect") or "clear")
+    is_day = cur.get("is_day", True)
+    wx_label = str(cur.get("label") or "晴")
+    temp_val = cur.get("temperature")
+    temp_str = f"{round(float(temp_val))}°C" if temp_val is not None else "--°C"
+    # Draw weather icon
+    icx, icy = rx0 + 46, 94
+    if not is_day and wx_effect == "clear":
+        draw.ellipse((icx - 18, icy - 18, icx + 18, icy + 18), fill=(238, 214, 134))
+        draw.ellipse((icx - 10, icy - 22, icx + 22, icy + 10), fill=(253, 250, 244))
+    elif wx_effect in {"rain", "snow"}:
+        draw.rounded_rectangle((icx - 22, icy - 12, icx + 22, icy + 6), radius=10, fill=(134, 152, 166))
+        drop_color = (94, 146, 198) if wx_effect == "rain" else (182, 206, 224)
+        for dx in (-12, 0, 12):
+            draw.ellipse((icx + dx - 3, icy + 10, icx + dx + 3, icy + 18), fill=drop_color)
+    elif wx_effect == "cloud":
+        draw.rounded_rectangle((icx - 22, icy - 10, icx + 22, icy + 10), radius=10, fill=(172, 182, 188))
+    else:
+        draw.ellipse((icx - 18, icy - 18, icx + 18, icy + 18), fill=(242, 188, 78))
+    draw.text((rx0 + 82, 70), wx_label, fill=(56, 48, 40), font=_load_font(22))
+    draw.text((rx0 + 82, 102), f"{temp_str} · {'白昼' if is_day else '夜色'}", fill=(108, 94, 78), font=_load_font(16))
+    draw.line((rx0 + 18, 138, rx1 - 18, 138), fill=(232, 224, 210), width=1)
+    status_line = f"正在前往 {dest_name}" if journey else f"驻足于 {dest_name}"
+    draw.text((rx0 + 18, 150), status_line[:16], fill=(44, 92, 70), font=_load_font(16))
+    draw.text((rx0 + 18, 176), f"行程进度 {int(round(progress * 100))}%", fill=(128, 114, 98), font=_load_font(14))
+
+    # Character medallion & circular postmark stamp
+    draw.rounded_rectangle((rx0, 222, rx1, 446), radius=14, fill=(253, 250, 244), outline=(216, 206, 188), width=2)
+    draw.ellipse((rx0 + 22, 240, rx0 + 86, 304), fill=(52, 104, 80), outline=(228, 216, 194), width=3)
+    draw.text((rx0 + 42, 256), char_name[:1], fill=(252, 248, 238), font=_load_font(28))
+    draw.text((rx0 + 98, 250), char_name[:10], fill=(48, 40, 34), font=_load_font(20))
+    outfit = str(snapshot.get("outfit_now") or "旅途便装")[:12]
+    draw.text((rx0 + 98, 280), f"穿搭：{outfit}", fill=(122, 108, 92), font=_load_font(14))
+
+    # Circular postal stamp
+    scx, scy = (rx0 + rx1) // 2, 376
+    draw.ellipse((scx - 52, scy - 52, scx + 52, scy + 52), outline=(168, 76, 68, 205), width=3)
+    draw.ellipse((scx - 42, scy - 42, scx + 42, scy + 42), outline=(168, 76, 68, 155), width=1)
+    draw.text((scx - 34, scy - 24), "POSTMARK", fill=(168, 76, 68, 210), font=_load_font(11))
+    draw.text((scx - 32, scy - 6), dest_name[:5], fill=(154, 62, 56, 230), font=_load_font(14))
+    draw.text((scx - 36, scy + 16), local.strftime("%Y.%m.%d"), fill=(168, 76, 68, 210), font=_load_font(12))
+
+    # Bottom caption strip
+    draw.rounded_rectangle((36, 466, W - 36, H - 36), radius=14, fill=(254, 251, 245), outline=(216, 206, 188), width=2)
+    note = str(
+        caption
+        or snapshot.get("activity")
+        or snapshot.get("plan_now")
+        or (f"在前往{dest_name}的路上寄出一张旅途风景明信片。" if journey else f"在{dest_name}漫步，把此刻的风景寄给你。")
+    ).strip()[:52]
+    draw.text((56, 486), f"✈ {char_name} 的旅途风景明信片 · {dest_name}", fill=(46, 78, 62), font=_load_font(22))
+    draw.text((56, 524), f"「{note}」", fill=(78, 64, 52), font=_load_font(18))
+    draw.text(
+        (56, 562),
+        f"{local.strftime('%Y-%m-%d %H:%M')}  |  {wx_label} {temp_str}  |  发送 /小屋实况 室内 可查看留守小屋与猫咪",
+        fill=(136, 120, 102),
+        font=_load_font(15),
+    )
+
+    out = BytesIO()
+    card.save(out, format="PNG", optimize=True)
+    return out.getvalue()
 
 
 def resolve_shot_plan(
@@ -772,6 +965,51 @@ class PostcardRenderer:
         focus_slot: str = "",
         bypass_cache: bool = False,
     ) -> dict:
+        norm_mode = str(shot_mode or "auto").strip().lower()
+        want_travel = norm_mode in {"travel", "旅途", "旅行", "风景"} or (
+            norm_mode == "auto" and is_actor_away(snapshot)
+        )
+        if want_travel:
+            shot_plan = {"mode": "travel", "view": "map", "focus": "travel"}
+            effective_caption = str(caption or "").strip()
+            cache_key = self._build_cache_key(snapshot, shot_plan, effective_caption, False)
+            if not bypass_cache and self.cache_ttl_seconds > 0:
+                cached_entry = self._render_cache.get(cache_key)
+                if cached_entry is not None:
+                    cached_at, cached_res = cached_entry
+                    if (
+                        time.monotonic() - cached_at <= self.cache_ttl_seconds
+                        and Path(str(cached_res.get("path") or "")).is_file()
+                    ):
+                        hit = dict(cached_res)
+                        hit["cached"] = True
+                        return hit
+                    self._render_cache.pop(cache_key, None)
+            png_bytes = await asyncio.to_thread(
+                render_travel_postcard_image, snapshot, caption=effective_caption
+            )
+            now = float(snapshot.get("server_time") or datetime.now().timestamp())
+            digest = hashlib.sha256(png_bytes).hexdigest()[:14]
+            out_path = self.out_dir / f"postcard_{int(now)}_{digest}.png"
+            await asyncio.to_thread(out_path.write_bytes, png_bytes)
+            existing = sorted(self.out_dir.glob("postcard_*.png"), key=lambda p: p.stat().st_mtime)
+            for stale in existing[:-40]:
+                stale.unlink(missing_ok=True)
+            result = {
+                "path": str(out_path),
+                "bytes": len(png_bytes),
+                "renderer": "travel_postcard",
+                "renderer_badge": "旅途风景明信片",
+                "fallback_hint": "",
+                "cached": False,
+                "shot_plan": shot_plan,
+                "data_url": "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii"),
+            }
+            if self.cache_ttl_seconds > 0:
+                self._render_cache[cache_key] = (time.monotonic(), dict(result))
+            logger.info("[DynamicsWorld] Travel postcard rendered bytes=%d", len(png_bytes))
+            return result
+
         shot_plan = resolve_shot_plan(snapshot, shot_mode, focus_slot=focus_slot)
         effective_caption = str(caption or "").strip()
         if not effective_caption and shot_plan.get("mode") == "keepsake":

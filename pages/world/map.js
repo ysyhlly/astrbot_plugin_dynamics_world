@@ -4,7 +4,7 @@ import {apiPost,formatTs} from "./api.js";
 import {renderWeather,bindWeather,city,resetWeather} from "./weather.js";
 import {worldStream} from "./world-stream.js?v=round2.1";
 const $=id=>document.getElementById(id);
-let map=null,layers=null,avatar=null,travelLine=null,documentMap=null,pendingMapDoc=null,last=null,currentScope="",visible=false,activeView="",editing=null,pin=null;
+let map=null,layers=null,residentLayer=null,avatar=null,travelLine=null,documentMap=null,pendingMapDoc=null,last=null,currentScope="",visible=false,activeView="",editing=null,pin=null;
 let mapType="virtual",tileLayer=null,lastDrawnMapKey="";
 const xy=p=>[mapType==="real"?p[1]:-p[1],p[0]];
 function moveSlot(hostId,nodeId){const host=$(hostId),node=$(nodeId);if(host&&node&&node.parentElement!==host)host.append(node);}
@@ -35,9 +35,10 @@ function status(value,error=false){
 function setup(mode="virtual"){
   if(map&&mapType===mode)return;
   if(map)map.remove();
-  mapType=mode;tileLayer=null;avatar=null;travelLine=null;editing=null;pin=null;
+  mapType=mode;tileLayer=null;avatar=null;travelLine=null;residentLayer=null;editing=null;pin=null;
   map=L.map("worldMap",mode==="real"?{minZoom:2,maxZoom:19}:{crs:L.CRS.Simple,minZoom:-3,maxZoom:3,zoomSnap:.25});
   layers=L.layerGroup().addTo(map);
+  residentLayer=L.layerGroup().addTo(map);
   map.attributionControl.setPrefix("Leaflet");
   if(mode==="virtual")map.attributionControl.addAttribution(tr("地形：Azgaar · 角色状态：群间世界"));
   map.on("click",event=>{if(!documentMap)return;pin=[event.latlng.wrap().lng,mapType==="real"?event.latlng.lat:-event.latlng.lat];if(mapType!=="real")pin[0]=event.latlng.lng;coordinateLabel();});
@@ -65,6 +66,70 @@ function draw(doc){
   $("mapDestination").replaceChildren(...doc.places.map(p=>{const o=document.createElement("option");o.value=p.id;o.textContent=p.name;return o;}));
   $("mapEmpty").style.display="none";fit();
 }
+function interpolatePath(path,progress){
+  if(!Array.isArray(path)||!path.length)return null;
+  if(path.length===1)return path[0];
+  const t=Math.max(0,Math.min(1,Number(progress)||0));
+  const scaled=t*(path.length-1);
+  const idx=Math.min(path.length-2,Math.floor(scaled));
+  const frac=scaled-idx;
+  const a=path[idx],b=path[idx+1];
+  return [a[0]+(b[0]-a[0])*frac,a[1]+(b[1]-a[1])*frac];
+}
+function residentVisibleToSelf(resident,actor,invitations){
+  if(!resident||!resident.enabled)return false;
+  const selfPlace=actor?.place_id||"";
+  if(selfPlace&&resident.place_id===selfPlace)return true;
+  if(selfPlace&&resident.journey&&(resident.journey.target_id===selfPlace||resident.journey.from_id===selfPlace))return true;
+  if(Array.isArray(invitations)&&invitations.some(inv=>inv&&inv.status==="visiting"&&((inv.host==="self"&&inv.guest===resident.id)||(inv.guest==="self"&&inv.host===resident.id))))return true;
+  return false;
+}
+function renderResidentsOnMap(data){
+  if(!residentLayer||!map||!documentMap)return;
+  residentLayer.clearLayers();
+  const residents=Array.isArray(data?.causal_life?.residents)?data.causal_life.residents:[];
+  const invitations=Array.isArray(data?.causal_life?.invitations)?data.causal_life.invitations:[];
+  const actor=data?.actor||{};
+  const placesById=new Map((documentMap.places||[]).map(p=>[p.id,p]));
+  const nowSec=Number(data?.server_time)||Date.now()/1000;
+  let offsetIndex=0;
+  for(const res of residents){
+    // Privacy isolation: only render enabled residents within the main character's visible scope
+    if(!residentVisibleToSelf(res,actor,invitations))continue;
+    let pos=null;
+    const journey=res.journey;
+    if(journey&&Array.isArray(journey.path)&&journey.path.length>=2){
+      const span=Math.max(1,(Number(journey.arrives_at)||0)-(Number(journey.departed_at)||0));
+      const prog=Math.max(0,Math.min(1,(nowSec-(Number(journey.departed_at)||0))/span));
+      pos=interpolatePath(journey.path,prog);
+      L.polyline(journey.path.map(xy),{color:"#9c6b3d",weight:2.5,opacity:.78,dashArray:"6 6"}).addTo(residentLayer);
+    }else if(journey&&journey.target_id){
+      const pFrom=placesById.get(res.place_id),pTo=placesById.get(journey.target_id);
+      if(pFrom&&pTo){
+        const span=Math.max(1,(Number(journey.arrives_at)||0)-(Number(journey.departed_at)||0));
+        const prog=Math.max(0,Math.min(1,(nowSec-(Number(journey.departed_at)||0))/span));
+        pos=interpolatePath([[pFrom.x,pFrom.y],[pTo.x,pTo.y]],prog);
+        L.polyline([xy([pFrom.x,pFrom.y]),xy([pTo.x,pTo.y])],{color:"#9c6b3d",weight:2.5,opacity:.78,dashArray:"6 6"}).addTo(residentLayer);
+      }
+    }
+    if(!pos){
+      const p=placesById.get(res.place_id);
+      if(!p)continue;
+      const angle=(offsetIndex++*1.25)+0.7;
+      const step=mapType==="real"?0.00035:18;
+      pos=[p.x+Math.cos(angle)*step,p.y+Math.sin(angle)*step];
+    }
+    const face=document.createElement("div");
+    face.className="dw-avatar dw-resident-avatar";
+    face.textContent=(res.name||"邻").slice(0,1);
+    const marker=L.marker(xy(pos),{
+      icon:L.divIcon({html:face.outerHTML,className:"dw-map-marker dw-resident-marker",iconSize:[30,30],iconAnchor:[15,15]}),
+      zIndexOffset:650,
+    }).addTo(residentLayer);
+    const destLabel=journey?.destination_name?`前往 ${journey.destination_name}`:(res.activity||"附近活动");
+    marker.bindTooltip(text(`${res.name||"居民"}（邻居）· ${destLabel}`));
+  }
+}
 function renderActor(data){
   last=data;
   renderWeather(data.environment,currentScope);
@@ -84,6 +149,7 @@ function renderActor(data){
     avatar=L.marker(xy(actor.position),{icon:L.divIcon({html:face.outerHTML,className:"dw-map-marker",iconSize:[38,38],iconAnchor:[19,19]}),zIndexOffset:1000}).addTo(map);
     avatar.bindTooltip(text(`${data.character?.name||""} · ${data.activity||""}`));
   }
+  renderResidentsOnMap(data);
   document.querySelectorAll("[data-map-action]").forEach(button=>button.disabled=!documentMap||actor.paused===true||(button.dataset.mapAction==="depart"&&actor.phase!=="located")||(button.dataset.mapAction==="cancel"&&!actor.journey&&!actor.plan));
   const job=data.job||{};
   $("mapGenerate").disabled=data.can_write===false||job.status==="running";
@@ -95,7 +161,7 @@ function renderActor(data){
 function resetMapScope(scope){
   currentScope=scope;documentMap=null;pendingMapDoc=null;last=null;editing=null;pin=null;lastDrawnMapKey="";
   resetWeather();resetScene();
-  if(map){map.remove();map=null;layers=null;avatar=null;travelLine=null;tileLayer=null;}
+  if(map){map.remove();map=null;layers=null;residentLayer=null;avatar=null;travelLine=null;tileLayer=null;}
   $("mapEmpty").style.display="flex";
   $("mapCharacter").textContent=tr("角色");
   $("mapWhere").textContent=tr("待定位");

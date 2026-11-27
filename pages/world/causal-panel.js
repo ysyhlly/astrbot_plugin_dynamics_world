@@ -233,8 +233,26 @@ function renderAgenda(){
 function renderEvents(){return (data?.events||[]).map(e=>section('event:'+e.id,e.summary||e.operation||e.kind,`<p class="causal-meta">${time(e.occurred_at)} · ${esc(e.origin==='admin'||e.kind.startsWith('admin.')?tr('管理操作'):e.kind==='step.completed'?tr('完成回执'):tr('世界事件'))}</p>${e.reason?`<p>${esc(e.reason)}</p>`:''}<details><summary data-series-text="事件依据">事件依据</summary><p>${esc(e.id)}</p>${e.action_id?`<p>${esc(tr("关联行动：{0}",e.action_id))}</p>`:''}${e.result?`<p>${esc(e.result.summary||e.result.name||tr('状态变化已保存'))}</p>`:''}</details>`)).join('')||knowledge();}
 function knowledge(){return(data?.knowledge||[]).slice().reverse().map(k=>section('knowledge:'+k.id,k.text,`<p>${time(k.at)}</p>`)).join('')||empty(tr('还没有可展示的已感知事件。'));}
 function placeName(id){return world?.map?.places?.find(p=>p.id===id)?.name||id||tr('待确认');}
+function renderNeighborOnboarding(){
+ if(!hasWritePermission())return empty(tr('尚未登记背景居民。可在管理页选择已有角色卡，登记后默认不启用。'));
+ const places=world?.map?.places||[];
+ const candidates=Array.isArray(data?.worldbook_characters)?data.worldbook_characters:[];
+ const disabled=canWrite()&&places.length?'':'disabled';
+ const placeOptions=places.map(p=>`<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
+ const chipsHtml=candidates.length
+  ? `<div class="causal-neighbor-chips"><p class="causal-meta">${esc(tr('从世界书发现的人物（点击一键建卡并登记为邻居）：'))}</p><div class="causal-links">${candidates.map(c=>`<button type="button" class="wb-button tiny" data-quick-neighbor="true" data-nb-name="${esc(c.name)}" data-nb-desc="${esc(c.description||'')}" ${disabled}>＋ ${esc(c.name)}</button>`).join('')}</div></div>`
+  : '';
+ const formHtml=places.length
+  ? `<form data-quick-neighbor-form="true" class="causal-neighbor-form"><label><span>${esc(tr('邻居名称'))}</span><input name="name" required maxlength="32" placeholder="${esc(tr('例如：花店老板 / 世界书人物'))}" ${disabled} /></label><label><span>${esc(tr('人物简述'))}</span><input name="description" maxlength="200" placeholder="${esc(tr('性格或身份一句话简介（可选）'))}" ${disabled} /></label><label><span>${esc(tr('初始地点'))}</span><select name="place_id" required ${disabled}>${placeOptions}</select></label><button class="wb-button primary" type="submit" ${disabled}>${esc(tr('一键建卡并登记为邻居'))}</button></form>`
+  : `<p class="causal-meta">${esc(tr('请先在「世界地图」生成至少一个地点，再登记背景邻居。'))}</p><button type="button" class="wb-button" data-jump="map">${esc(tr('前往世界地图'))}</button>`;
+ return `<div class="causal-neighbor-wizard" data-causal-key="neighbor-wizard"><p>${esc(tr('世界里目前还没有背景邻居。你可以直接从世界书人物快速建卡并登记为邻居（登记后可在上方随时启停）。'))}</p>${chipsHtml}${formHtml}</div>`;
+}
 function renderResidents(){
- return section('residents',tr('背景居民'),(data?.residents||[]).map(a=>`<article class="causal-resident" data-causal-key="resident:${esc(a.id)}"><strong>${esc(a.name)}</strong> ${tag(a.enabled?tr('参与自主生活'):tr('未启用'))}<p>${esc(a.activity||tr('尚未行动'))} · ${esc(placeName(a.place_id))}</p>${a.journey?`<p>${esc(tr("途中 · 预计 {0} 抵达",formatTs(a.journey.arrives_at)))}</p>`:''}<p class="causal-meta">${esc(tr("最近评估：{0}",a.last_evaluated_at?formatTs(a.last_evaluated_at):tr("尚未轮到")))} · ${esc(({advanced:tr('已执行行动'),no_change:tr('选择保持现状'),wait:tr('选择保持现状'),invalid:tr('未提交，需查看原因'),timeout:tr('模型超时'),not_evaluated:tr('尚未评估')})[a.last_evaluation_status]||a.last_evaluation_status||tr('尚未评估'))}</p>${a.last_reason?`<p class="causal-meta">${esc(tr("角色想法：{0}",a.last_reason))}</p>`:''}${canWrite()?`<button class="wb-button" data-resident="${esc(a.id)}" data-enabled="${!a.enabled}">${esc(tr(a.enabled?'停用自主生活':'启用自主生活'))}</button>`:''}</article>`).join('')||empty(tr('尚未登记背景居民。可在管理页选择已有角色卡，登记后默认不启用。')))
+ const list=data?.residents||[];
+ const residentsBody=list.length
+  ? list.map(a=>`<article class="causal-resident" data-causal-key="resident:${esc(a.id)}"><strong>${esc(a.name)}</strong> ${tag(a.enabled?tr('参与自主生活'):tr('未启用'))}<p>${esc(a.activity||tr('尚未行动'))} · ${esc(placeName(a.place_id))}</p>${a.journey?`<p>${esc(tr("途中 · 预计 {0} 抵达",formatTs(a.journey.arrives_at)))}</p>`:''}<p class="causal-meta">${esc(tr("最近评估：{0}",a.last_evaluated_at?formatTs(a.last_evaluated_at):tr("尚未轮到")))} · ${esc(({advanced:tr('已执行行动'),no_change:tr('选择保持现状'),wait:tr('选择保持现状'),invalid:tr('未提交，需查看原因'),timeout:tr('模型超时'),not_evaluated:tr('尚未评估')})[a.last_evaluation_status]||a.last_evaluation_status||tr('尚未评估'))}</p>${a.last_reason?`<p class="causal-meta">${esc(tr("角色想法：{0}",a.last_reason))}</p>`:''}${canWrite()?`<button class="wb-button" data-resident="${esc(a.id)}" data-enabled="${!a.enabled}">${esc(tr(a.enabled?'停用自主生活':'启用自主生活'))}</button>`:''}</article>`).join('')
+  : renderNeighborOnboarding();
+ return section('residents',tr('背景居民'),residentsBody)
  +section('invitations',tr('来往与约定'),(data?.invitations||[]).map(i=>`<article class="causal-resident" data-causal-key="invitation:${esc(i.id)}"><strong>${esc(residentName(i.host))} → ${esc(residentName(i.guest))}</strong> ${tag(i.status)}<p>${time(i.when)} · ${esc(placeName(i.place_id))}</p><p>${esc(i.reason||'')}</p>${canWrite()&&!['completed','declined','cancelled'].includes(i.status)?`<button class="wb-button" data-cancel-invitation="${esc(i.id)}" data-series-text="管理取消">管理取消</button>`:''}</article>`).join('')||empty(tr('尚无自主邀请。接受、抵达与实际交流会分别记录。')));
 }
 function residentName(id){return id==='self'?tr('主角色'):data?.residents?.find(a=>a.id===id)?.name||id;}
@@ -381,10 +399,16 @@ content.addEventListener('click',e=>{
  }
  const r=e.target.closest('[data-resident]');if(r)mutate({action:'resident_enabled',actor_id:r.dataset.resident,enabled:r.dataset.enabled==='true'});
  const i=e.target.closest('[data-cancel-invitation]');if(i)mutate({action:'cancel_invitation',invitation_id:i.dataset.cancelInvitation});
+ const qn=e.target.closest('[data-quick-neighbor]');
+ if(qn&&canWrite()){
+  const defaultPlace=world?.map?.places?.[0]?.id||'';
+  if(defaultPlace)mutate({action:'quick_register_neighbor',name:qn.dataset.nbName||'',description:qn.dataset.nbDesc||'',place_id:defaultPlace});
+ }
 });
 content.addEventListener('submit',e=>{
  e.preventDefault();const form=e.target,fd=new FormData(form);
  if(form.matches('[data-register]'))mutate({action:'resident',card_id:fd.get('card_id'),place_id:fd.get('place_id')});
+ if(form.matches('[data-quick-neighbor-form]'))mutate({action:'quick_register_neighbor',name:String(fd.get('name')||'').trim(),description:String(fd.get('description')||'').trim(),place_id:String(fd.get('place_id')||'').trim()});
  if(form.dataset.agenda){const mode=e.submitter?.value||'deferred';const c={id:form.dataset.agenda,status:mode,reason:fd.get('reason')};if(mode==='deferred'){c.start=new Date(fd.get('start')).getTime()/1000;c.end=new Date(fd.get('end')).getTime()/1000;if(!Number.isFinite(c.start)||!Number.isFinite(c.end)){status.textContent=tr('请填写延期起止时间（浏览器本地时区）。');return;}}mutate({action:'agenda',changes:[c]});}
 });
 worldStream.subscribe(next=>{

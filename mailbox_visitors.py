@@ -23,6 +23,7 @@ PARCEL_KINDS = {
     "snack": "手作点心",
     "flower": "小束鲜花",
     "gift": "纪念小物",
+    "book_review": "书评夹页书签",
 }
 SLOT_LABELS = {
     "shelf_1": "书架上格",
@@ -64,6 +65,10 @@ def _fallback_parcel_reaction(
         if snippet:
             return f"小心收好{sender_name}寄来的「{title}」摆进{slot_zh}，记下了「{snippet}」这份心意。"
         return f"小心收好{sender_name}寄来的「{title}」，摆进{slot_zh}。"
+    if kind == "book_review":
+        if snippet:
+            return f"读到{sender_name}写给《{title}》的书评「{snippet}」，郑重夹进书架对应的书页里作了书签。"
+        return f"把{sender_name}写给《{title}》的书评仔细夹进书架的书页里。"
     return f"拆阅了{sender_name}寄来的信件，妥帖收进了{slot_zh}。"
 
 
@@ -384,20 +389,45 @@ class MailboxVisitorService:
             )
             placed_slot = ""
             if self.engine.keepsakes is not None:
-                ks = self.engine.keepsakes.place_item(
-                    db,
-                    scope,
-                    {
-                        "id": "mail_ks_" + row["parcel_id"][-10:],
-                        "title": row["title"],
-                        "kind": "bouquet" if kind == "flower" else kind,
-                        "sender": row["sender_name"],
-                        "summary": f"来自 {row['sender_name']}：{row['message']}",
-                        "preferred_slot": slot_choice,
-                    },
-                    now,
-                )
-                placed_slot = ks["slot"]
+                if kind == "book_review":
+                    book_id = ""
+                    try:
+                        if getattr(self.engine, "scenes", None) is not None:
+                            _, _, raw_scene = self.engine.scenes.load(db, scope)
+                            target_t = str(row["title"] or "").strip().lower()
+                            for proj in (raw_scene.get("projects") or {}).values():
+                                pt = str((proj or {}).get("title") or "").strip().lower()
+                                if pt and target_t and (pt == target_t or target_t in pt or pt in target_t):
+                                    book_id = str(proj.get("id") or "")
+                                    break
+                    except Exception:
+                        book_id = ""
+                    self.engine.keepsakes.add_book_bookmark(
+                        db,
+                        scope,
+                        book_id=book_id,
+                        book_title=row["title"],
+                        sender_id=row["sender_id"],
+                        sender_name=row["sender_name"],
+                        review=row["message"],
+                        now=now,
+                    )
+                    placed_slot = "shelf_1"
+                else:
+                    ks = self.engine.keepsakes.place_item(
+                        db,
+                        scope,
+                        {
+                            "id": "mail_ks_" + row["parcel_id"][-10:],
+                            "title": row["title"],
+                            "kind": "bouquet" if kind == "flower" else kind,
+                            "sender": row["sender_name"],
+                            "summary": f"来自 {row['sender_name']}：{row['message']}",
+                            "preferred_slot": slot_choice,
+                        },
+                        now,
+                    )
+                    placed_slot = ks["slot"]
 
             custom_text = _sanitize_reaction(custom_reactions.get(row["parcel_id"], ""))
             reaction_source = "model" if custom_text else "template"
