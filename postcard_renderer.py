@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import json
 import time
 from datetime import datetime
 from io import BytesIO
@@ -12,6 +13,25 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 from .series_panels import resolve_series_timezone
+
+
+class _NullLogger:
+    def info(self, *args, **kwargs):
+        pass
+
+    def warning(self, *args, **kwargs):
+        pass
+
+
+try:
+    from astrbot.api import logger
+except Exception:  # pragma: no cover
+    logger = _NullLogger()
+
+POSTCARD_CACHE_TTL_SECONDS = 45.0
+FALLBACK_2D_HINT = (
+    "当前使用 2D 像素降级渲染；在管理面板「安装引导」安装 Playwright Chromium 后可切换为 3D 实景拍立得。"
+)
 
 CHROMIUM_ARGS = [
     "--no-sandbox",
@@ -56,7 +76,7 @@ def match_outfit_texture(texture_names: list[str] | tuple[str, ...], outfit_text
 
 
 def parse_shot_override(raw_text: str) -> tuple[str, str]:
-    """Extract optional leading framing keyword ('全景'/'近景'/'院门') and remaining caption."""
+    """Extract optional leading framing keyword ('全景'/'近景'/'院门'/'纪念格') and remaining caption."""
     text = str(raw_text or "").strip()
     if not text:
         return "auto", ""
@@ -80,13 +100,21 @@ def parse_shot_override(raw_text: str) -> tuple[str, str]:
         "信箱": "gate",
         "门口": "gate",
         "gate": "gate",
+        "纪念格": "keepsake",
+        "纪念品": "keepsake",
+        "书架": "keepsake",
+        "陈列": "keepsake",
+        "keepsake": "keepsake",
+        "shelf": "keepsake",
     }
     if head in mapping:
         return mapping[head], rest
     return "auto", text
 
 
-def resolve_shot_plan(snapshot: dict, shot_mode: str = "auto") -> dict:
+def resolve_shot_plan(
+    snapshot: dict, shot_mode: str = "auto", *, focus_slot: str = ""
+) -> dict:
     """Auto-Director camera framing based on character presence, visitors and current station."""
     mode = str(shot_mode or "auto").strip().lower()
     mode_alias = {
@@ -99,6 +127,10 @@ def resolve_shot_plan(snapshot: dict, shot_mode: str = "auto") -> dict:
         "院门": "gate",
         "信箱": "gate",
         "mailbox": "gate",
+        "纪念格": "keepsake",
+        "纪念品": "keepsake",
+        "书架": "keepsake",
+        "shelf": "keepsake",
     }
     mode = mode_alias.get(mode, mode)
     scene = snapshot.get("scene") or {}
@@ -145,6 +177,19 @@ def resolve_shot_plan(snapshot: dict, shot_mode: str = "auto") -> dict:
         return {"mode": "garden", "view": "garden", "focus": None}
     if mode == "gate":
         return {"mode": "gate", "view": "garden", "focus": "gate"}
+    if mode == "keepsake":
+        slot_key = str(focus_slot or "").strip().lower()
+        if not slot_key:
+            latest = mailbox.get("latest_opened") if isinstance(mailbox, dict) else None
+            if isinstance(latest, dict):
+                slot_key = str(latest.get("keepsake_slot") or "").strip().lower()
+        focus_target = "desk" if slot_key.startswith(("desk", "table")) else "window" if "window" in slot_key else "shelf"
+        return {
+            "mode": "keepsake",
+            "view": "room",
+            "focus": focus_target,
+            "focus_slot": slot_key or "shelf_2",
+        }
     if mode == "room":
         return {"mode": "room", "view": "room", "focus": _pick_room_station()}
 
@@ -368,13 +413,21 @@ def compose_polaroid(art: Image.Image, snapshot: dict, note_override: str = "") 
 class PostcardRenderer:
     """Rate-limited Polaroid snapshot generator with idle-hibernating warm 3D Chromium pool."""
 
-    def __init__(self, data_root: Path, *, idle_timeout: float = 300.0):
+    def __init__(
+        self,
+        data_root: Path,
+        *,
+        idle_timeout: float = 300.0,
+        cache_ttl_seconds: float = POSTCARD_CACHE_TTL_SECONDS,
+    ):
         self.out_dir = Path(data_root) / "postcards"
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self._cooldowns: dict[str, float] = {}
         self._sem = asyncio.Semaphore(1)
         self._pool_lock = asyncio.Lock()
         self.idle_timeout = max(1.0, float(idle_timeout))
+        self.cache_ttl_seconds = max(0.0, float(cache_ttl_seconds))
+        self._render_cache: dict[str, tuple[float, dict]] = {}
         self._pw = None
         self._browser = None
         self._page = None
@@ -382,6 +435,46 @@ class PostcardRenderer:
         self._last_used: float = 0.0
         self._reaper_task: asyncio.Task | None = None
         self._closed = False
+
+    def invalidate_cache(self) -> None:
+        """Clear cached postcard renders immediately when world state mutates."""
+        self._render_cache.clear()
+
+    @staticmethod
+    def _build_cache_key(
+        snapshot: dict,
+        shot_plan: dict,
+        caption: str,
+        prefer_3d: bool,
+    ) -> str:
+        scene = snapshot.get("scene") or {}
+        env = snapshot.get("environment") or {}
+        cur = env.get("current") or {}
+        mailbox = snapshot.get("mailbox") or {}
+        keepsakes = snapshot.get("keepsakes") or {}
+        eco = snapshot.get("ecology") or {}
+        sig_payload = {
+            "shot": shot_plan,
+            "caption": str(caption or ""),
+            "prefer_3d": bool(prefer_3d),
+            "char": (snapshot.get("character") or {}).get("name", ""),
+            "style": snapshot.get("cabin_style", ""),
+            "place": scene.get("place_id", ""),
+            "room": scene.get("room_id", ""),
+            "phase": scene.get("phase", ""),
+            "action": (scene.get("action") or {}).get("label", ""),
+            "revision": scene.get("revision", 0),
+            "wx": (cur.get("effect"), cur.get("label"), cur.get("temperature"), cur.get("is_day")),
+            "mail": (
+                mailbox.get("unopened_count", 0),
+                (mailbox.get("latest_opened") or {}).get("parcel_id", ""),
+                len(mailbox.get("visitors") or []),
+            ),
+            "ks": sorted((keepsakes.get("slots") or {}).keys()) if isinstance(keepsakes.get("slots"), dict) else [],
+            "cat": (eco.get("cat") or {}).get("spot", ""),
+        }
+        raw = json.dumps(sig_payload, ensure_ascii=False, sort_keys=True, default=str)
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
     @property
     def is_warm(self) -> bool:
@@ -676,8 +769,44 @@ class PostcardRenderer:
         caption: str = "",
         prefer_3d: bool = True,
         shot_mode: str = "auto",
+        focus_slot: str = "",
+        bypass_cache: bool = False,
     ) -> dict:
-        shot_plan = resolve_shot_plan(snapshot, shot_mode)
+        shot_plan = resolve_shot_plan(snapshot, shot_mode, focus_slot=focus_slot)
+        effective_caption = str(caption or "").strip()
+        if not effective_caption and shot_plan.get("mode") == "keepsake":
+            ks_slots = (snapshot.get("keepsakes") or {}).get("slots") or {}
+            chosen_slot = shot_plan.get("focus_slot") or ""
+            slot_item = ks_slots.get(chosen_slot) if isinstance(ks_slots, dict) else None
+            if isinstance(slot_item, dict) and slot_item.get("title"):
+                sender = slot_item.get("sender") or ""
+                effective_caption = (
+                    f"纪念格特写：{sender}送来的「{slot_item['title']}」"
+                    if sender
+                    else f"纪念格特写：「{slot_item['title']}」"
+                )
+            else:
+                effective_caption = "纪念格陈列拍立得特写"
+
+        cache_key = self._build_cache_key(snapshot, shot_plan, effective_caption, prefer_3d)
+        if not bypass_cache and self.cache_ttl_seconds > 0:
+            cached_entry = self._render_cache.get(cache_key)
+            if cached_entry is not None:
+                cached_at, cached_res = cached_entry
+                if (
+                    time.monotonic() - cached_at <= self.cache_ttl_seconds
+                    and Path(str(cached_res.get("path") or "")).is_file()
+                ):
+                    hit = dict(cached_res)
+                    hit["cached"] = True
+                    logger.info(
+                        "[DynamicsWorld] Postcard cache hit renderer=%s mode=%s",
+                        hit.get("renderer"),
+                        shot_plan.get("mode"),
+                    )
+                    return hit
+                self._render_cache.pop(cache_key, None)
+
         async with self._sem:
             art = None
             renderer_kind = "2d_fallback"
@@ -690,7 +819,16 @@ class PostcardRenderer:
                     art = None
             if art is None:
                 art = await asyncio.to_thread(_draw_pixel_cabin_artwork, snapshot, 720, 460)
-            png_bytes = await asyncio.to_thread(compose_polaroid, art, snapshot, caption)
+                if shot_plan.get("mode") == "keepsake":
+                    def _stamp_keepsake_ribbon(img: Image.Image) -> Image.Image:
+                        copy_img = img.copy()
+                        d = ImageDraw.Draw(copy_img, "RGBA")
+                        d.rounded_rectangle((18, 16, 336, 56), radius=12, fill=(36, 28, 22, 188))
+                        d.text((32, 26), f"✦ 纪念格特写 · {shot_plan.get('focus_slot') or 'shelf'}", fill=(252, 240, 214), font=_load_font(17))
+                        return copy_img
+
+                    art = await asyncio.to_thread(_stamp_keepsake_ribbon, art)
+            png_bytes = await asyncio.to_thread(compose_polaroid, art, snapshot, effective_caption)
             now = float(snapshot.get("server_time") or datetime.now().timestamp())
             digest = hashlib.sha256(png_bytes).hexdigest()[:14]
             out_path = self.out_dir / f"postcard_{int(now)}_{digest}.png"
@@ -698,10 +836,26 @@ class PostcardRenderer:
             existing = sorted(self.out_dir.glob("postcard_*.png"), key=lambda p: p.stat().st_mtime)
             for stale in existing[:-40]:
                 stale.unlink(missing_ok=True)
-            return {
+            is_3d = renderer_kind == "3d"
+            result = {
                 "path": str(out_path),
                 "bytes": len(png_bytes),
                 "renderer": renderer_kind,
+                "renderer_badge": "3D 实时渲染" if is_3d else "2D 像素降级",
+                "fallback_hint": "" if is_3d else FALLBACK_2D_HINT,
+                "cached": False,
                 "shot_plan": shot_plan,
                 "data_url": "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii"),
             }
+            if self.cache_ttl_seconds > 0:
+                self._render_cache[cache_key] = (time.monotonic(), dict(result))
+                if len(self._render_cache) > 32:
+                    oldest_key = min(self._render_cache, key=lambda k: self._render_cache[k][0])
+                    self._render_cache.pop(oldest_key, None)
+            logger.info(
+                "[DynamicsWorld] Postcard rendered renderer=%s mode=%s cached=False bytes=%d",
+                renderer_kind,
+                shot_plan.get("mode"),
+                len(png_bytes),
+            )
+            return result

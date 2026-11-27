@@ -786,6 +786,83 @@ class Main(Star):
         await event.send(event.image_result(rendered["path"]))
         return "小屋实况拍立得明信片已发送至当前会话。"
 
+    async def render_keepsake_postcard(
+        self,
+        scope: dict,
+        *,
+        slot: str = "",
+        caption: str = "",
+        character: dict | None = None,
+    ) -> dict:
+        """Render an auto-focused keepsake-slot Polaroid closeup for mailbox/keepsake closure."""
+        char = character if isinstance(character, dict) else await self.world.get_character_context(scope, None)
+        snap = await self.build_cabin_postcard_snapshot(scope, char)
+        return await self.postcards.render(
+            snap,
+            plugin_dir=Path(__file__).parent,
+            caption=str(caption or "")[:48],
+            prefer_3d=True,
+            shot_mode="keepsake",
+            focus_slot=str(slot or ""),
+        )
+
+    async def build_daily_world_journal(
+        self,
+        scope: dict,
+        *,
+        character: dict | None = None,
+        now: float | None = None,
+    ) -> dict:
+        """Build today's World Journal graphic card PNG & summary (for /世界手账 and Chat Dynamics rhythm)."""
+        from .world_journal_card import collect_world_journal_data, save_world_journal_card
+
+        char = character if isinstance(character, dict) else await self.world.get_character_context(scope, None)
+        engine = self.life.narrative
+        journal_data = await asyncio.to_thread(
+            collect_world_journal_data,
+            engine,
+            scope,
+            character=char,
+            now=now,
+        )
+        return await asyncio.to_thread(save_world_journal_card, self.data_root, journal_data)
+
+    @filter.command("世界手账", alias=["今日手账", "world_journal"])
+    async def world_journal_command(self, event: AstrMessageEvent, text: GreedyStr = ""):
+        if not self.runtime_allowed() or not self.config.get("group_cabin_commands_enabled", True):
+            yield event.plain_result("当前会话暂未启用每日世界手账。")
+            return
+        scope = await self.life._scope_for_event(event)
+        if scope is None:
+            yield event.plain_result("当前会话尚未绑定角色。")
+            return
+        now = self.life.narrative.clock()
+        cd_secs = int(self.config.get("cabin_postcard_cooldown_seconds", 180) or 180)
+        cd_key = f"journal:{scope.get('umo', '')}"
+        wait = self.postcards.check_cooldown(cd_key, now, cd_secs)
+        if wait > 0:
+            yield event.plain_result(f"📓 世界手账绘制冷却中，请 {wait} 秒后再试。")
+            return
+        character = await self.world.get_character_context(scope, event)
+        try:
+            res = await self.build_daily_world_journal(scope, character=character, now=now)
+            self.postcards.mark_used(cd_key, now)
+            yield event.image_result(res["path"])
+        except Exception:
+            try:
+                from .world_journal_card import collect_world_journal_data, format_world_journal_text
+
+                fallback_data = await asyncio.to_thread(
+                    collect_world_journal_data,
+                    self.life.narrative,
+                    scope,
+                    character=character,
+                    now=now,
+                )
+                yield event.plain_result(format_world_journal_text(fallback_data))
+            except Exception as exc:
+                yield event.plain_result(f"📓 世界手账生成失败：{exc}")
+
     @filter.command("小屋实况", alias=["cabin"])
     async def cabin_postcard_command(self, event: AstrMessageEvent, text: GreedyStr = ""):
         if not self.runtime_allowed() or not self.config.get("group_cabin_commands_enabled", True):
@@ -863,7 +940,8 @@ class Main(Star):
             f"🚪 访客策略：{policy_label}（信箱未拆 {unopened} 封 · 花园访客 {visitor_count} 位）",
             "",
             "✨ 群友可用指令：",
-            "• /小屋实况 [全景|近景|院门] [附言] — 拍摄小屋实况拍立得明信片",
+            "• /小屋实况 [全景|近景|院门|纪念格] [附言] — 拍摄小屋实况拍立得明信片",
+            "• /世界手账（或 /今日手账）— 生成今日世界手账图文日报",
             "• /投递 [明信片|鲜花|点心|礼物] <附言> — 往院门信箱寄送心意（角色回屋空闲时拆阅）",
             "• /探访 [留言] — 来小屋花园驻足片刻（受访客策略约束）",
             "• /小屋 或 /小屋帮助 — 查看小屋状态与指令说明",

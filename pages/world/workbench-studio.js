@@ -1,6 +1,8 @@
 import {tr} from './series-ui.js';
 /* Worldbook, character card & session studio panels and drawers. */
 import { apiGet, apiPost, escapeHtml, formatTs, splitList } from "./api.js";
+import { parsePngCharaChunk } from "./png-chara.js";
+export { parsePngCharaChunk };
 
 const CARD_TEXT_FIELDS = [
   ["description", "角色描述", 4],
@@ -12,6 +14,22 @@ const CARD_TEXT_FIELDS = [
   ["mes_example", "示例对话", 6],
   ["group_addendum", "群聊适配层（仅群聊注入）", 5],
 ];
+
+function downloadJsonFile(filename, data) {
+  const safeName = String(filename || "export")
+    .replace(/[\\/:*?"<>|]+/g, "_")
+    .replace(/\s+/g, "_")
+    .slice(0, 64);
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = safeName.endsWith(".json") ? safeName : `${safeName}.json`;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
 
 export function createWorkbenchStudio({
   state,
@@ -56,9 +74,13 @@ export function createWorkbenchStudio({
     });
   }
 
+  const entryFilter = { q: "", constant: "all", enabled: "all", scenario: "" };
+  const selectedEntryIds = new Set();
+
   async function loadBook(bookId) {
     if (!bookId) return;
     state.bookId = bookId;
+    selectedEntryIds.clear();
     renderBookList();
     try {
       const data = await apiGet("book", { book_id: bookId });
@@ -70,18 +92,54 @@ export function createWorkbenchStudio({
     renderBookDetail();
   }
 
-  function renderEntryTable(book) {
+  function filterBookEntries(book) {
+    const entries = book.entries || [];
+    const q = entryFilter.q.trim().toLowerCase();
+    return entries.filter((entry) => {
+      if (entryFilter.constant === "constant" && !entry.constant) return false;
+      if (entryFilter.constant === "keyword" && entry.constant) return false;
+      if (entryFilter.enabled === "enabled" && !entry.enabled) return false;
+      if (entryFilter.enabled === "disabled" && entry.enabled) return false;
+      if (entryFilter.scenario && !(entry.scenarios || []).includes(entryFilter.scenario)) return false;
+      if (q) {
+        const hay = [
+          entry.name,
+          entry.uid,
+          ...(entry.keys || []),
+          ...(entry.secondary_keys || []),
+          ...(entry.scenarios || []),
+          entry.content,
+          entry.comment,
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+  }
+
+  function renderEntryTableMarkup(book, filtered) {
     const entries = book.entries || [];
     if (!entries.length) {
       return `<div class="wb-empty" data-series-text="这本书还没有条目，点「新增条目」开始。">这本书还没有条目，点「新增条目」开始。</div>`;
     }
+    if (!filtered.length) {
+      return `<div class="wb-empty">没有符合筛选条件的条目。</div>`;
+    }
     const readOnly = canWrite() ? "" : " disabled";
+    const allChecked = filtered.length > 0 && filtered.every((e) => selectedEntryIds.has(e.uid));
     return (
-      `<table class="wb-table"><thead><tr><th data-series-text="条目">条目</th><th data-series-text="关键词">关键词</th><th data-series-text="场景">场景</th><th data-series-text="常驻">常驻</th><th data-series-text="优先级">优先级</th><th data-series-text="启用">启用</th><th></th></tr></thead><tbody>` +
-      entries
+      `<table class="wb-table"><thead><tr>` +
+      `<th class="wb-check-col"><input type="checkbox" id="wbEntrySelectAll" aria-label="全选当前条目"${allChecked ? " checked" : ""}${readOnly} /></th>` +
+      `<th data-series-text="条目">条目</th><th data-series-text="关键词">关键词</th><th data-series-text="场景">场景</th><th data-series-text="常驻">常驻</th><th data-series-text="优先级">优先级</th><th data-series-text="启用">启用</th><th></th></tr></thead><tbody>` +
+      filtered
         .map(
           (entry) =>
-            `<tr><td>${escapeHtml(entry.name || entry.uid)}<br /><span class="wb-mono">${escapeHtml(
+            `<tr>` +
+            `<td class="wb-check-col"><input type="checkbox" data-select-entry="${escapeHtml(entry.uid)}"${selectedEntryIds.has(entry.uid) ? " checked" : ""}${readOnly} /></td>` +
+            `<td>${escapeHtml(entry.name || entry.uid)}<br /><span class="wb-mono">${escapeHtml(
               entry.uid,
             )}</span></td><td>${escapeHtml(listToText(entry.keys)) || '<span class="wb-mono" data-series-text="（无）">（无）</span>'}</td><td>${escapeHtml(
               listToText(entry.scenarios),
@@ -102,6 +160,110 @@ export function createWorkbenchStudio({
         .join("") +
       `</tbody></table>`
     );
+  }
+
+  function updateEntryTableView(book) {
+    const tableHost = $("wbEntryTableHost");
+    if (!tableHost || !book) return;
+    const filtered = filterBookEntries(book);
+    const validIds = new Set((book.entries || []).map((e) => e.uid));
+    for (const id of Array.from(selectedEntryIds)) {
+      if (!validIds.has(id)) selectedEntryIds.delete(id);
+    }
+    tableHost.innerHTML = renderEntryTableMarkup(book, filtered);
+    const countEl = $("wbEntryFilterCount");
+    if (countEl) {
+      const total = (book.entries || []).length;
+      const selCount = selectedEntryIds.size;
+      countEl.textContent =
+        selCount > 0
+          ? `显示 ${filtered.length}/${total} · 已选 ${selCount}`
+          : `显示 ${filtered.length}/${total}`;
+    }
+    const batchEnable = $("wbBatchEnable");
+    const batchDisable = $("wbBatchDisable");
+    if (batchEnable) batchEnable.disabled = !canWrite() || selectedEntryIds.size === 0;
+    if (batchDisable) batchDisable.disabled = !canWrite() || selectedEntryIds.size === 0;
+
+    const selectAll = $("wbEntrySelectAll");
+    if (selectAll) {
+      selectAll.addEventListener("change", () => {
+        for (const entry of filtered) {
+          if (selectAll.checked) selectedEntryIds.add(entry.uid);
+          else selectedEntryIds.delete(entry.uid);
+        }
+        updateEntryTableView(book);
+      });
+    }
+    tableHost.querySelectorAll("input[data-select-entry]").forEach((box) => {
+      box.addEventListener("change", () => {
+        const uid = box.dataset.selectEntry;
+        if (box.checked) selectedEntryIds.add(uid);
+        else selectedEntryIds.delete(uid);
+        updateEntryTableView(book);
+      });
+    });
+    tableHost.querySelectorAll("button[data-act]").forEach((button) => {
+      button.addEventListener("click", () => onEntryAction(book, button.dataset.act, button.dataset.id));
+    });
+  }
+
+  async function batchToggleEntries(book, enabled) {
+    if (!requireWrite() || !book) return;
+    const targets = (book.entries || []).filter(
+      (entry) => selectedEntryIds.has(entry.uid) && Boolean(entry.enabled) !== Boolean(enabled),
+    );
+    if (!targets.length) {
+      notify(enabled ? "所选条目已全部处于启用状态。" : "所选条目已全部处于停用状态。", "ok");
+      return;
+    }
+    const btn = $(enabled ? "wbBatchEnable" : "wbBatchDisable");
+    if (btn) btn.disabled = true;
+    try {
+      for (const entry of targets) {
+        await apiPost("entry", {
+          action: "update",
+          book_id: book.id,
+          entry_id: entry.uid,
+          enabled: Boolean(enabled),
+        });
+      }
+      notify(`已批量${enabled ? "启用" : "停用"} ${targets.length} 条条目。`, "ok");
+      await loadBook(book.id);
+      await refreshOverviewSilently();
+    } catch (error) {
+      notify("批量操作失败：" + error.message, "error");
+    } finally {
+      if (btn) btn.disabled = !canWrite() || selectedEntryIds.size === 0;
+    }
+  }
+
+  function exportCurrentBook() {
+    if (!state.book) return;
+    const book = state.book;
+    const payload = {
+      name: book.name,
+      description: book.description || "",
+      enabled: Boolean(book.enabled),
+      auto_scenario: Boolean(book.auto_scenario),
+      entries: (book.entries || []).map((e, idx) => ({
+        uid: e.uid || String(idx),
+        comment: e.name || e.comment || "",
+        key: Array.isArray(e.keys) ? e.keys : [],
+        keysecondary: Array.isArray(e.secondary_keys) ? e.secondary_keys : [],
+        content: e.content || "",
+        constant: Boolean(e.constant),
+        selective: Boolean(e.selective),
+        order: Number(e.priority) || 0,
+        disable: !e.enabled,
+        caseSensitive: Boolean(e.case_sensitive),
+        matchWholeWords: Boolean(e.match_whole_word),
+        scenarios: Array.isArray(e.scenarios) ? e.scenarios : [],
+        behavior: e.behavior || "",
+      })),
+    };
+    downloadJsonFile(`worldbook_${book.name || book.id}.json`, payload);
+    notify(`已导出世界书「${book.name}」JSON。`, "ok");
   }
 
   async function onEntryAction(book, action, entryId) {
@@ -183,12 +345,31 @@ export function createWorkbenchStudio({
     if (actions) {
       actions.innerHTML =
         `<button type="button" class="wb-button" id="wbAddEntry"${readOnly}>新增条目</button>` +
+        `<button type="button" class="wb-button" id="wbExportBook">导出 JSON</button>` +
         `<button type="button" class="wb-button danger" id="wbDeleteBook"${readOnly}>删除世界书</button>`;
       const add = $("wbAddEntry");
       if (add) add.addEventListener("click", () => openEntryDrawer(null));
+      const exp = $("wbExportBook");
+      if (exp) exp.addEventListener("click", exportCurrentBook);
       const remove = $("wbDeleteBook");
       if (remove) remove.addEventListener("click", deleteBook);
     }
+    const scenarioSet = new Set();
+    for (const entry of book.entries || []) {
+      for (const s of entry.scenarios || []) if (s) scenarioSet.add(s);
+    }
+    if (entryFilter.scenario && !scenarioSet.has(entryFilter.scenario)) {
+      entryFilter.scenario = "";
+    }
+    const scenarioOpts =
+      `<option value="">全部场景</option>` +
+      Array.from(scenarioSet)
+        .sort()
+        .map(
+          (s) =>
+            `<option value="${escapeHtml(s)}"${entryFilter.scenario === s ? " selected" : ""}>${escapeHtml(s)}</option>`,
+        )
+        .join("");
     host.innerHTML =
       `<div class="wb-grid-2">` +
       `<label class="wb-field"><span data-series-text="名称">名称</span><input type="text" id="wbBookName" value="${escapeHtml(book.name)}"${readOnly} /></label>` +
@@ -200,13 +381,45 @@ export function createWorkbenchStudio({
       `<div class="wb-spacer"></div>` +
       `<button type="button" class="wb-button primary" id="wbSaveBook"${readOnly}>保存书籍信息</button>` +
       `</div>` +
-      `<h3 style="margin:18px 0 6px;font-size:13px">条目（${(book.entries || []).length}）</h3>` +
-      renderEntryTable(book);
+      `<div class="wb-entry-toolbar">` +
+      `<input type="search" id="wbEntrySearch" class="wb-entry-search" placeholder="搜索条目名 / 关键词 / 正文…" value="${escapeHtml(entryFilter.q)}" />` +
+      `<select id="wbEntryConstFilter" aria-label="常驻筛选">` +
+      `<option value="all"${entryFilter.constant === "all" ? " selected" : ""}>全部类型</option>` +
+      `<option value="constant"${entryFilter.constant === "constant" ? " selected" : ""}>仅常驻</option>` +
+      `<option value="keyword"${entryFilter.constant === "keyword" ? " selected" : ""}>仅关键词</option>` +
+      `</select>` +
+      `<select id="wbEntryEnabledFilter" aria-label="状态筛选">` +
+      `<option value="all"${entryFilter.enabled === "all" ? " selected" : ""}>全部状态</option>` +
+      `<option value="enabled"${entryFilter.enabled === "enabled" ? " selected" : ""}>仅启用</option>` +
+      `<option value="disabled"${entryFilter.enabled === "disabled" ? " selected" : ""}>仅停用</option>` +
+      `</select>` +
+      `<select id="wbEntryScenarioFilter" aria-label="场景筛选">${scenarioOpts}</select>` +
+      `<button type="button" class="wb-button tiny" id="wbBatchEnable"${readOnly}>批量启用</button>` +
+      `<button type="button" class="wb-button tiny" id="wbBatchDisable"${readOnly}>批量停用</button>` +
+      `<span class="wb-mono wb-entry-count" id="wbEntryFilterCount"></span>` +
+      `</div>` +
+      `<div id="wbEntryTableHost"></div>`;
     const save = $("wbSaveBook");
     if (save) save.addEventListener("click", saveBook);
-    document.querySelectorAll("#wbBookDetail button[data-act]").forEach((button) => {
-      button.addEventListener("click", () => onEntryAction(book, button.dataset.act, button.dataset.id));
+    $("wbEntrySearch")?.addEventListener("input", (e) => {
+      entryFilter.q = e.target.value || "";
+      updateEntryTableView(book);
     });
+    $("wbEntryConstFilter")?.addEventListener("change", (e) => {
+      entryFilter.constant = e.target.value || "all";
+      updateEntryTableView(book);
+    });
+    $("wbEntryEnabledFilter")?.addEventListener("change", (e) => {
+      entryFilter.enabled = e.target.value || "all";
+      updateEntryTableView(book);
+    });
+    $("wbEntryScenarioFilter")?.addEventListener("change", (e) => {
+      entryFilter.scenario = e.target.value || "";
+      updateEntryTableView(book);
+    });
+    $("wbBatchEnable")?.addEventListener("click", () => batchToggleEntries(book, true));
+    $("wbBatchDisable")?.addEventListener("click", () => batchToggleEntries(book, false));
+    updateEntryTableView(book);
   }
 
   function openCreateDrawer(kind) {
@@ -305,9 +518,11 @@ export function createWorkbenchStudio({
       `<header><h2>${isBook ? "导入世界书" : "导入角色卡"}</h2>` +
       `<button type="button" class="wb-button tiny" id="wbDrawerClose" data-series-text="关闭">关闭</button></header>` +
       `<div class="wb-drawer-body">` +
-      `<p class="wb-mono" data-series-text="支持 SillyTavern 世界书 JSON（list 或 map 形式）与角色卡 V1/V2 JSON。也可以直接粘贴微信/QQ 里复制来的整段 JSON。">支持 SillyTavern 世界书 JSON（list 或 map 形式）与角色卡 V1/V2 JSON。也可以直接粘贴微信/QQ 里复制来的整段 JSON。</p>` +
+      `<p class="wb-mono">支持 SillyTavern 世界书 JSON、角色卡 V1/V2 JSON，以及 SillyTavern PNG 角色卡 V2（自动解析 chara 元数据块）。</p>` +
+      `<label class="wb-field"><span>选择本地文件（.json / .png）</span><input type="file" id="wbImportFile" accept=".json,.png" /></label>` +
+      `<p class="wb-mono" id="wbImportFileStatus"></p>` +
       `<label class="wb-field"><span data-series-text="名称（留空则用 JSON 里的名字）">名称（留空则用 JSON 里的名字）</span><input type="text" id="wbImportName" /></label>` +
-      `<label class="wb-field"><span data-series-text="JSON 内容">JSON 内容</span><textarea id="wbImportText" rows="16" placeholder="粘贴 JSON"></textarea></label>` +
+      `<label class="wb-field"><span data-series-text="JSON 内容">JSON 内容</span><textarea id="wbImportText" rows="14" placeholder="粘贴 JSON 或从上方选择本地文件"></textarea></label>` +
       `<div class="wb-row"><div class="wb-check"><input type="checkbox" id="wbImportOverwrite" /><label data-series-text="同名时覆盖已有条目">同名时覆盖已有条目</label></div></div>` +
       `</div>` +
       `<footer><button type="button" class="wb-button" id="wbDrawerCancel" data-series-text="取消">取消</button>` +
@@ -317,6 +532,34 @@ export function createWorkbenchStudio({
     $("wbDrawerClose").addEventListener("click", close);
     $("wbDrawerCancel").addEventListener("click", close);
     $("wbDrawer").addEventListener("click", (event) => { if (event.target.id === "wbDrawer") close(); });
+    $("wbImportFile")?.addEventListener("change", async (event) => {
+      const file = event.target.files?.[0];
+      const status = $("wbImportFileStatus");
+      if (!file) return;
+      try {
+        let jsonText = "";
+        if (file.name.toLowerCase().endsWith(".png") || file.type === "image/png") {
+          const buf = await file.arrayBuffer();
+          jsonText = parsePngCharaChunk(buf);
+          if (status) status.textContent = `已从 PNG 角色卡「${file.name}」解析出 chara 元数据。`;
+        } else {
+          jsonText = await file.text();
+          if (status) status.textContent = `已载入 JSON 文件「${file.name}」。`;
+        }
+        $("wbImportText").value = jsonText;
+        const nameInput = $("wbImportName");
+        if (nameInput && !nameInput.value.trim()) {
+          try {
+            const parsed = JSON.parse(jsonText);
+            const autoName = parsed?.data?.name || parsed?.name || "";
+            if (autoName) nameInput.value = String(autoName);
+          } catch {}
+        }
+      } catch (err) {
+        if (status) status.textContent = `读取失败：${err.message || err}`;
+        notify("文件解析失败：" + (err.message || err), "error");
+      }
+    });
     $("wbDrawerSave").addEventListener("click", () => submitImport(kind, close));
   }
 
@@ -559,6 +802,34 @@ export function createWorkbenchStudio({
     }
   }
 
+  function exportCurrentCard() {
+    if (!state.card) return;
+    const card = state.card;
+    const payload = {
+      spec: "chara_card_v2",
+      spec_version: "2.0",
+      data: {
+        name: card.name || "",
+        description: card.description || "",
+        personality: card.personality || "",
+        scenario: card.scenario || "",
+        first_mes: card.first_mes || "",
+        mes_example: card.mes_example || "",
+        system_prompt: card.system_prompt || "",
+        post_history_instructions: card.post_history_instructions || "",
+        tags: Array.isArray(card.tags) ? card.tags : [],
+        extensions: {
+          astrbot_dynamics_world: {
+            group_addendum: card.group_addendum || "",
+            linked_book_id: card.linked_book_id || "",
+          },
+        },
+      },
+    };
+    downloadJsonFile(`character_${card.name || card.id}.json`, payload);
+    notify(`已导出角色卡「${card.name}」JSON。`, "ok");
+  }
+
   function renderCardDetail() {
     const host = $("wbCardDetail");
     const title = $("wbCardTitle");
@@ -579,9 +850,12 @@ export function createWorkbenchStudio({
         `<button type="button" class="wb-button" id="wbSetDefaultCard"${readOnly}${isDefault ? " disabled" : ""}>${
           isDefault ? "已是默认" : "设为默认"
         }</button>` +
+        `<button type="button" class="wb-button" id="wbExportCard">导出 JSON</button>` +
         `<button type="button" class="wb-button danger" id="wbDeleteCard"${readOnly}>删除角色卡</button>`;
       const setDefault = $("wbSetDefaultCard");
       if (setDefault) setDefault.addEventListener("click", setDefaultCard);
+      const expCard = $("wbExportCard");
+      if (expCard) expCard.addEventListener("click", exportCurrentCard);
       const remove = $("wbDeleteCard");
       if (remove) remove.addEventListener("click", deleteCard);
     }
@@ -669,14 +943,18 @@ export function createWorkbenchStudio({
             `<td><select data-sact="scenario"${readOnly}>${scenarioOptions(row.scenario)}</select></td>` +
             `<td>${escapeHtml(row.scenario_auto || "—")}</td>` +
             `<td><select data-sact="card"${readOnly}>${cardOptions(row.card_id)}</select></td>` +
-            `<td><select data-sact="books" multiple size="2"${readOnly}>${books
-              .map(
-                (book) =>
-                  `<option value="${escapeHtml(book.id)}"${(row.book_ids || []).includes(book.id) ? " selected" : ""}>${escapeHtml(
-                    book.name,
-                  )}</option>`,
-              )
-              .join("")}</select></td>` +
+            `<td><div class="wb-book-chips" data-sact="books">${
+              books.length
+                ? books
+                    .map((book) => {
+                      const checked = (row.book_ids || []).includes(book.id);
+                      return `<label class="wb-book-chip${checked ? " is-checked" : ""}"><input type="checkbox" value="${escapeHtml(
+                        book.id,
+                      )}"${checked ? " checked" : ""}${readOnly} /><span>${escapeHtml(book.name)}</span></label>`;
+                    })
+                    .join("")
+                : '<span class="wb-mono">暂无世界书</span>'
+            }</div></td>` +
             `<td class="wb-nowrap">${escapeHtml(formatTs(row.last_active))}</td>` +
             `<td class="actions"><button type="button" class="wb-button tiny danger" data-sact="forget"${readOnly}>清除</button></td>` +
             `</tr>`,
@@ -703,7 +981,9 @@ export function createWorkbenchStudio({
               return sessionAction({ action: "set_card", session_id: sessionId, card_id: control.value });
             }
             if (act === "books") {
-              const ids = Array.from(control.selectedOptions).map((option) => option.value);
+              const ids = Array.from(control.querySelectorAll('input[type="checkbox"]:checked')).map(
+                (box) => box.value,
+              );
               return sessionAction({ action: "bind_books", session_id: sessionId, book_ids: ids });
             }
             return undefined;

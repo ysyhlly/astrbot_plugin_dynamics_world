@@ -47,7 +47,7 @@ PLUGIN_VERSION = "v1.5.0"
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 STATE_FILENAME = "worldbook_store.json"
 
-PANEL_HINT = "\n\n🖥️ 可视化编辑：管理面板 → 插件 → 世界书（条目/角色卡/场景/会话）"
+PANEL_HINT = "\n\n🖥️ 可视化编辑：管理面板 → 群间世界（条目/角色卡/场景/会话）"
 
 DEFAULT_HELP_TEXT = """群间世界 · Dynamics World
 /群间世界 列表 | 新建 | 导入 | 详情

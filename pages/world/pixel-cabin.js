@@ -11,6 +11,7 @@ import {createCabinTimeline} from './cabin-timeline.js?v=stage.11';
 import {createCabinAudio} from './cabin-audio.js?v=stage.11';
 import {composeClientPolaroid} from './cabin-polaroid.js?v=stage.11';
 import {worldStream} from './world-stream.js?v=round2.1';
+import {renderSchematic} from './room-schematic.js';
 Object.assign(messages,cabinMessages);
 const $=id=>document.getElementById(id),make=(tag,value,cls='')=>{const n=document.createElement(tag);n.className=cls;if(value!=null)setText(n,value);return n;};
 const portals=[
@@ -124,6 +125,51 @@ setText(postcardBtn,msg('实况拍立得'),'aria-label');
 const art=make('div',null,'cabin-diorama cabin3d-stage');stage.append(art);
 const polaroidFlash=make('div',null,'cabin-polaroid-flash');polaroidFlash.setAttribute('aria-hidden','true');art.append(polaroidFlash);
 art.append(ambientBar);
+/* Top-Right Stage Shortcuts: Visual Reference Editor & Avatar/YSM Customization */
+const stageShortcuts=make('div',null,'cabin-stage-shortcuts');
+const shortcutVisualBtn=make('button',null,'wb-button tiny cabin-shortcut-btn');
+shortcutVisualBtn.type='button';shortcutVisualBtn.id='cabinShortcutVisual';
+shortcutVisualBtn.append(svgIcon(['M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z','M8.5 10a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3z','M21 15l-5-5L5 21'],13),make('span',msg('参考图')));
+setText(shortcutVisualBtn,msg('快速打开视觉参考图设置'),'title');
+shortcutVisualBtn.addEventListener('click',()=>{
+ setScenePopoverOpen(false);inspector.close();closePortalPeek();setJournalOpen(false);
+ document.dispatchEvent(new CustomEvent('cabin-open-view',{detail:{view:'scenes',drawer:true}}));
+ setTimeout(()=>{
+  const vis=$('sceneVisual')?.closest('details');
+  if(vis){vis.open=true;vis.scrollIntoView({behavior:'smooth',block:'nearest'});}
+ },80);
+});
+const shortcutAvatarBtn=make('button',null,'wb-button tiny cabin-shortcut-btn');
+shortcutAvatarBtn.type='button';shortcutAvatarBtn.id='cabinShortcutAvatar';
+shortcutAvatarBtn.append(svgIcon(['M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2','M12 7a4 4 0 1 0 0-8 4 4 0 0 0 0 8z'],13),make('span',msg('角色形象')));
+setText(shortcutAvatarBtn,msg('快速切换或上传 YSM 角色形象'),'title');
+shortcutAvatarBtn.addEventListener('click',()=>{
+ setScenePopoverOpen(false);inspector.close();closePortalPeek();setJournalOpen(false);
+ expandWardrobeBar();
+});
+stageShortcuts.append(shortcutVisualBtn,shortcutAvatarBtn);
+art.append(stageShortcuts);
+
+/* 2D Fallback Stage Container (auto-shown if WebGL fails or times out) */
+let fallbackActive=false,fallbackSelectedEntity='',fallbackPolaroidUrl='';
+const fallbackView=make('div',null,'cabin-2d-fallback');fallbackView.id='cabin2DFallback';fallbackView.hidden=true;
+const fallbackHead=make('div',null,'cabin-fallback-head');
+const fallbackNotice=make('p','','cabin-fallback-notice');
+const fallbackBtns=make('div',null,'cabin-inspect-btn-row');
+const fallbackSnapBtn=make('button',msg('刷新拍立得快照'),'wb-button tiny');fallbackSnapBtn.type='button';
+const fallbackRetryBtn=make('button',msg('重试 3D 小屋'),'wb-button primary tiny');fallbackRetryBtn.type='button';
+fallbackBtns.append(fallbackSnapBtn,fallbackRetryBtn);
+fallbackHead.append(fallbackNotice,fallbackBtns);
+const fallbackGrid=make('div',null,'cabin-fallback-grid');
+const fallbackSchematicHost=make('div',null,'cabin-fallback-schematic');fallbackSchematicHost.id='cabinFallbackSchematic';
+const fallbackPolaroidWrap=make('div',null,'cabin-fallback-polaroid');
+const fallbackPolaroidImg=document.createElement('img');fallbackPolaroidImg.alt='小屋 2D 拍立得预览';fallbackPolaroidImg.hidden=true;
+const fallbackPolaroidHint=make('p',msg('点击上方「刷新拍立得快照」生成当前小屋明信片预览。'),'dw-meta');
+fallbackPolaroidWrap.append(fallbackPolaroidImg,fallbackPolaroidHint);
+fallbackGrid.append(fallbackSchematicHost,fallbackPolaroidWrap);
+fallbackView.append(fallbackHead,fallbackGrid);
+art.append(fallbackView);
+
 const loading=make('p',msg('正在搭建 3D 小屋…'),'cabin3d-loading');art.append(loading);
 const hover=make('span','','cabin3d-hover');hover.hidden=true;art.append(hover);
 const cozyExitBtn=make('button',msg('退出挂机'),'wb-button tiny cabin-cozy-exit');cozyExitBtn.type='button';cozyExitBtn.hidden=true;art.append(cozyExitBtn);
@@ -166,13 +212,37 @@ function isCharUnavailableForRoomStep(data){
 
 const postcardModal=make('dialog',null,'cabin-postcard-modal');
 const postcardImg=document.createElement('img');postcardImg.alt='小屋实况拍立得明信片';
+const postcardMeta=make('div',null,'cabin-postcard-meta');postcardMeta.id='cabinPostcardMeta';
+const postcardBadge=make('span','','cabin-postcard-badge');postcardBadge.id='cabinPostcardBadge';
+const postcardHint=make('p','','cabin-postcard-hint');postcardHint.hidden=true;
+const postcardGuideBtn=make('button',msg('前往安装引导'),'wb-button tiny');postcardGuideBtn.type='button';postcardGuideBtn.hidden=true;
+postcardGuideBtn.addEventListener('click',()=>{
+ postcardModal.close?.();
+ document.dispatchEvent(new CustomEvent('cabin-open-view',{detail:{view:'setup',drawer:true}}));
+});
+postcardMeta.append(postcardBadge,postcardHint,postcardGuideBtn);
 const postcardActions=make('div',null,'cabin-inspect-btn-row');
 const postcardDownload=make('a','下载 PNG 明信片','wb-button primary tiny');postcardDownload.download='cabin-postcard.png';
 const postcardClose=make('button','关闭','wb-button tiny');postcardClose.type='button';
 postcardClose.addEventListener('click',()=>postcardModal.close());
 postcardActions.append(postcardDownload,postcardClose);
-postcardModal.append(postcardImg,postcardActions);
+postcardModal.append(postcardImg,postcardMeta,postcardActions);
 host.append(postcardModal);
+
+function updatePostcardRendererMeta(rendererKind,fallbackHint=''){
+ const is3d=rendererKind==='3d';
+ postcardBadge.dataset.renderer=is3d?'3d':'2d_fallback';
+ setText(postcardBadge,msg(is3d?'3D 实时渲染':'2D 像素降级'));
+ if(!is3d){
+  setText(postcardHint,fallbackHint||msg('当前为 2D 像素降级渲染；可在「安装引导」安装 Chromium 以开启 3D 实景拍立得。'));
+  postcardHint.hidden=false;
+  postcardGuideBtn.hidden=false;
+ }else{
+  postcardHint.textContent='';
+  postcardHint.hidden=true;
+  postcardGuideBtn.hidden=true;
+ }
+}
 
 async function captureAndShowPolaroid(noteOverride=''){
  const umo=$('dwScope').value.trim();
@@ -183,12 +253,13 @@ async function captureAndShowPolaroid(noteOverride=''){
  postcardBtn.disabled=true;
  feedback(message,'正在冲印小屋实况拍立得…','loading');
  try{
-  let dataUrl='';
+  let dataUrl='',rendererKind='3d',fallbackHint='';
   if(room3d&&typeof room3d.captureDataURL==='function'){
    const rawShot=room3d.captureDataURL('image/png');
    if(rawShot){
     const snap=timeline.isPreviewing()?activeReplaySnapshot:snapshot;
     dataUrl=await composeClientPolaroid(rawShot,snap||{},room3d.diagnostics?.()||null,noteOverride);
+    rendererKind='3d';
    }
   }
   if(!isCurrent())return;
@@ -197,6 +268,8 @@ async function captureAndShowPolaroid(noteOverride=''){
    const res=await apiPost('scene',{umo,action:'postcard_render',prefer_3d:true});
    if(!isCurrent())return;
    dataUrl=res?.data_url||'';
+   rendererKind=res?.renderer==='3d'?'3d':'2d_fallback';
+   fallbackHint=res?.fallback_hint||'';
   }
   if(dataUrl){
    polaroidFlash.classList.remove('is-flashing');
@@ -205,9 +278,10 @@ async function captureAndShowPolaroid(noteOverride=''){
    postcardImg.src=dataUrl;
    postcardDownload.href=dataUrl;
    postcardDownload.download=`cabin-postcard-${Date.now()}.png`;
+   updatePostcardRendererMeta(rendererKind,fallbackHint);
    if(typeof postcardModal.showModal==='function')postcardModal.showModal();
    else postcardModal.setAttribute('open','');
-   feedback(message,'实况拍立得已生成。','success');
+   feedback(message,rendererKind==='3d'?'实况拍立得已生成（3D 实时渲染）。':'实况拍立得已生成（2D 像素降级）。','success');
   }
  }catch(err){
   if(isCurrent())feedback(message,err.message||'生成明信片失败','error');
@@ -315,9 +389,18 @@ async function runCabinQuickAction(kind,payload={}){
  }
 }
 
+const isMobileNarrow=()=>window.matchMedia('(max-width: 650px)').matches;
+function syncMobileInspectState(){
+ const inspectOpen=Boolean(inspector?.activeKey||activePortalKey);
+ stage.classList.toggle('is-inspect-open',inspectOpen);
+ if(inspectOpen&&isMobileNarrow()&&timeline?.isOpen?.()){
+  timeline.setOpen(false);
+ }
+}
+
 const inspector=createCabinInspector(art,{
- onResetFocus:()=>room3d?.clearFocus(),
- onOpenDrawer:viewName=>{room3d?.clearFocus();document.dispatchEvent(new CustomEvent('cabin-open-view',{detail:{view:viewName,drawer:true}}));},
+ onResetFocus:()=>{room3d?.clearFocus();syncMobileInspectState();},
+ onOpenDrawer:viewName=>{room3d?.clearFocus();syncMobileInspectState();document.dispatchEvent(new CustomEvent('cabin-open-view',{detail:{view:viewName,drawer:true}}));},
  onCycleTime:cycleTimeMode,
  onQuickAction:runCabinQuickAction,
 });
@@ -474,6 +557,11 @@ const timeline=createCabinTimeline(art,{
  onOpenChange:isOpen=>{
   timelineBtn.setAttribute('aria-pressed',String(isOpen));
   live.hidden=isOpen;
+  if(isOpen&&isMobileNarrow()){
+   inspector.close();
+   closePortalPeek();
+   syncMobileInspectState();
+  }
  },
  onPreviewChange:({active,keyframe,index,keyframes})=>{
   replaySerial++;
@@ -552,6 +640,7 @@ function closePortalPeek({resetCamera=false}={}){
  }
  portalCard.hidden=true;
  if(resetCamera)room3d?.clearFocus();
+ syncMobileInspectState();
 }
 portalClose.addEventListener('click',()=>{closePortalPeek({resetCamera:true});room3d?.focus(null);});
 portalCard.addEventListener('toggle',event=>{
@@ -657,6 +746,7 @@ async function openPortalPeek(rawKey,{fromCanvas=false}={}){
  if(supportsPortalPopover&&!portalCard.matches(':popover-open')){
   try{portalCard.showPopover();}catch{}
  }
+ syncMobileInspectState();
  if(!capabilities.get(key)||capabilities.get(key)?.state==='error')void refreshPresence();
  if(targetKey&&!snapshot?.companions&&!companionCache){
   try{
@@ -1026,6 +1116,7 @@ function renderWorld(data){
  if(!timeline.isPreviewing()){
   avatarUI.refresh(data,lastScope);
   applySnapshotTo3D(data);
+  if(fallbackActive)render2DFallbackContent();
   syncStageBackdrop();
  }
  const diag=room3d?.diagnostics();
@@ -1172,13 +1263,72 @@ function updateHoverPill(){
  }
 }
 
+function render2DFallbackContent(){
+ if(!fallbackActive)return;
+ const scene=snapshot?.scene||{};
+ const design=pickActiveRoomDesign(scene);
+ if(design&&Array.isArray(design.furniture)){
+  renderSchematic(fallbackSchematicHost,scene,design,fallbackSelectedEntity,id=>{
+   fallbackSelectedEntity=id;
+   render2DFallbackContent();
+  },{
+   canWrite:snapshot?.can_write!==false,
+   onMoveFurniture:async(d,furn,slotKey)=>{
+    await runCabinQuickAction('admin_arrange',{room_id:d.room_id,steps:[{kind:'move_furniture',target_id:furn.id,position:slotKey,room_id:d.room_id}]});
+   },
+  });
+ }else{
+  fallbackSchematicHost.replaceChildren(make('p',msg('当前世界尚未建立房间布局，可先前往「安装引导」或下方插件入口。'),'dw-meta'));
+ }
+}
+
+async function refreshFallbackPolaroid(){
+ const umo=$('dwScope')?.value?.trim()||'';
+ if(!umo)return;
+ fallbackSnapBtn.disabled=true;
+ setText(fallbackPolaroidHint,msg('正在生成 2D 拍立得预览…'));
+ try{
+  const res=await apiPost('scene',{umo,action:'postcard_render',prefer_3d:false});
+  if(res?.data_url){
+   fallbackPolaroidUrl=res.data_url;
+   fallbackPolaroidImg.src=fallbackPolaroidUrl;
+   fallbackPolaroidImg.hidden=false;
+   setText(fallbackPolaroidHint,res.fallback_hint||msg('2D 像素降级拍立得快照已更新。'));
+  }
+ }catch(err){
+  setText(fallbackPolaroidHint,err.message||msg('拍立得快照生成失败'));
+ }finally{
+  fallbackSnapBtn.disabled=false;
+ }
+}
+fallbackSnapBtn.addEventListener('click',()=>void refreshFallbackPolaroid());
+fallbackRetryBtn.addEventListener('click',()=>{
+ fallbackActive=false;
+ fallbackView.hidden=true;
+ art.dataset.renderer='retrying';
+ void ensure3D();
+});
+
+function activate2DFallback(reason=''){
+ fallbackActive=true;
+ art.dataset.renderer='2d_fallback';
+ loading.hidden=true;
+ fallbackView.hidden=false;
+ setText(fallbackNotice,msg('WebGL 3D 小屋暂不可用（{0}），已自动切换为 2D 房间示意图与拍立得预览。',reason||'环境不支持或加载超时'));
+ render2DFallbackContent();
+ if(!fallbackPolaroidUrl&&$('dwScope')?.value?.trim())void refreshFallbackPolaroid();
+}
+
 async function ensure3D(){
  if(room3d){room3d.setActive(visible&&!document.hidden&&!causalReading);return;}
  if(initializing)return initializing;
+ fallbackActive=false;
+ fallbackView.hidden=true;
  setText(loading,msg('正在搭建 3D 小屋…'));
+ loading.hidden=false;
  delete loading.dataset.uiState;
  initializing=(async()=>{try{
-  const {createCabin3D}=await withTimeout(import('./cabin3d.min.js?v=homes.2'));
+  const {createCabin3D}=await withTimeout(import('./cabin3d.min.js?v=homes.2'),10000);
   room3d=createCabin3D(art,{
    onSelect:(rawKey,opts)=>openPortalPeek(portalKeyFrom3d(rawKey)||rawKey,opts),
    onHover:rawKey=>{
@@ -1197,10 +1347,12 @@ async function ensure3D(){
      room3d.focusTarget(key);
      room3d.pulseInspect?.(key);
      inspector.open(key,timeline.isPreviewing()&&activeReplaySnapshot?activeReplaySnapshot:snapshot,room3d.diagnostics());
+     syncMobileInspectState();
      bubbles.syncPosition(room3d);
     }else if(inspector.activeKey||activePortalKey){
      inspector.close();
      closePortalPeek();
+     syncMobileInspectState();
      room3d.clearFocus();
      bubbles.syncPosition(room3d);
     }
@@ -1210,7 +1362,9 @@ async function ensure3D(){
     updateHoverPill();
    },
   });
+  if(!room3d||!room3d.canvas)throw new Error('WebGL 上下文初始化失败');
   stylePicker.attach();
+  art.dataset.renderer='3d';
   art.cabin3D=room3d;setText(room3d.canvas,msg('3D 小屋：方向键旋转，加减键缩放，Home 重置视角'),'aria-label');
   room3d.onFrame(()=>bubbles.syncPosition(room3d));
   room3d.setAvailability(capabilities);room3d.setView(cameraView);
@@ -1226,8 +1380,9 @@ async function ensure3D(){
   loading.hidden=true;
  }catch(error){
   try{room3d?.dispose();}catch{}
-  room3d=null;delete art.cabin3D;art.dataset.renderer='unavailable';
-  setText(loading,msg('3D 小屋加载失败。下方插件入口仍可使用，或刷新页面重试。'));loading.hidden=false;loading.dataset.uiState='warning';console.warn('Dynamics World: 3D startup failed',error);
+  room3d=null;delete art.cabin3D;
+  activate2DFallback(error?.message||'WebGL 不可用');
+  console.warn('Dynamics World: 3D startup failed, switched to 2D fallback',error);
  }
  finally{initializing=null;}})();return initializing;
 }

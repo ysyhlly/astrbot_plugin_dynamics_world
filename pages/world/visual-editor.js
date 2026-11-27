@@ -103,12 +103,12 @@ export function bindVisual(reload){
       <label class="wb-field"><span data-series-text="默认摆放位置">默认摆放位置</span><textarea id="visPlacement" rows="4" maxlength="120" data-visual-write placeholder="例如：书桌左侧，水壶旁边"></textarea></label></div>
       <p class="dw-meta" data-series-text="这里只编辑视觉设定，不会移动物品或改变开关机、水量、笔记等生活状态。">这里只编辑视觉设定，不会移动物品或改变开关机、水量、笔记等生活状态。</p>
       <div class="wb-row"><button class="wb-button primary" id="visSaveItem" type="button" data-visual-write data-series-text="保存物品外观">保存物品外观</button><button class="wb-button" id="visClearItem" type="button" data-visual-write data-series-text="解除物品外观绑定">解除物品外观绑定</button></div></section>
-    <section class="vis-section"><h3 data-series-text="上传或替换参考图">上传或替换参考图</h3><p class="dw-meta" data-series-text="上传后会选入上方编辑区，点击对应的保存按钮才生效。旧图保留在选项中，可随时选回。">上传后会选入上方编辑区，点击对应的保存按钮才生效。旧图保留在选项中，可随时选回。</p><div class="vis-grid">
+    <section class="vis-section"><h3 data-series-text="上传或替换参考图">上传或替换参考图</h3><p class="dw-meta" data-series-text="默认勾选“上传并立即应用”，上传完成后将自动保存并生效；取消勾选时需手动点击上方保存按钮。旧图保留在选项中，可随时选回。">默认勾选“上传并立即应用”，上传完成后将自动保存并生效；取消勾选时需手动点击上方保存按钮。旧图保留在选项中，可随时选回。</p><div class="vis-grid">
       <label class="wb-field"><span data-series-text="用途">用途</span><select id="visUploadRole" data-visual-write><option value="style" data-series-text="画风参考">画风参考</option><option value="layout" data-series-text="当前所选房间底图">当前所选房间底图</option></select></label>
       <label class="wb-field"><span data-series-text="素材名称">素材名称</span><input id="visUploadLabel" type="text" maxlength="100" data-visual-write /></label>
       <label class="wb-field"><span data-series-text="图片（PNG / JPEG / WebP，最多 8 MB）">图片（PNG / JPEG / WebP，最多 8 MB）</span><input id="visFile" type="file" accept="image/png,image/jpeg,image/webp" data-visual-write /></label>
       <label class="wb-field"><span data-series-text="来源链接（可选）">来源链接（可选）</span><input id="visUploadSource" type="url" maxlength="300" placeholder="https://…" data-visual-write /></label></div>
-      <button class="wb-button" id="visUpload" type="button" data-visual-write data-series-text="上传参考图">上传参考图</button></section>
+      <div class="wb-row"><label class="wb-check"><input id="visUploadAutoApply" type="checkbox" checked data-visual-write /><span>上传并立即应用</span></label><button class="wb-button primary" id="visUpload" type="button" data-visual-write data-series-text="上传参考图">上传参考图</button></div></section>
     </div><dialog id="visImageDialog" class="vis-dialog" aria-labelledby="visImageTitle"><header><h3 id="visImageTitle"></h3><button type="button" class="wb-button" id="visCloseImage" data-series-text="关闭预览">关闭预览</button></header><img id="visLargeImage" alt="" /></dialog>`;
   $('visCloseImage').onclick=()=>$('visImageDialog').close();
   $('sceneVisual').closest('details').addEventListener('toggle',previews);
@@ -136,7 +136,18 @@ export function bindVisual(reload){
       catalog.push(asset);assetOptions();
       if(role==='layout'){$('visRoomAsset').value=asset.asset_id;dirty.add('room');}
       else{$('visStyle1').value=asset.asset_id;dirty.add('style');}
-      previews();$('visFile').value='';message(role==='layout'?'已上传。点击“保存房间布局”应用新底图；旧图仍可选回。':'已上传。点击“保存画风参考”应用新图片；旧图仍可选回。');
+      previews();$('visFile').value='';
+      const autoApply=$('visUploadAutoApply')?.checked!==false;
+      if(autoApply){
+        busy=false;
+        if(role==='layout'){
+          await save('room',{action:'room',target_id:$('visRoom').value,asset_id:$('visRoomAsset').value,layout:$('visLayout').value.trim()});
+        }else{
+          await save('style',{action:'style',preset:$('visPreset').value,asset_ids:[...new Set([$('visStyle1').value,$('visStyle2').value].filter(Boolean))]});
+        }
+        return;
+      }
+      message(role==='layout'?'已上传。点击“保存房间布局”应用新底图；旧图仍可选回。':'已上传。点击“保存画风参考”应用新图片；旧图仍可选回。');
     }catch(e){if(own===serial)message(e.message,true);}
     finally{busy=false;controls();}
   };

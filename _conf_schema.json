@@ -202,7 +202,7 @@
       "expose_panel_hint": {
         "description": "在帮助里提示插件面板入口",
         "type": "bool",
-        "hint": "开启后，帮助文案末尾会附上「管理面板 → 插件 → 世界书」的入口提示。",
+        "hint": "开启后，帮助文案末尾会附上「管理面板 → 群间世界」的入口提示。",
         "default": true
       }
     }
@@ -233,9 +233,9 @@
     }
   },
   "web_panel": {
-    "description": "管理面板页面",
+    "description": "[面板] 管理面板页面",
     "type": "object",
-    "hint": "在「管理面板 → 插件 → 世界书」里提供的可视化管理页面。",
+    "hint": "在「管理面板 → 群间世界」里提供的可视化管理页面。",
     "items": {
       "enabled": {
         "description": "启用面板接口",
@@ -252,20 +252,20 @@
       "page_title": {
         "description": "页面标题",
         "type": "string",
-        "hint": "显示在插件页顶部的标题。留空则用「世界书」。",
+        "hint": "显示在插件页顶部的标题。留空则用「群间世界」。",
         "default": "群间世界"
       }
     }
   },
   "contextual_care_enabled": {
     "type": "bool",
-    "description": "启用情境主动关心",
+    "description": "[主动互动] 启用情境主动关心",
     "hint": "根据本人定向说过的身体不适、出行或明确约好的报平安检查近期证据。关闭后停用此类候选。",
     "default": true
   },
   "contextual_care_sessions": {
     "type": "list",
-    "description": "情境主动关心的会话白名单",
+    "description": "[主动互动] 情境主动关心的会话白名单",
     "hint": "开关开启时，留空允许全部受管理的群聊和私聊；填写时仅匹配完整 UMO。",
     "items": {
       "type": "string"
@@ -274,8 +274,8 @@
   },
   "mode": {
     "type": "string",
-    "description": "生活模式",
-    "hint": "narrative 为持续生活；legacy 保留旧版每日作息兼容。",
+    "description": "[生活叙事] 生活模式（narrative 推荐 / legacy 兼容）",
+    "hint": "narrative 为持续生活（推荐）；legacy 仅保留旧版每日作息兼容，新部署请保持 narrative。",
     "options": [
       "legacy",
       "narrative"
@@ -284,7 +284,7 @@
   },
   "narrative_sessions": {
     "type": "list",
-    "description": "持续叙事群会话白名单",
+    "description": "[生活叙事] 持续叙事群会话白名单",
     "hint": "只接受完整群聊 UMO。需同时配置具体 persona_id。私聊由独立开关控制。",
     "items": {
       "type": "string"
@@ -293,19 +293,19 @@
   },
   "narrative_all_groups": {
     "type": "bool",
-    "description": "所有群启用持续叙事",
+    "description": "[生活叙事] 所有群启用持续叙事",
     "hint": "启用所有匹配配置人格和世界书会话绑定的群聊。",
     "default": false
   },
   "narrative_private_chat_enabled": {
     "type": "bool",
-    "description": "启用持续叙事的私聊证据",
+    "description": "[生活叙事] 启用持续叙事的私聊证据",
     "hint": "将匹配配置人格和世界书绑定的私聊纳入主动联系检查。私聊发言和实际送达回执保存在各自会话范围。",
     "default": false
   },
   "narrative_timeout_seconds": {
     "type": "int",
-    "description": "后台叙事调用超时（秒）",
+    "description": "[生活叙事] 后台叙事调用超时（秒）",
     "hint": "后台叙事单次调用总上限90秒；显式设置更短时间会保留。重要事件的前置8秒等待由Chat Dynamics控制。失败事件按退避时间保留在队列。",
     "default": 90,
     "slider": {
@@ -316,8 +316,8 @@
   },
   "session_list_mode": {
     "type": "string",
-    "description": "会话名单模式",
-    "hint": "whitelist=仅列表中的会话启用；blacklist=列表中的会话不启用；none=所有会话启用。",
+    "description": "[Legacy 兼容] 旧版每日作息会话名单模式",
+    "hint": "仅在 mode=legacy 时生效；持续叙事模式请使用 narrative_sessions / narrative_all_groups。",
     "options": [
       "whitelist",
       "blacklist",
@@ -327,8 +327,8 @@
   },
   "session_list": {
     "type": "list",
-    "description": "会话名单列表",
-    "hint": "需填写完整 UMO（如 default:GroupMessage:123456）。可通过 /sid 获取。",
+    "description": "[Legacy 兼容] 旧版每日作息会话名单列表",
+    "hint": "仅在 mode=legacy 时生效。需填写完整 UMO（如 default:GroupMessage:123456），可通过 /sid 获取。",
     "items": {
       "type": "string"
     },
@@ -336,8 +336,8 @@
   },
   "history_reference_days": {
     "type": "int",
-    "description": "历史状态参考天数",
-    "hint": "生成时可参考的最近成功历史状态数量。设为 0 时不参考历史日程。",
+    "description": "[Legacy 兼容] 旧版每日作息历史参考天数",
+    "hint": "仅在 mode=legacy 时生效。生成每日状态时参考的最近历史天数，设为 0 不参考。",
     "slider": {
       "min": 0,
       "max": 7,
@@ -347,29 +347,29 @@
   },
   "llm_provider_id": {
     "type": "string",
-    "description": "LLM 模型 ID",
-    "hint": "用于生成动态生活状态的 LLM Provider。留空则使用当前默认模型。",
+    "description": "[Legacy 兼容] 旧版 LLM 模型 ID",
+    "hint": "留空时优先继承全系列共享轻分析模型；推荐改用下方的「生活推进模型 (narrative_provider_id)」。",
     "_special": "select_provider",
     "default": ""
   },
   "narrative_provider_id": {
     "type": "string",
-    "description": "生活推进模型",
-    "hint": "可选的专用后台叙事 Provider。留空时沿用旧版 LLM Provider 选择；显式填写后若 Provider 不可用，不会回退到其他模型。",
+    "description": "[生活叙事] 生活推进模型",
+    "hint": "可选的专用后台叙事 Provider。留空时自动继承全系列共享轻分析模型或默认模型；显式填写后若不可用不会静默回退。",
     "_special": "select_provider",
     "default": ""
   },
   "persona_id": {
     "type": "string",
-    "description": "持续生活角色",
-    "hint": "用于生成动态生活状态的人格设定。留空则使用当前默认人设。",
+    "description": "[生活叙事] 持续生活角色",
+    "hint": "用于生成动态生活状态的人格设定。留空时继承全系列共享人格或当前默认人设。",
     "_special": "select_persona",
     "default": ""
   },
   "injection_mode": {
     "type": "string",
-    "description": "状态注入方式",
-    "hint": "extra_user_content_parts: 使用临时用户附加上下文，推荐；fake_tool_call: 伪造工具调用注入到对话历史",
+    "description": "[Legacy 兼容] 旧版状态注入方式",
+    "hint": "仅用于 legacy 每日作息注入。extra_user_content_parts: 临时用户附加上下文（推荐）；fake_tool_call: 伪造工具调用。",
     "options": [
       "extra_user_content_parts",
       "fake_tool_call"
@@ -378,8 +378,8 @@
   },
   "prompt_template": {
     "type": "text",
-    "description": "提示词模板",
-    "hint": "用于生成动态生活状态的提示词模板。内容为空时使用默认提示词。可使用占位符：{date}、{holiday}、{persona}、{history_states}、{extra_requirements}、{timeline_optional_fields}。",
+    "description": "[Legacy 兼容] 旧版每日作息提示词模板",
+    "hint": "仅用于 mode=legacy 每日作息生成。内容为空时使用默认提示词。",
     "editor_mode": true,
     "editor_language": "markdown",
     "default": "请根据角色设定，生成该角色在指定日期内的动态生活状态。\n\n日期：{date}\n节日：{holiday}\n状态范围：当天 00:00（含）至次日 00:00（不含）。所有时段均按日期 {date} 当天解释。\n\n角色设定：\n{persona}\n\n强制约束：\n\n1. 只输出一个可被 JSON 解析的对象，不要输出 Markdown、解释、注释或多余文本。\n2. 顶层必须包含 date、schedule_summary、style_summary、timeline 四个字段。date 必须严格等于 \"{date}\"。\n3. timeline 至少包含 3 个时间段，每个时间段中必须包含 time、schedule、outfit 三个字段。\n4. timeline 中的每一项可以按需添加以下可选字段：{timeline_optional_fields}。\n5. time 可以使用 \"凌晨\"、\"早上\"、\"上午\"、\"中午\"、\"下午\"、\"傍晚\"、\"晚上\"、\"深夜\" 这类自然时段，也可以使用 \"08:00-09:00\"、\"23:00-01:00\" 这类具体时间区间。\n6. 跨午夜具体区间只保留当前日期内午夜前的部分。例如 \"23:00-01:00\" 在本状态中仅表示 23:00-24:00。\n\n时段参考映射（左闭右开）：\n\n凌晨：00:00-06:00\n早上：06:00-09:00\n上午：09:00-12:00\n中午：12:00-14:00\n下午：14:00-18:00\n傍晚：18:00-20:00\n晚上：20:00-23:00\n深夜：23:00-24:00\n\n生成要求：\n\n1. 内容应符合角色设定，不要与角色身份、性格、生活方式明显冲突；日程和穿搭保持简洁自然，不要过度夸张。\n2. 生成结果总体上应体现当天不同时间段生活状态的流动感，但不要描述变化过程。\n3. schedule 字段描述该时间段正在进行或持续的生活状态，保持简洁自然，无需过渡说明。\n4. outfit 字段应直接用名词短语描述穿搭，无需使用动作词，即使重复/相同也如实描述。\n\n输出格式必须类似下面的 JSON：\n\n{\n\"date\": \"{date}\",\n\"schedule_summary\": \"当天整体日程的简短描述\",\n\"style_summary\": \"当天整体穿搭或氛围的简短描述\",\n\"timeline\": [\n{\n\"time\": \"上午\",\n\"schedule\": \"这个时间段正在做的事情\",\n\"outfit\": \"这个时间段的穿搭\"\n},\n{\n\"time\": \"下午\",\n\"schedule\": \"这个时间段正在做的事情\",\n\"outfit\": \"这个时间段的穿搭\"\n},\n{\n\"time\": \"晚上\",\n\"schedule\": \"这个时间段正在做的事情\",\n\"outfit\": \"这个时间段的穿搭\"\n}\n]\n}\n\n历史状态：\n{history_states}\n\n额外要求：\n{extra_requirements}"
@@ -417,24 +417,24 @@
   },
   "group_cabin_commands_enabled": {
     "type": "bool",
-    "description": "启用群友小屋互动指令与工具",
+    "description": "[小屋互动] 启用群友小屋互动指令与工具",
     "default": true,
-    "hint": "开启后群友可使用 /小屋实况、/投递、/探访，并在自然对话中触发院门信箱投递与实况拍立得卡。"
+    "hint": "开启后群友可使用 /小屋、/小屋实况、/世界手账、/投递、/探访，并在自然对话中触发院门信箱投递与实况拍立得卡。"
   },
   "cabin_postcard_cooldown_seconds": {
     "type": "int",
-    "description": "小屋实况拍立得冷却（秒）",
+    "description": "[小屋互动] 小屋实况拍立得与手账冷却（秒）",
     "default": 180,
     "slider": {
       "min": 30,
       "max": 1800,
       "step": 30
     },
-    "hint": "防止群聊频繁渲染刷屏，单会话实况明信片最小间隔秒数。"
+    "hint": "防止群聊频繁渲染刷屏，单会话实况明信片或世界手账的最小间隔秒数。"
   },
   "cabin_mailbox_cooldown_seconds": {
     "type": "int",
-    "description": "院门信箱与探访单人冷却（秒）",
+    "description": "[小屋互动] 院门信箱与探访单人冷却（秒）",
     "default": 300,
     "slider": {
       "min": 60,
@@ -445,7 +445,7 @@
   },
   "default_visitor_policy": {
     "type": "string",
-    "description": "默认访客与信箱策略",
+    "description": "[小屋互动] 默认访客与信箱策略",
     "options": [
       "auto",
       "pixel_avatar",
@@ -457,19 +457,19 @@
     "hint": "auto 对封闭世界观（如牢屋敷/魔女审判）自动采用信鸽松鼠小动物化身，开放世界采用像素访客小人；可在世界面板按世界单独覆盖。"
   },
   "resident_tick_seconds": {
-    "description": "背景居民评估间隔（秒）",
+    "description": "[居民与预算] 背景居民评估间隔（秒）",
     "type": "int",
     "default": 300,
     "hint": "共享后台模型每次按一名居民的独立私有视角评估；最短60秒，等待与休息也是有效选择。"
   },
   "resident_hourly_budget": {
-    "description": "全体居民共享的每小时推演上限",
+    "description": "[居民与预算] 全体居民共享的每小时推演上限",
     "type": "int",
     "default": 6,
     "hint": "全部居民合计；自动推进与管理验证共用，不按居民人数倍增。主角色原有预算保持独立。"
   },
   "narrative_global_hourly_budget": {
-    "description": "后台叙事每小时全局调用上限",
+    "description": "[居民与预算] 后台叙事每小时全局调用上限",
     "type": "int",
     "default": 24,
     "slider": {
@@ -480,7 +480,7 @@
     "hint": "限制单角色全部后台叙事/外展/行动推演每小时合计最高 LLM 调用次数。"
   },
   "narrative_outreach_hourly_budget": {
-    "description": "主动联系每小时单会话推演上限",
+    "description": "[居民与预算] 主动联系每小时单会话推演上限",
     "type": "int",
     "default": 6,
     "slider": {
@@ -491,7 +491,7 @@
     "hint": "限制每个受管理会话每小时用于主动关心/主动聊天的评估次数。"
   },
   "narrative_retention_days": {
-    "description": "叙事历史留存天数",
+    "description": "[居民与预算] 叙事历史留存天数",
     "type": "int",
     "default": 60,
     "slider": {

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import re
 import uuid
 
@@ -23,6 +24,63 @@ PARCEL_KINDS = {
     "flower": "小束鲜花",
     "gift": "纪念小物",
 }
+SLOT_LABELS = {
+    "shelf_1": "书架上格",
+    "shelf_2": "书架纪念格",
+    "desk_1": "书桌左角",
+    "desk_2": "书桌右角",
+    "windowsill_vase": "北窗台花瓶",
+    "table_snack": "茶几果盘",
+    "entry_hook": "玄关挂钩",
+}
+
+
+def _slot_label(slot: str) -> str:
+    return SLOT_LABELS.get(str(slot or ""), str(slot or "纪念格"))
+
+
+def _fallback_parcel_reaction(
+    sender_name: str,
+    kind: str,
+    title: str,
+    message: str,
+    slot: str = "",
+) -> str:
+    snippet = re.sub(r"\s+", " ", str(message or "")).strip()[:28]
+    slot_zh = _slot_label(slot) if slot else "纪念格"
+    if kind == "postcard":
+        if snippet:
+            return f"拆开{sender_name}寄来的明信片，反复读了那句「{snippet}」，把卡片仔细压在{slot_zh}。"
+        return f"认真读完了{sender_name}寄来的明信片，把卡片压在{slot_zh}。"
+    if kind == "snack":
+        if snippet:
+            return f"尝了口{sender_name}送来的点心，记着附言里说的「{snippet}」，眉眼弯弯地摆上{slot_zh}。"
+        return f"拆开{sender_name}送来的点心尝了一口，眉眼弯弯地摆上{slot_zh}。"
+    if kind == "flower":
+        if snippet:
+            return f"把{sender_name}送的花束细心修剪插进{slot_zh}，心里念着那句「{snippet}」。"
+        return f"把{sender_name}送的花束修剪花茎，插进{slot_zh}里。"
+    if kind == "gift":
+        if snippet:
+            return f"小心收好{sender_name}寄来的「{title}」摆进{slot_zh}，记下了「{snippet}」这份心意。"
+        return f"小心收好{sender_name}寄来的「{title}」，摆进{slot_zh}。"
+    return f"拆阅了{sender_name}寄来的信件，妥帖收进了{slot_zh}。"
+
+
+def _sanitize_reaction(raw: str) -> str:
+    text = re.sub(r"[\r\n\t]+", " ", str(raw or "")).strip()
+    text = re.sub(r"^[\"'「『《]+|[\"'」』》]+$", "", text).strip()
+    text = re.sub(r"\s{2,}", " ", text)
+    if not text or BLOCKED_PATTERNS.search(text):
+        return ""
+    if len(text) > 140:
+        cut = text[:140]
+        for sep in ("。", "！", "？", ".", "!", "?"):
+            pos = cut.rfind(sep)
+            if pos >= 24:
+                return cut[: pos + 1]
+        return cut.rstrip("，,;； ") + "…"
+    return text
 
 BLOCKED_PATTERNS = re.compile(
     r"(ignore\s+previous|system\s*prompt|作为AI|大语言模型|越狱|jailbreak|<script|javascript:|eval\()",
@@ -291,14 +349,28 @@ class MailboxVisitorService:
             raise ValueError("院门信箱里目前没有未拆阅的信件")
         return 90
 
-    def open_pending_parcels(self, db, scope: dict, now: float, *, max_open: int = 3) -> list[dict]:
-        """Open up to max_open parcels, place gifts/flowers/snacks into keepsake slots, and return receipts."""
+    def open_pending_parcels(
+        self,
+        db,
+        scope: dict,
+        now: float,
+        *,
+        max_open: int = 3,
+        reaction_map: dict[str, str] | None = None,
+    ) -> list[dict]:
+        """Open up to max_open parcels, place gifts/flowers/snacks into keepsake slots, record diary/receipts."""
         key = identity(scope)
         rows = db.execute(
             "SELECT * FROM world_mailbox WHERE identity=? AND status='unopened' ORDER BY created_at ASC LIMIT ?",
             (key, max_open),
         ).fetchall()
+        has_diary_table = bool(
+            db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='diary' LIMIT 1"
+            ).fetchone()
+        )
         opened = []
+        custom_reactions = reaction_map if isinstance(reaction_map, dict) else {}
         for row in rows:
             kind = row["kind"]
             slot_choice = (
@@ -310,13 +382,6 @@ class MailboxVisitorService:
                 if kind == "postcard"
                 else "shelf_2"
             )
-            reaction = {
-                "postcard": f"认真读完了{row['sender_name']}寄来的明信片，把卡片压在书桌一角。",
-                "snack": f"拆开{row['sender_name']}送来的点心尝了一口，眉眼弯弯地摆上果盘。",
-                "flower": f"把{row['sender_name']}送的花束修剪花茎，插进北窗台的花瓶里。",
-                "gift": f"小心收好{row['sender_name']}寄来的「{row['title']}」，摆进纪念格。",
-            }.get(kind, f"拆阅了{row['sender_name']}寄来的信件。")
-
             placed_slot = ""
             if self.engine.keepsakes is not None:
                 ks = self.engine.keepsakes.place_item(
@@ -334,9 +399,20 @@ class MailboxVisitorService:
                 )
                 placed_slot = ks["slot"]
 
+            custom_text = _sanitize_reaction(custom_reactions.get(row["parcel_id"], ""))
+            reaction_source = "model" if custom_text else "template"
+            reaction = custom_text or _fallback_parcel_reaction(
+                row["sender_name"],
+                kind,
+                row["title"],
+                row["message"],
+                placed_slot or slot_choice,
+            )
+
+            slot_zh = _slot_label(placed_slot or slot_choice)
             summary = (
                 f"拆阅了{row['sender_name']}寄来的{PARCEL_KINDS.get(kind, '来信')}"
-                f"「{row['title']}」：{row['message'][:60]}"
+                f"「{row['title']}」（陈列于{slot_zh}）：{row['message'][:60]}"
             )
             db.execute(
                 "UPDATE world_mailbox SET status='opened',reaction=?,keepsake_slot=?,opened_at=? WHERE parcel_id=?",
@@ -368,6 +444,27 @@ class MailboxVisitorService:
                     0.0,
                 ),
             )
+            if has_diary_table:
+                diary_id = f"mail_diary_{row['parcel_id']}"
+                diary_text = (
+                    f"拆阅了{row['sender_name']}寄来的{PARCEL_KINDS.get(kind, '来信')}"
+                    f"「{row['title']}」：{reaction}"
+                )[:240]
+                diary_umo = str(row["umo"] or scope.get("umo") or "")
+                db.execute(
+                    "INSERT INTO diary VALUES(?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(entry_id) DO UPDATE SET text=excluded.text,occurred=excluded.occurred",
+                    (
+                        diary_id,
+                        key,
+                        diary_umo,
+                        now,
+                        diary_text,
+                        "fiction",
+                        json.dumps([row["parcel_id"]], ensure_ascii=False),
+                        0,
+                    ),
+                )
             item = {
                 "parcel_id": row["parcel_id"],
                 "sender_id": row["sender_id"],
@@ -378,8 +475,10 @@ class MailboxVisitorService:
                 "title": row["title"],
                 "message": row["message"],
                 "reaction": reaction,
+                "reaction_source": reaction_source,
                 "summary": summary,
                 "keepsake_slot": placed_slot,
+                "keepsake_slot_label": slot_zh,
                 "reply_status": "pending",
                 "opened_at": now,
             }
@@ -387,6 +486,150 @@ class MailboxVisitorService:
             if self.engine.keepsakes is not None:
                 self.engine.keepsakes.record_keyframe(db, scope, "mailbox_opened", reaction, {}, now)
         return opened
+
+    def pending_reply_material(
+        self,
+        db,
+        scope: dict,
+        *,
+        umo: str = "",
+        sender_id: str = "",
+        limit: int = 3,
+    ) -> list[dict]:
+        """Return opened mailbox receipts awaiting a natural in-character reply."""
+        key = identity(scope)
+        cap = max(1, min(12, int(limit or 3)))
+        clauses = ["identity=?", "reply_status='pending'"]
+        params: list = [key]
+        if umo:
+            clauses.append("(umo=? OR umo='')")
+            params.append(umo)
+        if sender_id:
+            clauses.append("sender_id=?")
+            params.append(sender_id)
+        params.append(cap)
+        rows = db.execute(
+            f"SELECT * FROM world_mailbox_receipts WHERE {' AND '.join(clauses)} "
+            "ORDER BY opened_at DESC LIMIT ?",
+            tuple(params),
+        ).fetchall()
+        out = []
+        for r in rows:
+            slot = str(r["keepsake_slot"] or "")
+            slot_zh = _slot_label(slot) if slot else ""
+            cue_slot = f"（已陈列于{slot_zh}）" if slot_zh else ""
+            out.append(
+                {
+                    "parcel_id": r["parcel_id"],
+                    "umo": r["umo"],
+                    "sender_id": r["sender_id"],
+                    "sender_name": r["sender_name"],
+                    "kind": r["kind"],
+                    "kind_label": PARCEL_KINDS.get(r["kind"], "来信"),
+                    "title": r["title"],
+                    "message": r["message"],
+                    "reaction": r["reaction"],
+                    "keepsake_slot": slot,
+                    "keepsake_slot_label": slot_zh,
+                    "reply_cue": (
+                        f"可以自然回应{r['sender_name']}寄来的{PARCEL_KINDS.get(r['kind'], '来信')}"
+                        f"「{r['title']}」{cue_slot}：{r['reaction']}"
+                    ),
+                    "opened_at": float(r["opened_at"]),
+                }
+            )
+        return out
+
+    def mark_reply_delivered(
+        self, scope: dict, parcel_id: str, reply_text: str = ""
+    ) -> bool:
+        """Mark a mailbox receipt as naturally replied to."""
+        key = identity(scope)
+        now = self.engine.clock()
+        clean_reply = str(reply_text or "").strip()[:240]
+        with self.engine._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            cur = db.execute(
+                "UPDATE world_mailbox_receipts SET reply_status='replied',reply_text=?,replied_at=? "
+                "WHERE identity=? AND parcel_id=?",
+                (clean_reply, now, key, str(parcel_id or "")),
+            )
+            return cur.rowcount > 0
+
+    async def mark_reply_delivered_async(
+        self, scope: dict, parcel_id: str, reply_text: str = ""
+    ) -> bool:
+        return await asyncio.to_thread(
+            self.mark_reply_delivered, scope, parcel_id, reply_text
+        )
+
+    async def open_pending_parcels_async(
+        self,
+        scope: dict,
+        *,
+        max_open: int = 3,
+        character_context: dict | None = None,
+        reaction_generator=None,
+    ) -> list[dict]:
+        """Async parcel opening that optionally generates 1-2 persona-faithful sentences via LLM."""
+        key = identity(scope)
+
+        def _peek_pending():
+            with self.engine._db(notify=False) as db:
+                db.execute("PRAGMA query_only = ON")
+                rows = db.execute(
+                    "SELECT * FROM world_mailbox WHERE identity=? AND status='unopened' "
+                    "ORDER BY created_at ASC LIMIT ?",
+                    (key, max_open),
+                ).fetchall()
+                return [dict(r) for r in rows]
+
+        pending = await asyncio.to_thread(_peek_pending)
+        if not pending:
+            return []
+
+        gen = reaction_generator or getattr(self.engine, "mailbox_reaction_generator", None)
+        reaction_map: dict[str, str] = {}
+        if callable(gen):
+            for parcel in pending:
+                kind = parcel.get("kind", "postcard")
+                slot_choice = (
+                    "windowsill_vase"
+                    if kind == "flower"
+                    else "table_snack"
+                    if kind == "snack"
+                    else "desk_2"
+                    if kind == "postcard"
+                    else "shelf_2"
+                )
+                enriched_parcel = {
+                    **parcel,
+                    "kind_label": PARCEL_KINDS.get(kind, "来信"),
+                    "slot_hint": _slot_label(slot_choice),
+                }
+                try:
+                    raw = await asyncio.wait_for(
+                        gen(scope, enriched_parcel, character_context),
+                        timeout=12.0,
+                    )
+                    cleaned = _sanitize_reaction(raw)
+                    if cleaned:
+                        reaction_map[parcel["parcel_id"]] = cleaned
+                except Exception:
+                    continue
+
+        def _commit_open():
+            with self.engine._db() as db:
+                db.execute("BEGIN IMMEDIATE")
+                return self.open_pending_parcels(
+                    db,
+                    scope,
+                    self.engine.clock(),
+                    max_open=max_open,
+                    reaction_map=reaction_map,
+                )
+
+        return await asyncio.to_thread(_commit_open)
 
     def recent_opened_summaries(
         self, db, scope: dict, *, limit: int = 3, umo: str = ""
@@ -538,6 +781,9 @@ class MailboxVisitorService:
             ).fetchall()
         ]
         recent_opened = self.recent_opened_summaries(db, scope, limit=3)
+        pending_replies = self.pending_reply_material(
+            db, scope, umo=str(scope.get("umo") or ""), limit=3
+        )
         return {
             "policy": mode,
             "policy_label": VISITOR_MODE_LABELS[mode],
@@ -547,6 +793,7 @@ class MailboxVisitorService:
             "visitors": visitors,
             "latest_opened": recent_opened[0] if recent_opened else None,
             "recent_opened": recent_opened,
+            "pending_replies": pending_replies,
         }
 
     async def set_policy_async(self, scope: dict, mode: str) -> dict:

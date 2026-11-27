@@ -907,7 +907,19 @@ class NarrativeEngine(
         if latest_opened:
             sender = str(latest_opened.get("sender_name") or "群友")[:20]
             title = str(latest_opened.get("title") or latest_opened.get("kind_label") or "来信")[:24]
-            parts.append(f"刚拆阅{sender}寄来的「{title}」")
+            reaction = str(latest_opened.get("reaction") or "")[:48]
+            if reaction:
+                parts.append(f"刚拆阅{sender}寄来的「{title}」：{reaction}")
+            else:
+                parts.append(f"刚拆阅{sender}寄来的「{title}」")
+        pending_replies = [
+            item for item in (mb.get("pending_replies") or []) if isinstance(item, dict)
+        ]
+        if pending_replies:
+            top_reply = pending_replies[0]
+            r_sender = str(top_reply.get("sender_name") or "群友")[:16]
+            r_title = str(top_reply.get("title") or "来信")[:20]
+            parts.append(f"待自然回应{r_sender}的「{r_title}」")
 
         visitors = [
             v for v in (mb.get("visitors") or []) if isinstance(v, dict)
@@ -975,6 +987,7 @@ class NarrativeEngine(
                     "kind": latest_opened.get("kind", ""),
                     "kind_label": latest_opened.get("kind_label", ""),
                     "title": latest_opened.get("title", ""),
+                    "reaction": latest_opened.get("reaction", ""),
                     "summary": latest_opened.get("summary", ""),
                     "keepsake_slot": latest_opened.get("keepsake_slot", ""),
                     "opened_at": latest_opened.get("opened_at", 0.0),
@@ -982,6 +995,19 @@ class NarrativeEngine(
                 if latest_opened
                 else None
             ),
+            "pending_mail_replies": [
+                {
+                    "parcel_id": item.get("parcel_id", ""),
+                    "sender_id": item.get("sender_id", ""),
+                    "sender_name": item.get("sender_name", ""),
+                    "title": item.get("title", ""),
+                    "reaction": item.get("reaction", ""),
+                    "keepsake_slot": item.get("keepsake_slot", ""),
+                    "reply_cue": item.get("reply_cue", ""),
+                    "opened_at": item.get("opened_at", 0.0),
+                }
+                for item in pending_replies[:3]
+            ],
             "garden": {
                 "visitor_count": len(visitors),
                 "visitors": [

@@ -37,7 +37,16 @@ export function renderRoomDesign(scene,currentScope){
   $('roomDesignToggle').disabled=!!scene.action||scene.visual_profile?.can_write===false;
   $('roomDesignToggle').title=scene.action?msg("当前行动完成或取消后可切换"):scene.visual_profile?.can_write===false?msg("面板处于只读模式"):'';
   setText($('roomActorLocation'),scene.phase==='travelling'?msg('角色正在途中{0}，不在此房间。',scene.destination?msg('，前往{0}',scene.destination):''):scene.phase==='unknown'?msg("角色位置待确认，尚未认定在此房间。"):scene.room_id===d.room_id?msg("角色当前在此房间；室内具体位置未记录。"):msg('角色当前在：{0} · {1}',scene.place_name||msg('待定位'),scene.room_name||msg('房间待确认')));
-  renderSchematic($('roomSchematic'),scene,d,selectedEntity,id=>{selectedEntity=id;renderRoomDesign(latest,scope);});
+  renderSchematic($('roomSchematic'),scene,d,selectedEntity,id=>{selectedEntity=id;renderRoomDesign(latest,scope);},{
+    canWrite:scene.visual_profile?.can_write!==false,
+    onMoveFurniture:async(design,furn,slotKey)=>{
+      try{
+        await apiPost('scene',{umo:scope,action:'admin_arrange',room_id:design.room_id,steps:[{kind:'move_furniture',target_id:furn.id,position:slotKey,room_id:design.room_id}]});
+        feedback($('roomDesignState'),`${furn.name} 已移至新摆位。`,'success');
+        if(refresh)await refresh();
+      }catch(e){feedback($('roomDesignState'),e.message,'error');}
+    },
+  });
   $('roomDesignFurniture').replaceChildren(...d.furniture.map(f=>{const card=text('article','');card.className='dw-scene-item';card.append(text('strong',f.name),text('p',msg(f.position_label)),text('small',f.movable?msg("可按需要移动"):msg("固定设施")));return card;}));
   setText($('roomDesignFixtures'),msg('{0} · {1}',msg(d.lighting_label||''),msg(d.curtains_label||'')));
   $('roomDesignChanges').replaceChildren(...d.history.slice(-4).reverse().map(c=>text('p',`${formatTs(c.occurred_at)} · ${c.origin==='life_model'?msg("自主布置"):msg("管理操作")} · ${c.name}：${c.before} → ${c.after}`)));

@@ -1328,14 +1328,11 @@ class WorldAPI(CausalAPIMixin):
                         bypass_cooldown=True,
                     )
                 elif act == "mailbox_open":
-                    def _open_mail():
-                        with engine._db() as db:
-                            db.execute("BEGIN IMMEDIATE")
-                            return engine.mailbox.open_pending_parcels(
-                                db, scope, engine.clock(), max_open=5
-                            )
-
-                    opened = await asyncio.to_thread(_open_mail)
+                    opened = await engine.mailbox.open_pending_parcels_async(
+                        scope,
+                        max_open=5,
+                        character_context=character,
+                    )
                     result = {"opened": opened, "count": len(opened)}
                 elif act == "visitor_policy":
                     result = await asyncio.to_thread(
@@ -1391,14 +1388,16 @@ class WorldAPI(CausalAPIMixin):
                         caption=str(body.get("caption") or ""),
                         prefer_3d=bool(body.get("prefer_3d", True)),
                         shot_mode=str(body.get("shot_mode") or "auto"),
+                        focus_slot=str(body.get("focus_slot") or ""),
                     )
                 else:
                     raise ValueError("未知场景操作")
-                if (
-                    act != "postcard_render"
-                    and getattr(self.plugin.life.narrative, "on_db_write", None) is None
-                ):
-                    self.bus.notify()
+                if act != "postcard_render":
+                    postcards = getattr(self.plugin, "postcards", None)
+                    if postcards is not None and hasattr(postcards, "invalidate_cache"):
+                        postcards.invalidate_cache()
+                    if getattr(self.plugin.life.narrative, "on_db_write", None) is None:
+                        self.bus.notify()
                 return _ok(result)
             except (ValueError, TypeError) as exc:
                 return _err(str(exc), 409)

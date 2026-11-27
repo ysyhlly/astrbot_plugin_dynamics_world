@@ -45,13 +45,27 @@ function itemPoint(design,code){
   if(code==='bookshelf'){const p=anchor(design,'bookcase',new Set());return [p[0],p[1]+4];}
   return position(design,code);
 }
-export function renderSchematic(host,scene,design,selected,select){
+const FLOOR_SLOTS=[
+  ['left_wall','左墙'],
+  ['right_wall','右墙'],
+  ['back_wall','北墙'],
+  ['center','居中'],
+  ['near_window','窗畔'],
+  ['bedside','床畔'],
+];
+const SURFACE_SLOTS=[
+  ['desk_left','桌左'],
+  ['desk_right','桌右'],
+  ['bedside','床头'],
+  ['bookshelf','书架'],
+];
+export function renderSchematic(host,scene,design,selected,select,options={}){
   const oldCanvas=host.querySelector('.room-canvas'),scroll=[oldCanvas?.scrollLeft||0,oldCanvas?.scrollTop||0];
   const focus=host.contains(document.activeElement)?document.activeElement?.getAttribute('data-entity-id'):null;
   host.replaceChildren();
   const toolbar=document.createElement('div');toolbar.className='room-view-toolbar';
   const heading=document.createElement('div');heading.className='room-view-heading';heading.append(icon('room'));const headingText=document.createElement('div');const roomTitle=document.createElement('strong');setText(roomTitle,design.room_name);const roomHint=document.createElement('span');setText(roomHint,msg('{0} 件家具 · {1} 件室内物品',design.furniture.length,(scene.items||[]).filter(i=>!i.carried&&i.room_id===design.room_id).length));headingText.append(roomTitle,roomHint);heading.append(headingText);toolbar.append(heading);
-  const zoom=document.createElement('button');zoom.type='button';zoom.className='wb-button tiny';setText(zoom,expanded?msg("适配宽度"):msg("放大查看"));zoom.setAttribute('aria-pressed',String(expanded));zoom.onclick=()=>{expanded=!expanded;renderSchematic(host,scene,design,selected,select);};toolbar.append(zoom);host.append(toolbar);
+  const zoom=document.createElement('button');zoom.type='button';zoom.className='wb-button tiny';setText(zoom,expanded?msg("适配宽度"):msg("放大查看"));zoom.setAttribute('aria-pressed',String(expanded));zoom.onclick=()=>{expanded=!expanded;renderSchematic(host,scene,design,selected,select,options);};toolbar.append(zoom);host.append(toolbar);
   const frame=document.createElement('div');frame.className='room-view-frame';host.append(frame);
   const canvas=document.createElement('div');canvas.className='room-canvas';canvas.tabIndex=0;canvas.setAttribute('aria-label',msg("房间图，可放大后滚动查看"));
   const svg=svgNode('svg',{viewBox:'0 0 900 520',role:'group','aria-label':tr('{0}的区域示意图',design.room_name),class:'dw-room-svg'});
@@ -59,7 +73,7 @@ export function renderSchematic(host,scene,design,selected,select){
   roomFloor(svg);
   const entries=[];
   for(const f of design.furniture){
-    entries.push({id:f.id,name:f.name,kind:f.kind,position:f.position,point:locate(design,f),basis:'confirmed',description:msg('{0}{1}',msg(f.position_label),f.movable?msg(' · 可移动'):msg(' · 固定设施')),furniture:true});
+    entries.push({id:f.id,name:f.name,kind:f.kind,position:f.position,point:locate(design,f),basis:'confirmed',description:msg('{0}{1}',msg(f.position_label),f.movable?msg(' · 可移动'):msg(' · 固定设施')),furniture:true,furnObj:f});
   }
   const unresolved=[],inventory=[];
   for(const item of scene.items||[]){
@@ -89,6 +103,28 @@ export function renderSchematic(host,scene,design,selected,select){
   const panel=document.createElement('div');panel.className='room-selection';panel.append(icon(picked?.furniture?'room':picked?'book':'room'));const title=document.createElement('strong');setText(title,picked?.name||msg("点选房间里的物件"));panel.append(title);
   const line=document.createElement('p');setText(line,picked?.description||msg("查看它的位置、状态与摆放依据。"));panel.append(line);
   if(picked){const basis=document.createElement('span');basis.className='room-basis';setText(basis,{confirmed:picked.furniture?msg("已登记的家具位置"):msg("动作确认的摆位"),reference:msg("基础设定的参考摆位"),carried:msg("随身物品"),unknown:msg("摆位待确认")}[picked.basis]);panel.append(basis);
+    if(picked.furniture&&picked.furnObj?.movable&&options.canWrite!==false&&typeof options.onMoveFurniture==='function'){
+      const f=picked.furnObj;
+      const baseSlots=f.kind==='lamp'||f.anchor==='surface'?SURFACE_SLOTS:FLOOR_SLOTS;
+      const allowed=Array.isArray(f.allowed_positions)&&f.allowed_positions.length?new Set(f.allowed_positions):null;
+      const slots=allowed?baseSlots.filter(([k])=>allowed.has(k)):baseSlots;
+      if(slots.length){
+        const arrangeWrap=document.createElement('div');arrangeWrap.className='cabin-arrange-box';arrangeWrap.style.marginTop='10px';
+        const head=document.createElement('span');head.className='cabin-arrange-title';setText(head,msg('快捷调整摆位'));
+        const pills=document.createElement('div');pills.className='cabin-slot-pills';
+        for(const [slotKey,slotLabel] of slots){
+          const btn=document.createElement('button');btn.type='button';
+          const isCur=f.position===slotKey;
+          btn.className='cabin-slot-pill'+(isCur?' is-active':'');
+          btn.disabled=isCur;
+          btn.setAttribute('aria-pressed',String(isCur));
+          btn.textContent=slotLabel;
+          btn.onclick=()=>options.onMoveFurniture(design,f,slotKey);
+          pills.append(btn);
+        }
+        arrangeWrap.append(head,pills);panel.append(arrangeWrap);
+      }
+    }
     if(picked.item){const i=picked.item;for(const value of [i.kind==='computer'?(i.powered?msg("电脑已开机"):msg("电脑已关机")):'',i.kind==='umbrella'?(i.open?msg("雨伞已撑开"):msg("雨伞已收起")):'',i.wet?msg("当前潮湿"):'',i.note_count!=null?msg('已保存 {0} 条纸本记录',i.note_count):'',i.document_count!=null?msg('已保存 {0} 份草稿',i.document_count):'',i.servings!=null?msg('水量 {0}/{1}',i.servings,i.capacity):'']){if(value){const status=document.createElement('p');status.className='room-fact';setText(status,value);panel.append(status);}}}}
   side.append(panel);
   for(const [label,items] of [[msg("本房间内，具体摆位尚未登记"),unresolved],[msg("角色随身携带，不在房间内重复摆放"),inventory]]){

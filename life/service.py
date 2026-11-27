@@ -133,6 +133,7 @@ class LifeService:
         from ..mailbox_visitors import MailboxVisitorService
 
         self.narrative.mailbox = MailboxVisitorService(self.narrative)
+        self.narrative.mailbox_reaction_generator = self._generate_mailbox_reaction
         from ..scenes import SceneService
 
         self.narrative.scenes = SceneService(self.narrative)
@@ -303,6 +304,98 @@ class LifeService:
             return None
         scope.update(persona_id=persona_id, instance_id=persona_id)
         return normalize_scope(scope)
+
+    async def _generate_mailbox_reaction(
+        self, scope: dict, parcel: dict, character: dict | None = None
+    ) -> str:
+        """Generate 1-2 short persona-faithful reaction sentences when opening a mailbox parcel."""
+        if not self.is_active():
+            return ""
+        try:
+            char = character if isinstance(character, dict) else await self._character(scope)
+        except Exception:
+            char = character if isinstance(character, dict) else {}
+        selected_provider_id = str(self.config.get("narrative_provider_id", "")).strip()
+        inherited_provider_id = ""
+        provider = None
+        lookup = getattr(self.context, "get_provider_by_id", None)
+        if selected_provider_id and callable(lookup):
+            provider = lookup(selected_provider_id)
+        else:
+            explicit_llm_id = str(self.config.get("llm_provider_id", "") or "").strip()
+            if not explicit_llm_id:
+                shared = get_series_shared_config(getattr(self, "context", None))
+                if isinstance(shared, dict):
+                    candidate_id = str(
+                        shared.get("light_analysis_provider")
+                        or shared.get("decision_provider")
+                        or shared.get("reply_provider")
+                        or ""
+                    ).strip()
+                    if candidate_id and callable(lookup):
+                        provider = lookup(candidate_id)
+                        if provider is not None:
+                            inherited_provider_id = candidate_id
+            if provider is None:
+                try:
+                    provider = await self.generator._get_provider()
+                except Exception:
+                    provider = None
+        if provider is None:
+            return ""
+        text_chat = getattr(provider, "text_chat", None)
+        if not callable(text_chat):
+            return ""
+        char_name = str((char or {}).get("name") or "小屋主人")[:24]
+        persona_excerpt = str(
+            (char or {}).get("persona")
+            or (char or {}).get("description")
+            or (char or {}).get("scenario")
+            or ""
+        ).strip()[:360]
+        sender = str(parcel.get("sender_name") or "朋友")[:24]
+        kind_label = str(parcel.get("kind_label") or "来信")[:16]
+        title = str(parcel.get("title") or kind_label)[:40]
+        msg_body = str(parcel.get("message") or "")[:140]
+        slot_hint = str(parcel.get("slot_hint") or "纪念格")[:24]
+        system_prompt = (
+            f"你是角色「{char_name}」。请严格贴合人设，用自然、克制、有画面感的口吻写出 1~2 句"
+            "拆阅院门信箱来信/礼物时的内心感想与摆进纪念格的动作（不超过 80 字，纯中文正文，不要加引号、括号解释或 Markdown）。"
+        )
+        if persona_excerpt:
+            system_prompt += f"\n角色设定摘要：{persona_excerpt}"
+        prompt = (
+            f"你刚从院门信箱收到 {sender} 寄来的{kind_label}「{title}」，"
+            f"附言写着：「{msg_body}」。你会把它收进「{slot_hint}」。"
+            "请写出你的 1~2 句拆阅感想。"
+        )
+        params = inspect.signature(text_chat).parameters
+        accepts_kwargs = any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+        )
+        kwargs: dict = {}
+        if "system_prompt" in params or accepts_kwargs:
+            kwargs["system_prompt"] = system_prompt
+        else:
+            prompt = f"{system_prompt}\n\n{prompt}"
+        if "contexts" in params or accepts_kwargs:
+            kwargs["contexts"] = []
+        resolved_provider_id = (
+            selected_provider_id
+            or inherited_provider_id
+            or self.generator._provider_id_of(provider)
+        )
+        try:
+            response = await series_llm_call(
+                self.context,
+                resolved_provider_id,
+                "astrbot_plugin_dynamics_world",
+                "mailbox_reaction",
+                lambda: text_chat(prompt=prompt, **kwargs),
+            )
+            return str(self.generator._extract_completion_text(response) or "").strip()
+        except Exception:
+            return ""
 
     async def _narrative_model(self, request: dict) -> dict:
         """Call the configured provider directly with no chat hooks or tools."""

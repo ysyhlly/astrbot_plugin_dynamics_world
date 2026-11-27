@@ -14,6 +14,8 @@ export const INSPECT_LABELS={
  shelf:'书架 · 完结书册与纪念格',
  mailbox:'拱门信箱 · 投递与访客',
  garden_bed:'花圃菜畦 · 生态与收获',
+ chair:'座椅 · 摆位与布置',
+ lamp:'台灯 · 照明与桌面摆位',
 };
 
 const PHASE_NAMES={dawn:'清晨柔光',day:'正午日光',dusk:'黄昏斜阳',night:'静谧夜晚'};
@@ -35,7 +37,13 @@ const SURFACE_SLOT_PILLS=[
  ['bedside','床头'],
  ['bookshelf','书架'],
 ];
-const ARRANGE_TARGET_BY_CARD={desk:'desk',bed:'bed',shelf:'bookcase'};
+const ARRANGE_TARGET_BY_CARD={
+ desk:['desk','chair','lamp'],
+ bed:['bed','lamp'],
+ shelf:['bookcase'],
+ chair:['chair'],
+ lamp:['lamp'],
+};
 const ARRANGE_LABEL_BY_ID={desk:'书桌位置',bed:'床铺位置',bookcase:'书柜位置',chair:'座椅位置',lamp:'台灯位置'};
 
 function formatHM(epochSec,timezone){
@@ -272,6 +280,16 @@ function buildRows(key,snapshot,diag){
   rows.push(['院西花圃',`${fl.crop||'洋甘菊'} · ${STAGE_LABELS[fl.stage]||'生长中'}（${Math.round(Number(fl.progress||0)*100)}%）`]);
   rows.push(['院东菜畦',`${vg.crop||'卷心菜'} · ${STAGE_LABELS[vg.stage]||'生长中'}（${Math.round(Number(vg.progress||0)*100)}%）`]);
   rows.push(['收获储物篮',formatPantry(eco.pantry)]);
+ }else if(key==='chair'){
+  const furn=(Array.isArray(rd.furniture)?rd.furniture:[]).find(f=>f&&(f.kind==='chair'||f.id==='chair'));
+  rows.push(['家具名称',furn?.name||'木椅']);
+  rows.push(['当前位置',furn?.position_label||furn?.position||'书桌旁']);
+  rows.push(['可否调整',furn?.movable===false?'固定摆设':'可在下方直接调整落位']);
+ }else if(key==='lamp'){
+  const furn=(Array.isArray(rd.furniture)?rd.furniture:[]).find(f=>f&&(f.kind==='lamp'||f.id==='lamp'));
+  rows.push(['家具名称',furn?.name||'桌面台灯']);
+  rows.push(['当前位置',furn?.position_label||furn?.position||'书桌一角']);
+  rows.push(['室内灯光',LAMP_LABELS[rd.lighting]||rd.lighting_label||'暖光常亮']);
  }
  return rows;
 }
@@ -381,65 +399,75 @@ export function createCabinInspector(stage,{onResetFocus,onOpenDrawer,onCycleTim
  }
 
  function appendFurnitureArrange(key,data,canWrite){
-  const targetKind=ARRANGE_TARGET_BY_CARD[key];
-  if(!targetKind||!canWrite)return;
+  const rawTargets=ARRANGE_TARGET_BY_CARD[key];
+  const targetKinds=Array.isArray(rawTargets)?rawTargets:(rawTargets?[rawTargets]:[]);
+  if(!targetKinds.length||!canWrite)return;
   const scene=data?.scene||{};
   const rd=pickRoomDesign(scene);
+  if(!rd.room_id)return;
   const furnList=Array.isArray(rd.furniture)?rd.furniture:[];
-  const furn=furnList.find(f=>f&&(f.kind===targetKind||f.id===targetKind)&&f.movable!==false);
-  if(!furn||!rd.room_id)return;
-
   const charBusyOrAway=isCharacterAwayOrBusy(data);
   const instantMode=charBusyOrAway?true:(adminArrangePref??false);
-  const box=document.createElement('div');
-  box.className='cabin-arrange-box';
+  let renderedCount=0;
 
-  const top=document.createElement('div');
-  top.className='cabin-arrange-head';
-  const lbl=document.createElement('span');
-  lbl.className='cabin-arrange-title';
-  lbl.textContent=ARRANGE_LABEL_BY_ID[targetKind]||'家具落位';
+  for(const targetKind of targetKinds){
+   const furn=furnList.find(f=>f&&(f.kind===targetKind||f.id===targetKind)&&f.movable!==false);
+   if(!furn)continue;
+   const box=document.createElement('div');
+   box.className='cabin-arrange-box';
 
-  const modeLabel=document.createElement('label');
-  modeLabel.className='cabin-arrange-mode';
-  const chk=document.createElement('input');
-  chk.type='checkbox';
-  chk.checked=instantMode;
-  chk.disabled=actionBusy||charBusyOrAway;
-  chk.addEventListener('change',()=>{
-   adminArrangePref=chk.checked;
-  });
-  const modeText=document.createElement('span');
-  modeText.textContent=msg('即时落位（管理员布置）');
-  modeLabel.append(chk,modeText);
-  top.append(lbl,modeLabel);
+   const top=document.createElement('div');
+   top.className='cabin-arrange-head';
+   const lbl=document.createElement('span');
+   lbl.className='cabin-arrange-title';
+   lbl.textContent=ARRANGE_LABEL_BY_ID[targetKind]||furn.name||'家具落位';
+   top.append(lbl);
 
-  const pills=document.createElement('div');
-  pills.className='cabin-slot-pills';
-  const baseDefs=furn.kind==='lamp'||furn.anchor==='surface'?SURFACE_SLOT_PILLS:FLOOR_SLOT_PILLS;
-  const allowed=Array.isArray(furn.allowed_positions)&&furn.allowed_positions.length?new Set(furn.allowed_positions):null;
-  const slotDefs=allowed?baseDefs.filter(([k])=>allowed.has(k)):baseDefs;
-  const curPos=furn.position||furn.slot||'';
-  for(const [slotKey,slotName] of slotDefs){
-   const pill=document.createElement('button');
-   pill.type='button';
-   const isCurrent=curPos===slotKey;
-   pill.className='cabin-slot-pill'+(isCurrent?' is-active':'');
-   pill.setAttribute('aria-pressed',String(isCurrent));
-   pill.disabled=actionBusy||isCurrent;
-   pill.textContent=slotName;
-   pill.addEventListener('click',()=>{
-    const useAdmin=chk.checked||charBusyOrAway;
-    if(useAdmin){
-     runQuick('admin_arrange',{room_id:rd.room_id,steps:[{kind:'move_furniture',target_id:furn.id,position:slotKey,room_id:rd.room_id}]});
-    }else{
-     runQuick('move_furniture',{room_id:rd.room_id,target_id:furn.id,position:slotKey});
-    }
-   });
-   pills.append(pill);
+   let chk=null;
+   if(renderedCount===0){
+    const modeLabel=document.createElement('label');
+    modeLabel.className='cabin-arrange-mode';
+    chk=document.createElement('input');
+    chk.type='checkbox';
+    chk.checked=instantMode;
+    chk.disabled=actionBusy||charBusyOrAway;
+    chk.addEventListener('change',()=>{
+     adminArrangePref=chk.checked;
+    });
+    const modeText=document.createElement('span');
+    modeText.textContent=msg('即时落位（管理员布置）');
+    modeLabel.append(chk,modeText);
+    top.append(modeLabel);
+   }
+
+   const pills=document.createElement('div');
+   pills.className='cabin-slot-pills';
+   const baseDefs=furn.kind==='lamp'||furn.anchor==='surface'?SURFACE_SLOT_PILLS:FLOOR_SLOT_PILLS;
+   const allowed=Array.isArray(furn.allowed_positions)&&furn.allowed_positions.length?new Set(furn.allowed_positions):null;
+   const slotDefs=allowed?baseDefs.filter(([k])=>allowed.has(k)):baseDefs;
+   const curPos=furn.position||furn.slot||'';
+   for(const [slotKey,slotName] of slotDefs){
+    const pill=document.createElement('button');
+    pill.type='button';
+    const isCurrent=curPos===slotKey;
+    pill.className='cabin-slot-pill'+(isCurrent?' is-active':'');
+    pill.setAttribute('aria-pressed',String(isCurrent));
+    pill.disabled=actionBusy||isCurrent;
+    pill.textContent=slotName;
+    pill.addEventListener('click',()=>{
+     const useAdmin=charBusyOrAway||(chk?chk.checked:(adminArrangePref??false));
+     if(useAdmin){
+      runQuick('admin_arrange',{room_id:rd.room_id,steps:[{kind:'move_furniture',target_id:furn.id,position:slotKey,room_id:rd.room_id}]});
+     }else{
+      runQuick('move_furniture',{room_id:rd.room_id,target_id:furn.id,position:slotKey});
+     }
+    });
+    pills.append(pill);
+   }
+   box.append(top,pills);
+   actions.append(box);
+   renderedCount++;
   }
-  box.append(top,pills);
-  actions.append(box);
  }
 
  function renderActions(key,snapshot){
@@ -683,6 +711,15 @@ export function createCabinInspector(stage,{onResetFocus,onOpenDrawer,onCycleTim
     makeBtn('浇灌花菜','primary',()=>runQuick('water_garden'),!canSceneAct),
     makeBtn('采收作物',harvestable?'primary':'',()=>runQuick('harvest_garden'),!(canSceneAct&&harvestable)),
     makeBtn('冲泡花草茶','',()=>runQuick('brew_tea'),!canSceneAct),
+   );
+  }else if(key==='chair'){
+   appendFurnitureArrange('chair',data,canWrite);
+   row.append(makeBtn('展开房间布局','',()=>{hideCard();onOpenDrawer?.('scenes');}));
+  }else if(key==='lamp'){
+   appendFurnitureArrange('lamp',data,canWrite);
+   row.append(
+    makeBtn('切换台灯亮度','primary',()=>runQuick('lamp_cycle'),!canWrite||!scene.available),
+    makeBtn('展开房间布局','',()=>{hideCard();onOpenDrawer?.('scenes');}),
    );
   }
   if(row.children.length)actions.append(row);

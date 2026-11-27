@@ -1,6 +1,7 @@
 import {msg,tr,setText,apply,feedback} from './series-ui.js';
 import {apiGet,apiPost,formatTs} from './api.js';
 import {icon} from './room-art.js';
+import {worldStream} from './world-stream.js?v=round2.1';
 const $=id=>document.getElementById(id),el=(tag,value)=>{const n=document.createElement(tag);if(value!=null)setText(n,value);return n;};
 let view='',projectData=null,projectScope='',selected='',detailRevision=-1,projectTicket=0,projectBusy=false;
 let feedTicket=0,feedScope='',feedCursor=null,feedBusy=false,historyBrowsing=false;
@@ -30,7 +31,7 @@ async function loadProjects(){
         toggle.onclick=()=>controlProject(p);row.append(toggle);}card.append(row);return card;});
     const empty=el('div');empty.className='project-empty';const illustration=el('div');illustration.className='project-empty-art';illustration.append(icon('book'));empty.append(illustration,el('h3',data.available===false?msg("先准备一处创作空间"):msg("等待第一份构思")),el('p',data.available===false?msg("尚未建立房间与物品，请先在安装引导中准备纸本或电脑。"):msg("还没有持续创作项目。角色有合适创作意图时，可以从构思开始；保存的文字会在这里持续积累。")));
     $('projectList').replaceChildren(...(nodes.length?nodes:[empty]));
-    status('projectStatus',msg('{0} 个项目 · 每 10 秒同步',data.projects.length));
+    status('projectStatus',msg('{0} 个项目 · {1}',data.projects.length,worldStream.isSSEActive?'SSE 实时同步':'自动同步'));
     const active=data.projects.find(p=>p.id===selected);
     if(active&&detailRevision!==active.revision)await loadDetail(active);
     if(selected&&!active){selected='';detailRevision=-1;$('projectDetail').replaceChildren(el('p',msg("该项目不属于当前世界。")));}
@@ -72,12 +73,23 @@ async function loadFeed(reset=true,automatic=false){
       if(event.project_id){const button=el('button',msg("查看对应项目"));button.type='button';button.className='wb-button tiny';button.onclick=()=>{selected=event.project_id;projectScope=umo;detailRevision=-1;if(document.body.dataset.stageMode==='cabin-drawer'){document.dispatchEvent(new CustomEvent('cabin-open-view',{detail:{view:'projects',drawer:true}}));}else{$('tab-projects')?.click();}};content.append(button);}row.append(mark,content);$('activityList').append(row);}
     if(!$('activityList').children.length){const empty=el('li',msg("还没有这类完成记录。"));empty.className='wb-empty';$('activityList').append(empty);}
     feedCursor=data.next_cursor;$('activityMore').hidden=!feedCursor;
-    status('activityStatus',msg('更新于 {0}{1}',formatTs(data.server_time),msg(historyBrowsing?' · 查看较早记录，自动刷新已暂停':' · 每 10 秒同步')));
+    status('activityStatus',msg('更新于 {0}{1}',formatTs(data.server_time),msg(historyBrowsing?' · 查看较早记录，自动刷新已暂停':(worldStream.isSSEActive?' · SSE 实时同步':' · 自动同步'))));
   }catch(e){if(own===feedTicket)status('activityStatus',e.message,true);}
   finally{if(own===feedTicket){feedBusy=false;$('activityMore').disabled=false;}}
 }
+let lastStreamRevKey='';
+worldStream.subscribe(snap=>{
+  if(!snap||document.hidden)return;
+  const rev=snap.revisions||{};
+  const key=`${worldStream.scope}|${rev.scene??''}|${rev.position??''}|${rev.life??''}|${rev.causal??''}|${rev.binding??''}`;
+  if(key===lastStreamRevKey)return;
+  lastStreamRevKey=key;
+  if(view==='projects')loadProjects();
+  if(view==='activity')loadFeed(true,true);
+});
 $('projectRefresh').onclick=loadProjects;$('activityRefresh').onclick=()=>loadFeed(true);$('activityCategory').onchange=()=>loadFeed(true);$('activityMore').onclick=()=>loadFeed(false);
 document.addEventListener('world-view',event=>{view=event.detail;if(view==='projects')loadProjects();if(view==='activity')loadFeed(true);});
-document.addEventListener('world-scope-ready',()=>{if(view==='projects')loadProjects();if(view==='activity')loadFeed(true);});
-$('dwScope').addEventListener('change',()=>{if(view==='projects')loadProjects();if(view==='activity')loadFeed(true);});
-setInterval(()=>{if(document.hidden)return;if(view==='projects')loadProjects();if(view==='activity')loadFeed(true,true);},10000);
+document.addEventListener('world-scope-ready',()=>{lastStreamRevKey='';if(view==='projects')loadProjects();if(view==='activity')loadFeed(true);});
+$('dwScope').addEventListener('change',()=>{lastStreamRevKey='';if(view==='projects')loadProjects();if(view==='activity')loadFeed(true);});
+// Defensive fallback only when SSE stream is unavailable
+setInterval(()=>{if(document.hidden||worldStream.isSSEActive)return;if(view==='projects')loadProjects();if(view==='activity')loadFeed(true,true);},30000);

@@ -15,10 +15,12 @@ export function installAvatarUI(host){
  const settings=make('details',null,'avatar-bindings');settings.append(make('summary',msg('绑定显示区域')));const bindingRows=make('div',null,'avatar-controls'),home=make('select'),garden=make('select');home.id='avatarHomeRoom';garden.id='avatarGardenRoom';
  for(const [label,node] of [['室内房间',home],['花园区域',garden]]){const wrap=make('label',null,'wb-field');wrap.append(make('span',msg(label)),node);bindingRows.append(wrap);}settings.append(bindingRows);box.append(settings);
  const upload=make('details',null,'avatar-upload');upload.append(make('summary',msg('导入 YSM 模型')));upload.append(make('p',msg('支持未加密 YSM ZIP 或模型 JSON（最大 8 MiB）；加密 .ysm 文件需先向作者获取未加密源文件。'),'dw-meta'));
- const file=make('input');file.type='file';file.accept='.zip,.json,.ysm';file.id='avatarFile';setText(file,msg('导入 YSM 模型'),'aria-label');const importButton=make('button',msg('导入 YSM 模型'),'wb-button');importButton.id='avatarImport';importButton.type='button';upload.append(file,importButton);box.append(upload);
+ const file=make('input');file.type='file';file.accept='.zip,.json,.ysm';file.id='avatarFile';setText(file,msg('导入 YSM 模型'),'aria-label');
+ const autoApplyWrap=make('label',null,'wb-check avatar-auto-apply');const autoApply=make('input');autoApply.type='checkbox';autoApply.id='avatarUploadAutoApply';autoApply.checked=true;autoApplyWrap.append(autoApply,make('span',msg('上传并立即应用')));
+ const importButton=make('button',msg('导入 YSM 模型'),'wb-button primary');importButton.id='avatarImport';importButton.type='button';upload.append(file,autoApplyWrap,importButton);box.append(upload);
  const status=make('p');status.id='avatarFeedback';status.setAttribute('role','status');box.append(status);
  const actor=make('div',null,'avatar-current');actor.id='avatarCurrent';actor.setAttribute('aria-live','polite');const location=make('strong',msg('等待真实角色状态')),action=make('p',''),warning=make('small','');actor.append(location,action,warning);box.append(actor,make('p',msg('位置跟随真实房间和行动；室内与花园中的具体站位是动作示意。'),'dw-meta'));host.append(box);
- function lock(){for(const n of [model,texture,home,garden,file,save,importButton])n.disabled=busy||!canWrite;}
+ function lock(){for(const n of [model,texture,home,garden,file,autoApply,save,importButton])n.disabled=busy||!canWrite;}
  function textures(){const names=catalog?.models.find(m=>m.id===model.value)?.texture_names||[];texture.replaceChildren(...(names.length?names.map((name,index)=>option(String(index),name)):[option('0','—')]));}
  function fill(data){catalog=data;draftRevision=data.selection.revision;model.replaceChildren(...data.models.map(m=>option(m.id,m.id==='builtin'?msg('内置像素角色'):m.name)));model.value=data.selection.model_id;textures();texture.value=String(data.selection.texture_index);
   for(const select of [home,garden])select.replaceChildren(option('',msg('不绑定')),...data.rooms.map(r=>option(r.id,r.name)));
@@ -108,7 +110,16 @@ export function installAvatarUI(host){
   try{const encoded=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result).split(',')[1]);reader.onerror=()=>reject(Error('无法读取模型文件'));reader.readAsDataURL(selected);});
    if(!active())return;
    const result=await apiPost('avatar_upload',{umo:current,filename:selected.name,name:selected.name.replace(/\.[^.]+$/,''),file_base64:encoded});if(!active())return;
-   const response=await apiGet('avatar',{umo:current});if(!active())return;chosen=response.selection;fill(response);model.value=result.id;textures();dirty=true;feedback(status,msg('模型已导入，点击应用模型后生效。'),'success');
+   const response=await apiGet('avatar',{umo:current});if(!active())return;chosen=response.selection;fill(response);model.value=result.id;textures();file.value='';
+   if(autoApply.checked){
+    const appliedSelection=await apiPost('avatar',{umo:current,model_id:model.value,texture_index:Number(texture.value),home_room_id:home.value,garden_room_id:garden.value,expected_revision:draftRevision});
+    if(!active())return;
+    chosen=appliedSelection;draftRevision=appliedSelection.revision;dirty=false;loaded='';failedModelKey='';
+    const ok=await applyRenderer();
+    if(active()&&ok!==false)feedback(status,msg('模型已导入并立即应用生效。'),'success');
+   }else{
+    dirty=true;feedback(status,msg('模型已导入，点击应用模型后生效。'),'success');
+   }
   }catch(error){if(active())feedback(status,error.message,'error');}finally{if(active()){busy=false;lock();}}
  };
  lock();
