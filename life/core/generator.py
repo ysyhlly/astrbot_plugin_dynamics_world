@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import holidays
-
 from astrbot.api import logger
 from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.star.context import Context

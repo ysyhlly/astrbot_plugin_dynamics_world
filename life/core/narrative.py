@@ -26,6 +26,8 @@ from astrbot.api import logger
 
 if __package__:
     from ...series_panels import (
+        apply_series_sqlite_pragmas,
+        get_series_resource_limits,
         get_series_shared_config,
         is_series_group_excluded,
         is_series_in_quiet_hours,
@@ -88,6 +90,57 @@ else:
     is_budget_busy_error = _types_mod.is_budget_busy_error
     normalize_scope = _types_mod.normalize_scope
     _identity = _types_mod._identity
+
+    try:
+        _sp_path = Path(__file__).resolve().parents[2] / "series_panels.py"
+        _sp_mod = _sys.modules.get("_dls_series_panels")
+        if _sp_mod is None and _sp_path.is_file():
+            _sp_spec = _ilu.spec_from_file_location("_dls_series_panels", _sp_path)
+            _sp_mod = _ilu.module_from_spec(_sp_spec)
+            _sys.modules["_dls_series_panels"] = _sp_mod
+            _sp_spec.loader.exec_module(_sp_mod)
+    except Exception:
+        _sp_mod = None
+
+    if _sp_mod is not None and hasattr(_sp_mod, "apply_series_sqlite_pragmas"):
+        apply_series_sqlite_pragmas = _sp_mod.apply_series_sqlite_pragmas
+        get_series_resource_limits = _sp_mod.get_series_resource_limits
+    else:
+        def get_series_resource_limits(_context=None, *, profile: str | None = None) -> dict[str, Any]:
+            return {
+                "profile": profile or "standard",
+                "sqlite_cache_kb": 2000,
+                "sqlite_ro_cache_kb": 1000,
+                "sqlite_temp_store": "FILE",
+                "sqlite_mmap_size": 0,
+                "sqlite_journal_limit_bytes": 4 * 1024 * 1024,
+                "world_snapshot_workers": 2,
+                "world_retention_days": 60,
+                "world_vacuum_pages": 512,
+            }
+
+        def apply_series_sqlite_pragmas(
+            conn: Any,
+            context=None,
+            *,
+            readonly: bool = False,
+            journal_limit_bytes: int | None = None,
+            profile: str | None = None,
+        ) -> dict[str, Any]:
+            limits = get_series_resource_limits(context, profile=profile)
+            cache_kb = int(limits["sqlite_ro_cache_kb"] if readonly else limits["sqlite_cache_kb"])
+            jlimit = int(journal_limit_bytes) if journal_limit_bytes is not None else int(limits["sqlite_journal_limit_bytes"])
+            for sql in (
+                f"PRAGMA cache_size = -{max(128, cache_kb)}",
+                f"PRAGMA temp_store = {limits['sqlite_temp_store']}",
+                f"PRAGMA mmap_size = {int(limits['sqlite_mmap_size'])}",
+                *([] if readonly or jlimit <= 0 else [f"PRAGMA journal_size_limit = {jlimit}"]),
+            ):
+                try:
+                    conn.execute(sql)
+                except Exception:
+                    pass
+            return limits
 
     def is_series_group_excluded(context, umo: str = "", group_id: str = "") -> bool:
         return False
@@ -212,8 +265,10 @@ class NarrativeEngine(
         self._outreach_lock = asyncio.Lock()
         self._closed = False
         self._owner_active = owner_active
+        _limits = get_series_resource_limits(host_context)
+        _snapshot_workers = max(1, int(_limits.get("world_snapshot_workers", 2)))
         self._snapshot_io = WorldIO(
-            max_workers=2,
+            max_workers=_snapshot_workers,
             max_pending=32,
             max_waiters=64,
             thread_name_prefix="world-snapshot",
@@ -253,6 +308,11 @@ class NarrativeEngine(
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA busy_timeout=5000")
+        apply_series_sqlite_pragmas(
+            conn,
+            getattr(self, "host_context", None),
+            journal_limit_bytes=4 * 1024 * 1024,
+        )
         wrote = False
 
         def authorize(action, _first, _second, _database, _trigger):
@@ -1912,10 +1972,22 @@ class NarrativeEngine(
             )
         return failure_id
 
+    _MAX_EVENT_RETRY_ATTEMPTS = 10
+
     def _record_failure(self, events: list[dict], now: float, error: str) -> None:
-        """Persist a bounded retry deadline without resolving any queue item."""
+        """Persist a bounded retry deadline; transition permanently stuck events to failed."""
         if not events:
             return
+        try:
+            max_attempts = max(
+                1,
+                int(
+                    (self.config.get("narrative_max_retry_attempts") if hasattr(self.config, "get") else None)
+                    or self._MAX_EVENT_RETRY_ATTEMPTS
+                ),
+            )
+        except (TypeError, ValueError):
+            max_attempts = self._MAX_EVENT_RETRY_ATTEMPTS
         with self._db() as db:
             self._insert_validation_failure(
                 db, [e["event_id"] for e in events], error[:100], now
@@ -1928,11 +2000,19 @@ class NarrativeEngine(
                 if row is None:
                     continue
                 attempt = int(row[0]) + 1
-                retry_at = now + self._retry_delay(attempt)
-                db.execute(
-                    "UPDATE events SET retry_attempt=?,next_retry=?,error=? WHERE event_id=? AND status='pending'",
-                    (attempt, retry_at, error[:80], event["event_id"]),
-                )
+                if attempt >= max_attempts:
+                    db.execute(
+                        "UPDATE events SET status='failed',retry_attempt=?,next_retry=0,error=? "
+                        "WHERE event_id=? AND status='pending'",
+                        (attempt, error[:80], event["event_id"]),
+                    )
+                else:
+                    retry_at = now + self._retry_delay(attempt)
+                    db.execute(
+                        "UPDATE events SET retry_attempt=?,next_retry=?,error=? "
+                        "WHERE event_id=? AND status='pending'",
+                        (attempt, retry_at, error[:80], event["event_id"]),
+                    )
 
     def _block_policy_refusal(self, events: list[dict]) -> None:
         """Retain policy-refused evidence outside the automatic inference queue."""
@@ -3922,7 +4002,7 @@ class NarrativeEngine(
         retention_days: int = 60,
         batch_size: int = 500,
         now: float | None = None,
-        vacuum_pages: int = 64,
+        vacuum_pages: int | None = None,
         max_batches: int = 20,
         max_map_versions: int = 5,
         max_backups: int = 1,
@@ -3935,6 +4015,11 @@ class NarrativeEngine(
         limit = max(1, int(batch_size))
         batches = max(1, int(max_batches))
         keep_maps = max(1, int(max_map_versions))
+        if vacuum_pages is None:
+            limits = get_series_resource_limits(getattr(self, "host_context", None))
+            effective_vacuum_pages = max(0, int(limits.get("world_vacuum_pages", 512)))
+        else:
+            effective_vacuum_pages = max(0, int(vacuum_pages))
         cutoff = ts - days * 86400.0
         cutoff_hour = int(cutoff // 3600)
         deleted = {
@@ -3942,6 +4027,7 @@ class NarrativeEngine(
             "calls": 0,
             "budgets": 0,
             "validation_failures": 0,
+            "validation_failure_events": 0,
             "intents": 0,
             "diary": 0,
             "world_map_versions": 0,
@@ -4047,6 +4133,7 @@ class NarrativeEngine(
                         (cutoff, limit),
                     )
                     count = max(0, int(cur.rowcount or 0))
+                deleted["validation_failure_events"] += count
                 if count < limit:
                     break
 
@@ -4086,9 +4173,15 @@ class NarrativeEngine(
         auto_vacuum_converted = False
         freelist_bytes = 0
         conn = None
+        wal_checkpointed = False
         try:
             conn = sqlite3.connect(self.path, timeout=5, isolation_level=None)
             conn.execute("PRAGMA busy_timeout=5000")
+            apply_series_sqlite_pragmas(
+                conn,
+                getattr(self, "host_context", None),
+                journal_limit_bytes=4 * 1024 * 1024,
+            )
             auto_vacuum_mode = int(
                 (conn.execute("PRAGMA auto_vacuum").fetchone() or [0])[0]
             )
@@ -4098,8 +4191,8 @@ class NarrativeEngine(
             )
             freelist_bytes = freelist_count * page_size
             if auto_vacuum_mode == 2:
-                if (total_deleted > 0 or freelist_count > 0) and vacuum_pages > 0:
-                    conn.execute(f"PRAGMA incremental_vacuum({int(vacuum_pages)})")
+                if (total_deleted > 0 or freelist_count > 0) and effective_vacuum_pages > 0:
+                    conn.execute(f"PRAGMA incremental_vacuum({int(effective_vacuum_pages)})")
                     vacuumed = True
             elif auto_vacuum_mode == 0:
                 threshold = max(0, int(auto_vacuum_threshold_bytes))
@@ -4133,6 +4226,11 @@ class NarrativeEngine(
                             freelist_bytes / (1024 * 1024),
                             threshold / (1024 * 1024),
                         )
+            try:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                wal_checkpointed = True
+            except sqlite3.Error:
+                pass
         except sqlite3.Error as exc:
             logger.warning(
                 "[DynamicsWorld] vacuum maintenance skipped: %s", exc
@@ -4145,6 +4243,7 @@ class NarrativeEngine(
             "backups_deleted": backups_deleted,
             "total_deleted": total_deleted,
             "vacuumed": vacuumed,
+            "wal_checkpointed": wal_checkpointed,
             "auto_vacuum": auto_vacuum_mode,
             "auto_vacuum_needed": auto_vacuum_needed,
             "auto_vacuum_converted": auto_vacuum_converted,
@@ -4165,11 +4264,25 @@ class NarrativeEngine(
                 "ON CONFLICT(identity,kind) DO UPDATE SET last=excluded.last",
                 (identity, now),
             )
-        try:
-            days = int(self.config.get("narrative_retention_days", 60) or 60)
-        except (TypeError, ValueError):
-            days = 60
-        return self.prune_history(retention_days=days, now=now)
+        limits = get_series_resource_limits(getattr(self, "host_context", None))
+        profile_days = max(1, int(limits.get("world_retention_days", 60)))
+        raw_cfg_days = (
+            self.config.get("narrative_retention_days")
+            if hasattr(self.config, "get")
+            else None
+        )
+        if raw_cfg_days is None or raw_cfg_days == "":
+            days = profile_days
+        else:
+            try:
+                cfg_days = int(raw_cfg_days)
+                days = profile_days if cfg_days == 60 else max(1, cfg_days)
+            except (TypeError, ValueError):
+                days = profile_days
+        vacuum_pages = max(64, int(limits.get("world_vacuum_pages", 512)))
+        return self.prune_history(
+            retention_days=days, vacuum_pages=vacuum_pages, now=now
+        )
 
     def _tick_prepare_sync(self, scope: dict, identity: str, now: float) -> dict:
         with self._db() as db:

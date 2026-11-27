@@ -7,11 +7,11 @@ import datetime
 import inspect
 import json
 import re
+import time
 from collections.abc import AsyncGenerator
 
 from apscheduler.executors.asyncio import AsyncIOExecutor
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 from astrbot.core.agent.message import TextPart
@@ -19,6 +19,7 @@ from astrbot.core.provider.entities import ProviderRequest
 
 from .. import creative_projects
 from ..series_panels import (
+    get_series_resource_limits,
     get_series_shared_config,
     is_provider_budget_busy_error,
     is_series_group_excluded,
@@ -161,6 +162,7 @@ class LifeService:
         self._loop_events = {
             "narrative": asyncio.Event(),
             "resident": asyncio.Event(),
+            "outreach": asyncio.Event(),
         }
         self.narrative.on_activity = self._wake_on_activity
         self.residents = ResidentRunner(self)
@@ -182,6 +184,23 @@ class LifeService:
             narrative.note_activity(now)
         else:
             self._wake_on_activity()
+
+    def _loop_sleep_seconds(self, kind: str) -> float:
+        """Return 30s when recently active, backing off to profile world_loop_idle_s when idle."""
+        limits = get_series_resource_limits(getattr(self, "context", None))
+        idle_s = max(30.0, float(limits.get("world_loop_idle_s", 60.0)))
+        narrative = getattr(self, "narrative", None)
+        last_activity = getattr(narrative, "_last_activity_at", None) if narrative is not None else None
+        if last_activity is None:
+            return idle_s
+        clock_fn = getattr(narrative, "clock", None)
+        try:
+            now = float(clock_fn()) if callable(clock_fn) else time.time()
+        except Exception:
+            now = time.time()
+        if max(0.0, now - float(last_activity)) < 300.0:
+            return 30.0
+        return idle_s
 
     async def _sleep_loop(self, kind: str, seconds: float) -> None:
         ev = getattr(self, "_loop_events", {}).get(kind)
@@ -225,11 +244,12 @@ class LifeService:
                 logger.warning(
                     f"[DynamicLifeState] Narrative tick failed: {type(exc).__name__}"
                 )
+            delay = LifeService._loop_sleep_seconds(self, "narrative")
             sleep = getattr(self, "_sleep_loop", None)
             if callable(sleep):
-                await sleep("narrative", 30)
+                await sleep("narrative", delay)
             else:
-                await asyncio.sleep(30)
+                await asyncio.sleep(delay)
 
     async def _resident_loop(self) -> None:
         while True:
@@ -241,11 +261,12 @@ class LifeService:
                 logger.warning(
                     f"[DynamicsWorld] Resident tick failed: {type(exc).__name__}"
                 )
+            delay = LifeService._loop_sleep_seconds(self, "resident")
             sleep = getattr(self, "_sleep_loop", None)
             if callable(sleep):
-                await sleep("resident", 30)
+                await sleep("resident", delay)
             else:
-                await asyncio.sleep(30)
+                await asyncio.sleep(delay)
 
     async def _outreach_loop(self) -> None:
         """Slow contact inference must not hold up the world's clock."""
@@ -262,7 +283,12 @@ class LifeService:
                     "[DynamicLifeState] Outreach review failed type=%s",
                     type(exc).__name__,
                 )
-            await asyncio.sleep(30)
+            delay = LifeService._loop_sleep_seconds(self, "outreach")
+            sleep = getattr(self, "_sleep_loop", None)
+            if callable(sleep):
+                await sleep("outreach", delay)
+            else:
+                await asyncio.sleep(delay)
 
     def _worldbook(self):
         return self.world

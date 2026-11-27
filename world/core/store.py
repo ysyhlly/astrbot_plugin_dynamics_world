@@ -35,7 +35,6 @@ class WorldBookStore:
         self.data_file = data_file
         self._lock = threading.RLock()
         self._store = WorldStore()
-        self._committed = deepcopy(self._store)
         self._dirty = False
         self._last_save = 0.0
         self.load()
@@ -46,7 +45,6 @@ class WorldBookStore:
                 os.stat(self.data_file)
             except FileNotFoundError:
                 self._store = WorldStore()
-                self._committed = deepcopy(self._store)
                 self._dirty = False
                 return
             try:
@@ -56,7 +54,6 @@ class WorldBookStore:
                     raise ValueError("worldbook store must be an object")
                 loaded = WorldStore.from_dict(data)
                 self._store = loaded
-                self._committed = deepcopy(loaded)
                 self._dirty = False
                 if self._migrate_loaded_locked():
                     # 旧数据里的超长预览只在这时清理一次，顺便把文件压小
@@ -91,22 +88,41 @@ class WorldBookStore:
                 return False
             return self._write_locked()
 
+    def _rollback_from_disk_locked(self) -> None:
+        """Restore the last committed state from disk without keeping a permanent RAM shadow copy."""
+        if not os.path.isfile(self.data_file):
+            self._store = WorldStore()
+            return
+        try:
+            with open(self.data_file, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                self._store = WorldStore.from_dict(data)
+                return
+        except Exception:
+            pass
+        self._store = WorldStore()
+
     def _write_locked(self) -> bool:
+        tmp = self.data_file + ".tmp"
         try:
             self._prune_sessions_locked()
             os.makedirs(os.path.dirname(self.data_file) or ".", exist_ok=True)
-            tmp = self.data_file + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self._store.to_dict(), f, ensure_ascii=False, indent=2)
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, self.data_file)
         except Exception as e:
-            self._store = deepcopy(self._committed)
+            try:
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
+            except OSError:
+                pass
+            self._rollback_from_disk_locked()
             self._dirty = False
             logger.error("worldbook: save failed type=%s", type(e).__name__)
             raise OSError("worldbook_save_failed; changes were not saved") from e
-        self._committed = deepcopy(self._store)
         self._dirty = False
         self._last_save = time.monotonic()
         return True

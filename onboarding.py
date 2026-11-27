@@ -4,17 +4,82 @@ import asyncio
 import base64
 import copy
 import hashlib
+import importlib.util
 import io
 import json
 import os
 import signal
 import sys
+import time
 from pathlib import Path
 
 from .spatial import identity, place_id
 from .style_presets import catalog, preset
 from .world.core.character import CharacterCard
 from .world.core.models import WorldBook, WorldEntry
+
+_BROWSER_STATUS_CACHE_TTL_SECONDS = 300.0
+_CHROMIUM_BIN_REL_PATHS = (
+    "chrome-linux/chrome",
+    "chrome-linux64/chrome",
+    "chrome-linux/headless_shell",
+    "chrome-linux64/headless_shell",
+    "chrome-win/chrome.exe",
+    "chrome-win64/chrome.exe",
+    "chrome-win/headless_shell.exe",
+    "chrome-win64/headless_shell.exe",
+    "chrome-mac/Chromium.app/Contents/MacOS/Chromium",
+    "chrome-mac-arm64/Chromium.app/Contents/MacOS/Chromium",
+    "chrome-mac/headless_shell",
+    "chrome-mac-arm64/headless_shell",
+)
+
+
+def _playwright_browser_roots() -> list[Path]:
+    roots: list[Path] = []
+    env_path = str(os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or "").strip()
+    if env_path and env_path != "0":
+        roots.append(Path(env_path).expanduser())
+    elif env_path == "0":
+        try:
+            spec = importlib.util.find_spec("playwright")
+            if spec and spec.origin:
+                roots.append(Path(spec.origin).resolve().parent / "driver" / "package" / ".local-browsers")
+        except Exception:
+            pass
+    home = Path.home()
+    roots.append(home / ".cache" / "ms-playwright")
+    if sys.platform == "win32":
+        local_app = os.environ.get("LOCALAPPDATA")
+        if local_app:
+            roots.append(Path(local_app) / "ms-playwright")
+    elif sys.platform == "darwin":
+        roots.append(home / "Library" / "Caches" / "ms-playwright")
+    dedup: list[Path] = []
+    seen: set[Path] = set()
+    for root in roots:
+        if root not in seen:
+            seen.add(root)
+            dedup.append(root)
+    return dedup
+
+
+def _probe_playwright_chromium_fs() -> bool:
+    """Fast filesystem probe for Playwright Chromium binaries without spawning Node.js."""
+    for root in _playwright_browser_roots():
+        if not root.is_dir():
+            continue
+        try:
+            for pattern in ("chromium-*", "chromium_headless_shell-*"):
+                for browser_dir in root.glob(pattern):
+                    if not browser_dir.is_dir():
+                        continue
+                    for rel in _CHROMIUM_BIN_REL_PATHS:
+                        if (browser_dir / rel).is_file():
+                            return True
+        except OSError:
+            continue
+    return False
 
 FEATURES = (
     "character",
@@ -33,6 +98,7 @@ class Onboarding:
         self.install_task = None
         self.install_process = None
         self.install_status = {"state": "idle", "message": ""}
+        self._browser_status_cache: tuple[float, dict] | None = None
 
     def companion(self, name):
         getter = getattr(self.plugin.context, "get_registered_star", None)
@@ -143,15 +209,42 @@ class Onboarding:
             "legacy_conflicts": self.plugin.conflicts(),
         }
 
-    async def browser_status(self):
+    async def browser_status(self, *, force: bool = False):
+        now = time.monotonic()
+        cached = getattr(self, "_browser_status_cache", None)
+        if (
+            not force
+            and cached is not None
+            and (now - cached[0]) < _BROWSER_STATUS_CACHE_TTL_SECONDS
+        ):
+            return dict(cached[1])
+        module_available = (
+            "playwright.async_api" in sys.modules
+            or importlib.util.find_spec("playwright.async_api") is not None
+        )
+        if not module_available:
+            result = {"installed": False, "module_available": False}
+            self._browser_status_cache = (now, dict(result))
+            return result
+        fs_found = await asyncio.to_thread(_probe_playwright_chromium_fs)
+        if fs_found:
+            result = {"installed": True, "module_available": True}
+            self._browser_status_cache = (now, dict(result))
+            return result
+        if not force:
+            result = {"installed": False, "module_available": True}
+            self._browser_status_cache = (now, dict(result))
+            return result
         try:
             from playwright.async_api import async_playwright
 
             async with async_playwright() as p:
                 available = Path(p.chromium.executable_path).is_file()
-            return {"installed": available, "module_available": True}
+            result = {"installed": available, "module_available": True}
         except Exception:
-            return {"installed": False, "module_available": False}
+            result = {"installed": False, "module_available": False}
+        self._browser_status_cache = (now, dict(result))
+        return result
 
     async def status(self, umo=""):
         p = self.plugin
@@ -491,7 +584,7 @@ class Onboarding:
             await asyncio.wait_for(self.install_process.wait(), 300)
             ok = (
                 self.install_process.returncode == 0
-                and (await self.browser_status())["installed"]
+                and (await self.browser_status(force=True))["installed"]
             )
             self.install_status = {
                 "state": "ready" if ok else "failed",

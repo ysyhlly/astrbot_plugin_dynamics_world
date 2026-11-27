@@ -10,9 +10,20 @@ import re
 import sys
 import tempfile
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from .spatial import identity, place_id, route
+
+try:
+    from .series_panels import heavy_subprocess_slot
+except Exception:  # pragma: no cover - isolated import fallback
+
+    @asynccontextmanager
+    async def heavy_subprocess_slot(
+        _ctx, purpose: str, *, plugin_id: str = "", timeout: float | None = None
+    ):
+        yield {"purpose": purpose, "plugin_id": plugin_id}
 
 
 def suggested_places(character):
@@ -250,37 +261,59 @@ class MapService:
         try:
             with tempfile.TemporaryDirectory(prefix="dynamics-world-map-") as scratch:
                 output = Path(scratch) / "generated.json"
-                self.process = await asyncio.create_subprocess_exec(
-                    sys.executable,
-                    str(Path(__file__).with_name("map_renderer.py")),
-                    seed,
-                    str(output),
-                    self.plugin.textures.selected_path()
-                    if hasattr(self.plugin, "textures")
-                    else "",
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                try:
-                    _, error = await asyncio.wait_for(self.process.communicate(), 180)
-                except BaseException:
-                    if self.process.returncode is None:
-                        self.process.terminate()
-                        try:
-                            await asyncio.wait_for(self.process.wait(), 8)
-                        except TimeoutError:
-                            self.process.kill()
-                            await self.process.wait()
-                    raise
-                if self.process.returncode or not output.is_file():
-                    # No request body, local paths or arbitrary browser logs in the UI.
-                    raise RuntimeError(
-                        "地图生成失败，请检查 Playwright Chromium 和离线生成器资源"
+                async with heavy_subprocess_slot(
+                    getattr(self.plugin, "context", None),
+                    "world_map_generate",
+                    plugin_id="astrbot_plugin_dynamics_world",
+                ):
+                    postcards = getattr(self.plugin, "postcards", None)
+                    if postcards is not None:
+                        hibernate_fn = getattr(postcards, "hibernate_now", None)
+                        if callable(hibernate_fn):
+                            await hibernate_fn()
+                        else:
+                            shutdown_fn = getattr(postcards, "_safe_shutdown_pool", None)
+                            if callable(shutdown_fn):
+                                await shutdown_fn()
+                            else:
+                                close_fn = getattr(postcards, "close", None)
+                                if callable(close_fn):
+                                    await close_fn()
+                    self.process = await asyncio.create_subprocess_exec(
+                        sys.executable,
+                        str(Path(__file__).with_name("map_renderer.py")),
+                        seed,
+                        str(output),
+                        self.plugin.textures.selected_path()
+                        if hasattr(self.plugin, "textures")
+                        else "",
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.PIPE,
                     )
+                    try:
+                        _, error = await asyncio.wait_for(self.process.communicate(), 180)
+                    except BaseException:
+                        if self.process.returncode is None:
+                            self.process.terminate()
+                            try:
+                                await asyncio.wait_for(self.process.wait(), 8)
+                            except TimeoutError:
+                                self.process.kill()
+                                await self.process.wait()
+                        raise
+                    if self.process.returncode or not output.is_file():
+                        # No request body, local paths or arbitrary browser logs in the UI.
+                        raise RuntimeError(
+                            "地图生成失败，请检查 Playwright Chromium 和离线生成器资源"
+                        )
                 if output.stat().st_size > 30 * 1024 * 1024:
                     raise ValueError("生成结果超过限制")
-                raw = json.loads(output.read_text("utf-8"))
-                document = await asyncio.to_thread(convert, raw, seed, names, speed)
+
+                def _load_and_convert():
+                    raw = json.loads(output.read_text("utf-8"))
+                    return convert(raw, seed, names, speed)
+
+                document = await asyncio.to_thread(_load_and_convert)
                 current = await self.plugin.world.get_character_context(
                     dict(scope, umo="", platform="")
                 )

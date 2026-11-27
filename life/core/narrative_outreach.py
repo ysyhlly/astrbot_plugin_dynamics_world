@@ -1154,11 +1154,22 @@ class NarrativeOutreachMixin:
                         if self._is_policy_refusal(exc):
                             status = "policy_refusal"
                         error = getattr(exc, "code", type(exc).__name__)
-                        await asyncio.to_thread(
-                            self._outreach_record_failure_sync, sources, str(error), now
+                        prev_fail = (
+                            int(marker.get("fail_streak", 0))
+                            if marker.get("fingerprint") == fingerprint
+                            else 0
                         )
+                        if prev_fail < 3:
+                            await asyncio.to_thread(
+                                self._outreach_record_failure_sync,
+                                sources,
+                                str(error),
+                                now,
+                            )
+                next_fail_streak = 0
                 if status == "budget_busy":
                     next_no_change_streak = int(marker.get("no_change_streak", 0))
+                    next_fail_streak = int(marker.get("fail_streak", 0))
                     next_at = now + (busy_retry_delay or 30.0)
                 else:
                     next_no_change_streak = (
@@ -1171,7 +1182,18 @@ class NarrativeOutreachMixin:
                         if status in {"ok", "partial"} and added == 0
                         else 0
                     )
-                    next_at = now + (300 if status in {"ok", "partial"} else 900)
+                    if status in {"ok", "partial"}:
+                        next_at = now + 300
+                    else:
+                        prev_fail = (
+                            int(marker.get("fail_streak", 0))
+                            if marker.get("fingerprint") == fingerprint
+                            else 0
+                        )
+                        next_fail_streak = min(10, prev_fail + 1)
+                        # Back off repeated identical-fingerprint outreach failures (15m -> 30m -> 1h -> 2h)
+                        backoff_mult = min(8, 2 ** max(0, next_fail_streak - 1))
+                        next_at = now + 900 * backoff_mult
                 marker_payload = {
                     "last_at": now,
                     "next_at": next_at,
@@ -1180,6 +1202,7 @@ class NarrativeOutreachMixin:
                     "candidates": added,
                     "rejected": len(rejected),
                     "no_change_streak": next_no_change_streak,
+                    "fail_streak": next_fail_streak,
                     "quiet_members": quiet,
                     "is_asleep": is_asleep,
                     "policy_key": policy_key,

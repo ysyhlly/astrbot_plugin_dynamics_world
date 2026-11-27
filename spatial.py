@@ -215,7 +215,7 @@ class SpatialState:
                 raise ValueError("角色正在移动，请先取消移动再重新生成地图")
             ws = getattr(self.engine, "world_spaces", None)
             map_owner = ws.map_owner_key(db, key) if ws is not None else key
-            doc = copy.deepcopy(document)
+            doc = dict(document)
             doc["revision"] = revision + 1
             doc["world_id"] = hashlib.sha256(map_owner.encode()).hexdigest()[:24]
             db.execute(

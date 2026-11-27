@@ -258,7 +258,7 @@ class KeepsakeTimelineService:
         source_label = SOURCE_PLUGIN_LABELS.get(clean_plugin, clean_plugin or "系列伙伴")
         thumb_url = _build_keepsake_thumbnail_data_url(image_path)
         dedupe_key = hashlib.sha256(
-            f"{clean_plugin}|{clean_kind}|{clean_title}|{clean_sender}".encode("utf-8")
+            f"{clean_plugin}|{clean_kind}|{clean_title}|{clean_sender}".encode()
         ).hexdigest()[:16]
         now = self.engine.clock()
 

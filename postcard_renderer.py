@@ -6,13 +6,49 @@ import base64
 import hashlib
 import json
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime
+from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
+from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont
 
-from .series_panels import resolve_series_timezone
+try:
+    from .series_panels import (
+        get_series_memory_watermark,
+        get_series_resource_limits,
+        heavy_subprocess_slot,
+        resolve_series_resource_profile,
+        resolve_series_timezone,
+        try_malloc_trim,
+    )
+except Exception:  # pragma: no cover - isolated import fallback
+    from datetime import timedelta, timezone
+
+    def resolve_series_timezone(_ctx=None, explicit_tz: str = "", default_tz: str = "Asia/Shanghai"):
+        return timezone(timedelta(hours=8))
+
+    def resolve_series_resource_profile(_ctx=None) -> str:
+        return "standard"
+
+    def get_series_resource_limits(_ctx=None, *, profile: str | None = None) -> dict[str, Any]:
+        return {
+            "profile": profile or "standard",
+            "world_postcard_idle_timeout_s": 180.0,
+            "world_prefer_3d": True,
+        }
+
+    def get_series_memory_watermark(_ctx=None, *, force_refresh: bool = False) -> dict[str, Any]:
+        return {"state": "ok", "rss_mb": 0.0}
+
+    @asynccontextmanager
+    async def heavy_subprocess_slot(_ctx, purpose: str, *, plugin_id: str = "", timeout: float | None = None):
+        yield {"purpose": purpose, "plugin_id": plugin_id}
+
+    def try_malloc_trim(*_args, **_kwargs) -> bool:
+        return False
 
 
 class _NullLogger:
@@ -42,7 +78,29 @@ CHROMIUM_ARGS = [
     "--enable-unsafe-swiftshader",
     "--enable-webgl",
     "--ignore-gpu-blocklist",
+    "--js-flags=--max-old-space-size=128",
+    "--renderer-process-limit=1",
+    "--disable-extensions",
+    "--disable-background-networking",
+    "--mute-audio",
+    "--no-first-run",
+    "--disable-component-update",
 ]
+
+_BROWSER_SNAPSHOT_STRIP_KEYS = frozenset({
+    "map",
+    "avatar_model",
+    "guest_avatar_model",
+})
+
+
+def _sanitize_snapshot_for_browser(snapshot: dict) -> dict:
+    """Strip multi-MB unused blobs (map PNG/graph, duplicated avatar models) before CDP evaluate."""
+    if not isinstance(snapshot, dict):
+        return {}
+    return {
+        k: v for k, v in snapshot.items() if k not in _BROWSER_SNAPSHOT_STRIP_KEYS
+    }
 
 OUTFIT_KEYWORDS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
     (("睡衣", "居家", "睡袍", "night", "pajama", "sleep"), ("sleep", "pajama", "night", "home", "睡", "居")),
@@ -403,7 +461,9 @@ def resolve_shot_plan(
     return {"mode": "room", "view": "room", "focus": _pick_room_station()}
 
 
+@lru_cache(maxsize=16)
 def _load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    size = max(8, int(size))
     candidates = (
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
@@ -610,15 +670,19 @@ class PostcardRenderer:
         self,
         data_root: Path,
         *,
-        idle_timeout: float = 300.0,
+        idle_timeout: float | None = None,
         cache_ttl_seconds: float = POSTCARD_CACHE_TTL_SECONDS,
+        context: Any = None,
     ):
         self.out_dir = Path(data_root) / "postcards"
         self.out_dir.mkdir(parents=True, exist_ok=True)
+        self._context = context
         self._cooldowns: dict[str, float] = {}
         self._sem = asyncio.Semaphore(1)
         self._pool_lock = asyncio.Lock()
-        self.idle_timeout = max(1.0, float(idle_timeout))
+        self._explicit_idle_timeout: float | None = (
+            max(0.0, float(idle_timeout)) if idle_timeout is not None else None
+        )
         self.cache_ttl_seconds = max(0.0, float(cache_ttl_seconds))
         self._render_cache: dict[str, tuple[float, dict]] = {}
         self._pw = None
@@ -628,6 +692,38 @@ class PostcardRenderer:
         self._last_used: float = 0.0
         self._reaper_task: asyncio.Task | None = None
         self._closed = False
+
+    def _resource_limits(self) -> dict[str, Any]:
+        return get_series_resource_limits(self._context)
+
+    def _resource_profile(self) -> str:
+        return resolve_series_resource_profile(self._context)
+
+    def _effective_idle_timeout(self) -> float:
+        if self._explicit_idle_timeout is not None:
+            return self._explicit_idle_timeout
+        limits = self._resource_limits()
+        return max(0.0, float(limits.get("world_postcard_idle_timeout_s", 180.0)))
+
+    @property
+    def idle_timeout(self) -> float:
+        return self._effective_idle_timeout()
+
+    @idle_timeout.setter
+    def idle_timeout(self, value: float) -> None:
+        self._explicit_idle_timeout = max(0.0, float(value))
+
+    def _render_cache_max_entries(self) -> int:
+        return 8 if self._resource_profile() != "standard" else 32
+
+    def _store_cache_entry(self, cache_key: str, result: dict) -> None:
+        if self.cache_ttl_seconds <= 0:
+            return
+        self._render_cache[cache_key] = (time.monotonic(), dict(result))
+        max_entries = self._render_cache_max_entries()
+        while len(self._render_cache) > max_entries:
+            oldest_key = min(self._render_cache, key=lambda k: self._render_cache[k][0])
+            self._render_cache.pop(oldest_key, None)
 
     def invalidate_cache(self) -> None:
         """Clear cached postcard renders immediately when world state mutates."""
@@ -702,16 +798,32 @@ class PostcardRenderer:
 
     async def hibernate_if_idle(self) -> bool:
         """Close the warm Chromium instance if idle longer than idle_timeout."""
+        timeout = self._effective_idle_timeout()
         async with self._pool_lock:
             if self._browser is None:
                 return False
-            if time.monotonic() - self._last_used < self.idle_timeout:
+            if timeout > 0.0 and time.monotonic() - self._last_used < timeout:
                 return False
             await self._shutdown_pool_locked()
             return True
 
+    async def hibernate_now(self) -> None:
+        """Force-close the warm Chromium instance immediately without marking renderer closed."""
+        task = self._reaper_task
+        self._reaper_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        await self._safe_shutdown_pool()
+
     async def _reaper_loop(self) -> None:
-        interval = max(0.25, min(30.0, self.idle_timeout / 3.0))
+        timeout = self._effective_idle_timeout()
+        if timeout <= 0.0:
+            return
+        interval = max(0.25, min(30.0, timeout / 3.0))
         try:
             while not self._closed:
                 await asyncio.sleep(interval)
@@ -719,7 +831,11 @@ class PostcardRenderer:
                     break
                 if self._browser is None:
                     break
-                if time.monotonic() - self._last_used >= self.idle_timeout and not self._sem.locked():
+                cur_timeout = self._effective_idle_timeout()
+                if (
+                    cur_timeout <= 0.0
+                    or time.monotonic() - self._last_used >= cur_timeout
+                ) and not self._sem.locked():
                     async with self._sem:
                         if await self.hibernate_if_idle():
                             break
@@ -819,7 +935,9 @@ class PostcardRenderer:
                         pass
                     raise
             self._last_used = time.monotonic()
-            if self._reaper_task is None or self._reaper_task.done():
+            if self._effective_idle_timeout() > 0.0 and (
+                self._reaper_task is None or self._reaper_task.done()
+            ):
                 self._reaper_task = asyncio.create_task(self._reaper_loop())
             return self._page
 
@@ -828,131 +946,142 @@ class PostcardRenderer:
         bundle_path = plugin_dir / "pages" / "world" / "cabin3d.min.js"
         if not bundle_path.is_file():
             return None
-        try:
-            page = await self._ensure_warm_page(bundle_path)
-            if page is None:
-                return None
+        async with heavy_subprocess_slot(
+            self._context,
+            "world_3d_postcard",
+            plugin_id="astrbot_plugin_dynamics_world",
+        ):
+            try:
+                page = await self._ensure_warm_page(bundle_path)
+                if page is None:
+                    return None
 
-            env = snapshot.get("environment") or {}
-            cur = env.get("current") or {}
-            now = float(snapshot.get("server_time") or 0) or datetime.now().timestamp()
-            local = _postcard_local_time(snapshot, env, now)
-            hour = local.hour + local.minute / 60.0
-            effect = str(cur.get("effect") or "clear")
-            eco = snapshot.get("ecology") or {}
-            designs = (snapshot.get("scene") or {}).get("room_designs") or []
-            room_design = designs[0] if designs else {}
-            keepsakes = snapshot.get("keepsakes") or {}
-            mailbox = snapshot.get("mailbox") or {}
-            avatar_model = snapshot.get("avatar_model")
-            avatar_tex = int(snapshot.get("avatar_texture_index") or 0)
-            avatar_sel = snapshot.get("avatar_selection") or {}
-            guest_model = snapshot.get("guest_avatar_model")
-            guest_tex = int(snapshot.get("guest_texture_index") or 0)
-            cabin_style = str(
-                snapshot.get("cabin_style")
-                or (snapshot.get("cabin") or {}).get("style")
-                or "cottage"
-            ).strip() or "cottage"
+                env = snapshot.get("environment") or {}
+                cur = env.get("current") or {}
+                now = float(snapshot.get("server_time") or 0) or datetime.now().timestamp()
+                local = _postcard_local_time(snapshot, env, now)
+                hour = local.hour + local.minute / 60.0
+                effect = str(cur.get("effect") or "clear")
+                eco = snapshot.get("ecology") or {}
+                designs = (snapshot.get("scene") or {}).get("room_designs") or []
+                room_design = designs[0] if designs else {}
+                keepsakes = snapshot.get("keepsakes") or {}
+                mailbox = snapshot.get("mailbox") or {}
+                avatar_model = snapshot.get("avatar_model")
+                avatar_tex = int(snapshot.get("avatar_texture_index") or 0)
+                avatar_sel = snapshot.get("avatar_selection") or {}
+                guest_model = snapshot.get("guest_avatar_model")
+                guest_tex = int(snapshot.get("guest_texture_index") or 0)
+                cabin_style = str(
+                    snapshot.get("cabin_style")
+                    or (snapshot.get("cabin") or {}).get("style")
+                    or "cottage"
+                ).strip() or "cottage"
+                slim_snapshot = _sanitize_snapshot_for_browser(snapshot)
 
-            data_url = await page.evaluate(
-                """async (cfg) => {
-                    const cabin = window.__cabin;
-                    if (!cabin) return null;
-                    let texLoaded = false;
-                    const modelId = cfg.avatarModel?.id || 'builtin';
-                    const nextKey = `${modelId}:${cfg.avatarTex}`;
-                    if (window.__modelKey !== nextKey) {
-                        cabin.setAvatarModel?.(cfg.avatarModel || { id: 'builtin', format: 'builtin' }, cfg.avatarTex || 0);
-                        window.__modelKey = nextKey;
-                        texLoaded = true;
-                    }
-                    if (cfg.guestModel) {
-                        const gKey = `${cfg.guestModel.id || 'builtin'}:${cfg.guestTex || 0}`;
-                        if (window.__guestKey !== gKey && typeof cabin.setGuestAvatarModel === 'function') {
-                            cabin.setGuestAvatarModel(cfg.guestModel, cfg.guestTex || 0);
-                            window.__guestKey = gKey;
+                data_url = await page.evaluate(
+                    """async (cfg) => {
+                        const cabin = window.__cabin;
+                        if (!cabin) return null;
+                        let texLoaded = false;
+                        const modelId = cfg.avatarModel?.id || 'builtin';
+                        const nextKey = `${modelId}:${cfg.avatarTex}`;
+                        if (window.__modelKey !== nextKey) {
+                            cabin.setAvatarModel?.(cfg.avatarModel || { id: 'builtin', format: 'builtin' }, cfg.avatarTex || 0);
+                            window.__modelKey = nextKey;
                             texLoaded = true;
                         }
-                    } else if (window.__guestKey && typeof cabin.setGuestAvatarModel === 'function') {
-                        cabin.setGuestAvatarModel(null, 0);
-                        window.__guestKey = '';
-                    }
-                    const applyAll = () => {
-                        const tm = cfg.hour < 5.5 || cfg.hour >= 19.5 ? 'night' : cfg.hour < 7.2 ? 'dawn' : cfg.hour >= 17.2 ? 'dusk' : 'day';
-                        if (cfg.cabinStyle && typeof cabin.setCabinStyle === 'function') {
-                            cabin.setCabinStyle(cfg.cabinStyle);
+                        if (cfg.guestModel) {
+                            const gKey = `${cfg.guestModel.id || 'builtin'}:${cfg.guestTex || 0}`;
+                            if (window.__guestKey !== gKey && typeof cabin.setGuestAvatarModel === 'function') {
+                                cabin.setGuestAvatarModel(cfg.guestModel, cfg.guestTex || 0);
+                                window.__guestKey = gKey;
+                                texLoaded = true;
+                            }
+                        } else if (window.__guestKey && typeof cabin.setGuestAvatarModel === 'function') {
+                            cabin.setGuestAvatarModel(null, 0);
+                            window.__guestKey = '';
                         }
-                        cabin.setTimeMode?.('auto');
-                        if (cfg.snapshot?.environment) {
-                            cabin.setEnvironment?.(cfg.snapshot.environment, cfg.snapshot.server_time, cfg.snapshot.scene?.items || []);
-                        } else {
-                            cabin.setTimeMode?.(tm);
-                            cabin.setWeatherOverride?.(cfg.effect);
+                        const applyAll = () => {
+                            const tm = cfg.hour < 5.5 || cfg.hour >= 19.5 ? 'night' : cfg.hour < 7.2 ? 'dawn' : cfg.hour >= 17.2 ? 'dusk' : 'day';
+                            if (cfg.cabinStyle && typeof cabin.setCabinStyle === 'function') {
+                                cabin.setCabinStyle(cfg.cabinStyle);
+                            }
+                            cabin.setTimeMode?.('auto');
+                            if (cfg.snapshot?.environment) {
+                                cabin.setEnvironment?.(cfg.snapshot.environment, cfg.snapshot.server_time, cfg.snapshot.scene?.items || []);
+                            } else {
+                                cabin.setTimeMode?.(tm);
+                                cabin.setWeatherOverride?.(cfg.effect);
+                            }
+                            cabin.setSeason?.(cfg.season);
+                            cabin.setEcology?.(cfg.ecology);
+                            cabin.setRoomDesign?.(cfg.roomDesign, cfg.snapshot?.scene?.items || [], cfg.snapshot?.server_time);
+                            cabin.setKeepsakes?.(cfg.keepsakes);
+                            cabin.setMailbox?.(cfg.mailbox);
+                            cabin.setCatState?.(cfg.cat, true);
+                            if (cfg.snapshot) {
+                                cabin.setActorState?.({ ...cfg.snapshot, isReplay: true }, cfg.avatarSelection || {});
+                            }
+                            if (typeof cabin.setShotPreset === 'function') {
+                                cabin.setShotPreset(cfg.shotPlan, true);
+                            } else {
+                                cabin.setView?.(cfg.shotPlan?.view || 'garden');
+                                if (cfg.shotPlan?.focus) cabin.focusTarget?.(cfg.shotPlan.focus);
+                                else cabin.clearFocus?.();
+                            }
+                        };
+                        if (typeof cabin.batch === 'function') cabin.batch(applyAll);
+                        else applyAll();
+                        if (texLoaded || cfg.cabinStyle === 'whale_coast') {
+                            await new Promise(r => setTimeout(r, 80));
                         }
-                        cabin.setSeason?.(cfg.season);
-                        cabin.setEcology?.(cfg.ecology);
-                        cabin.setRoomDesign?.(cfg.roomDesign, cfg.snapshot?.scene?.items || [], cfg.snapshot?.server_time);
-                        cabin.setKeepsakes?.(cfg.keepsakes);
-                        cabin.setMailbox?.(cfg.mailbox);
-                        cabin.setCatState?.(cfg.cat, true);
-                        if (cfg.snapshot) {
-                            cabin.setActorState?.({ ...cfg.snapshot, isReplay: true }, cfg.avatarSelection || {});
+                        cabin.setActive?.(false);
+                        if (typeof cabin.captureDataURL === 'function') {
+                            return cabin.captureDataURL('image/png');
                         }
-                        if (typeof cabin.setShotPreset === 'function') {
-                            cabin.setShotPreset(cfg.shotPlan, true);
-                        } else {
-                            cabin.setView?.(cfg.shotPlan?.view || 'garden');
-                            if (cfg.shotPlan?.focus) cabin.focusTarget?.(cfg.shotPlan.focus);
-                            else cabin.clearFocus?.();
-                        }
-                    };
-                    if (typeof cabin.batch === 'function') cabin.batch(applyAll);
-                    else applyAll();
-                    if (texLoaded || cfg.cabinStyle === 'whale_coast') {
-                        await new Promise(r => setTimeout(r, 80));
-                    }
-                    cabin.setActive?.(false);
-                    if (typeof cabin.captureDataURL === 'function') {
-                        return cabin.captureDataURL('image/png');
-                    }
-                    return null;
-                }""",
-                {
-                    "hour": hour,
-                    "effect": effect,
-                    "season": eco.get("season"),
-                    "ecology": eco,
-                    "roomDesign": room_design,
-                    "keepsakes": keepsakes,
-                    "mailbox": mailbox,
-                    "cat": eco.get("cat"),
-                    "snapshot": snapshot,
-                    "avatarModel": avatar_model,
-                    "avatarTex": avatar_tex,
-                    "avatarSelection": avatar_sel,
-                    "guestModel": guest_model,
-                    "guestTex": guest_tex,
-                    "cabinStyle": cabin_style,
-                    "shotPlan": shot_plan,
-                },
-            )
-            self._last_used = time.monotonic()
-            if isinstance(data_url, str) and data_url.startswith("data:image/png;base64,"):
-                raw_png = base64.b64decode(data_url.split(",", 1)[1])
-                return Image.open(BytesIO(raw_png))
-            raw_png = await page.locator("#stage canvas").first.screenshot(type="png", animations="disabled")
-            self._last_used = time.monotonic()
-            return Image.open(BytesIO(raw_png))
-        except asyncio.CancelledError:
-            await self._safe_shutdown_pool()
-            raise
-        except Exception:
-            await self._safe_shutdown_pool()
-            return None
-        except BaseException:
-            await self._safe_shutdown_pool()
-            raise
+                        return null;
+                    }""",
+                    {
+                        "hour": hour,
+                        "effect": effect,
+                        "season": eco.get("season"),
+                        "ecology": eco,
+                        "roomDesign": room_design,
+                        "keepsakes": keepsakes,
+                        "mailbox": mailbox,
+                        "cat": eco.get("cat"),
+                        "snapshot": slim_snapshot,
+                        "avatarModel": avatar_model,
+                        "avatarTex": avatar_tex,
+                        "avatarSelection": avatar_sel,
+                        "guestModel": guest_model,
+                        "guestTex": guest_tex,
+                        "cabinStyle": cabin_style,
+                        "shotPlan": shot_plan,
+                    },
+                )
+                self._last_used = time.monotonic()
+                if isinstance(data_url, str) and data_url.startswith("data:image/png;base64,"):
+                    raw_png = base64.b64decode(data_url.split(",", 1)[1])
+                    img = Image.open(BytesIO(raw_png))
+                else:
+                    raw_png = await page.locator("#stage canvas").first.screenshot(type="png", animations="disabled")
+                    self._last_used = time.monotonic()
+                    img = Image.open(BytesIO(raw_png))
+                if self._effective_idle_timeout() <= 0.0:
+                    await self._safe_shutdown_pool()
+                    try_malloc_trim()
+                return img
+            except asyncio.CancelledError:
+                await self._safe_shutdown_pool()
+                raise
+            except Exception:
+                await self._safe_shutdown_pool()
+                return None
+            except BaseException:
+                await self._safe_shutdown_pool()
+                raise
 
     async def render(
         self,
@@ -961,6 +1090,7 @@ class PostcardRenderer:
         plugin_dir: Path | None = None,
         caption: str = "",
         prefer_3d: bool = True,
+        force_3d: bool = False,
         shot_mode: str = "auto",
         focus_slot: str = "",
         bypass_cache: bool = False,
@@ -1005,8 +1135,7 @@ class PostcardRenderer:
                 "shot_plan": shot_plan,
                 "data_url": "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii"),
             }
-            if self.cache_ttl_seconds > 0:
-                self._render_cache[cache_key] = (time.monotonic(), dict(result))
+            self._store_cache_entry(cache_key, result)
             logger.info("[DynamicsWorld] Travel postcard rendered bytes=%d", len(png_bytes))
             return result
 
@@ -1026,7 +1155,20 @@ class PostcardRenderer:
             else:
                 effective_caption = "纪念格陈列拍立得特写"
 
-        cache_key = self._build_cache_key(snapshot, shot_plan, effective_caption, prefer_3d)
+        limits = self._resource_limits()
+        effective_prefer_3d = bool(prefer_3d)
+        if effective_prefer_3d and not force_3d and not bool(limits.get("world_prefer_3d", True)):
+            effective_prefer_3d = False
+        if effective_prefer_3d:
+            watermark = get_series_memory_watermark(self._context)
+            if str(watermark.get("state") or "ok") == "hard":
+                logger.info(
+                    "[DynamicsWorld] Memory watermark=hard (rss=%.1f MiB); falling back to 2D pixel cabin",
+                    float(watermark.get("rss_mb") or 0.0),
+                )
+                effective_prefer_3d = False
+
+        cache_key = self._build_cache_key(snapshot, shot_plan, effective_caption, effective_prefer_3d)
         if not bypass_cache and self.cache_ttl_seconds > 0:
             cached_entry = self._render_cache.get(cache_key)
             if cached_entry is not None:
@@ -1048,7 +1190,7 @@ class PostcardRenderer:
         async with self._sem:
             art = None
             renderer_kind = "2d_fallback"
-            if prefer_3d and plugin_dir is not None and not self._closed:
+            if effective_prefer_3d and plugin_dir is not None and not self._closed:
                 try:
                     art = await asyncio.wait_for(self._try_playwright_capture(snapshot, plugin_dir, shot_plan), timeout=12.0)
                     if art is not None:
@@ -1065,8 +1207,19 @@ class PostcardRenderer:
                         d.text((32, 26), f"✦ 纪念格特写 · {shot_plan.get('focus_slot') or 'shelf'}", fill=(252, 240, 214), font=_load_font(17))
                         return copy_img
 
+                    prev_art = art
                     art = await asyncio.to_thread(_stamp_keepsake_ribbon, art)
-            png_bytes = await asyncio.to_thread(compose_polaroid, art, snapshot, effective_caption)
+                    try:
+                        prev_art.close()
+                    except Exception:
+                        pass
+            try:
+                png_bytes = await asyncio.to_thread(compose_polaroid, art, snapshot, effective_caption)
+            finally:
+                try:
+                    art.close()
+                except Exception:
+                    pass
             now = float(snapshot.get("server_time") or datetime.now().timestamp())
             digest = hashlib.sha256(png_bytes).hexdigest()[:14]
             out_path = self.out_dir / f"postcard_{int(now)}_{digest}.png"
@@ -1085,11 +1238,7 @@ class PostcardRenderer:
                 "shot_plan": shot_plan,
                 "data_url": "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii"),
             }
-            if self.cache_ttl_seconds > 0:
-                self._render_cache[cache_key] = (time.monotonic(), dict(result))
-                if len(self._render_cache) > 32:
-                    oldest_key = min(self._render_cache, key=lambda k: self._render_cache[k][0])
-                    self._render_cache.pop(oldest_key, None)
+            self._store_cache_entry(cache_key, result)
             logger.info(
                 "[DynamicsWorld] Postcard rendered renderer=%s mode=%s cached=False bytes=%d",
                 renderer_kind,

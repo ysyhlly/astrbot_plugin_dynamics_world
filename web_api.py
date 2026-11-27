@@ -1392,6 +1392,7 @@ class WorldAPI(CausalAPIMixin):
                         plugin_dir=Path(__file__).parent,
                         caption=str(body.get("caption") or ""),
                         prefer_3d=bool(body.get("prefer_3d", True)),
+                        force_3d=bool(body.get("force_3d", False)),
                         shot_mode=str(body.get("shot_mode") or "auto"),
                         focus_slot=str(body.get("focus_slot") or ""),
                     )

@@ -192,7 +192,7 @@ class Main(Star):
         self.maps = MapService(self)
         self.onboarding = Onboarding(self)
         self.textures = TextureResources(self.data_root)
-        self.postcards = PostcardRenderer(self.data_root)
+        self.postcards = PostcardRenderer(self.data_root, context=self.context)
         self._event_bus_subs: list[tuple[Any, str]] = []
 
     async def initialize(self):
@@ -959,7 +959,10 @@ class Main(Star):
         now: float | None = None,
     ) -> dict:
         """Build today's World Journal graphic card PNG & summary (for /世界手账 and Chat Dynamics rhythm)."""
-        from .world_journal_card import collect_world_journal_data, save_world_journal_card
+        from .world_journal_card import (
+            collect_world_journal_data,
+            save_world_journal_card,
+        )
 
         char = character if isinstance(character, dict) else await self.world.get_character_context(scope, None)
         engine = self.life.narrative
@@ -995,7 +998,10 @@ class Main(Star):
             yield event.image_result(res["path"])
         except Exception:
             try:
-                from .world_journal_card import collect_world_journal_data, format_world_journal_text
+                from .world_journal_card import (
+                    collect_world_journal_data,
+                    format_world_journal_text,
+                )
 
                 fallback_data = await asyncio.to_thread(
                     collect_world_journal_data,
@@ -1025,6 +1031,7 @@ class Main(Star):
             yield event.plain_result(f"📷 小屋实况相机冷却中，请 {wait} 秒后再试。")
             return
         shot_mode, clean_caption = parse_shot_override(text)
+        force_3d = "3d" in str(text or "").lower().split()
         character = await self.world.get_character_context(scope, event)
         snap = await self.build_cabin_postcard_snapshot(scope, character)
         rendered = await self.postcards.render(
@@ -1032,6 +1039,7 @@ class Main(Star):
             plugin_dir=Path(__file__).parent,
             caption=clean_caption[:42],
             prefer_3d=True,
+            force_3d=force_3d,
             shot_mode=shot_mode,
         )
         self.postcards.mark_used(cd_key, now)
