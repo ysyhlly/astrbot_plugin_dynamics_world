@@ -39,7 +39,9 @@ async def test_series_summary_and_scope_status_standalone(tmp_path, monkeypatch)
         st_bound = plugin.get_series_scope_status(UMO)
         assert st_bound["enabled"] is True
         assert st_bound["persona_id"] == "p"
-        assert st_bound["supported"] is False
+        assert st_bound["supported"] is True
+        assert st_bound["writable"] is True
+        assert st_bound["umo"] == UMO
         assert "version" in st_bound
 
         st_other = plugin.get_series_scope_status("qq:GroupMessage:unbound")

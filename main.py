@@ -18,7 +18,9 @@ ensure_current(
 import asyncio
 import copy
 import json
+import re
 from pathlib import Path
+from typing import Any
 
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
@@ -46,6 +48,111 @@ def merge_config(base, incoming):
     for key, value in incoming.items():
         result[key] = merge_config(result[key], value) if isinstance(value, dict) and isinstance(result.get(key), dict) else copy.deepcopy(value)
     return result
+
+
+_MAILBOX_PREFIX_KINDS = {
+    "明信片": "postcard",
+    "信": "postcard",
+    "卡片": "postcard",
+    "postcard": "postcard",
+    "鲜花": "flower",
+    "花束": "flower",
+    "花": "flower",
+    "flower": "flower",
+    "点心": "snack",
+    "零食": "snack",
+    "茶点": "snack",
+    "甜点": "snack",
+    "snack": "snack",
+    "礼物": "gift",
+    "纪念品": "gift",
+    "小物": "gift",
+    "赠礼": "gift",
+    "gift": "gift",
+}
+
+_MAILBOX_GIFT_KEYWORDS = (
+    "礼物",
+    "挂件",
+    "书签",
+    "手链",
+    "项链",
+    "徽章",
+    "音乐盒",
+    "玩偶",
+    "摆件",
+    "纪念",
+    "发卡",
+    "钥匙扣",
+    "围巾",
+    "钢笔",
+    "小物",
+    "相框",
+    "胸针",
+    "礼盒",
+    "风铃",
+)
+_MAILBOX_FLOWER_KEYWORDS = (
+    "花",
+    "玫瑰",
+    "洋甘菊",
+    "薰衣草",
+    "百合",
+    "郁金香",
+    "满天星",
+    "雏菊",
+    "向日葵",
+    "康乃馨",
+    "樱花",
+)
+_MAILBOX_SNACK_KEYWORDS = (
+    "糕",
+    "茶",
+    "饼",
+    "糖",
+    "点心",
+    "果",
+    "蛋糕",
+    "奶茶",
+    "咖啡",
+    "布丁",
+    "曲奇",
+    "巧克力",
+    "派",
+    "面包",
+    "可丽饼",
+    "甜甜圈",
+)
+
+
+def parse_mailbox_delivery(text: str) -> tuple[str, str]:
+    """Parse `/投递` text into `(kind, clean_message)` with explicit first-word and keyword support."""
+    content = str(text or "").strip()
+    if not content:
+        return "postcard", ""
+    # Explicit leading category token separated by whitespace or punctuation (e.g. `礼物：...` / `鲜花 ...`).
+    match = re.match(r"^([^\s:：\-—]+)(?:[\s:：\-—]+(.*))?$", content, flags=re.S)
+    if match:
+        head = match.group(1).strip()
+        rest = (match.group(2) or "").strip()
+        explicit_kind = _MAILBOX_PREFIX_KINDS.get(head.lower()) or _MAILBOX_PREFIX_KINDS.get(head)
+        if explicit_kind:
+            if rest:
+                return explicit_kind, rest
+            default_note = {
+                "postcard": "寄来一张明信片",
+                "flower": "送来一小束鲜花",
+                "snack": "送来一份手作点心",
+                "gift": "送来一件纪念小礼物",
+            }[explicit_kind]
+            return explicit_kind, default_note
+    if any(k in content for k in _MAILBOX_GIFT_KEYWORDS):
+        return "gift", content
+    if any(k in content for k in _MAILBOX_FLOWER_KEYWORDS):
+        return "flower", content
+    if any(k in content for k in _MAILBOX_SNACK_KEYWORDS):
+        return "snack", content
+    return "postcard", content
 
 
 class Main(Star):
@@ -170,6 +277,26 @@ class Main(Star):
             raise ValueError("请安装支持世界参考图授权接口的视觉工坊")
         return media.grant_world_reference_access(self.get_reference_assets_directory())
 
+    def _effective_persona_id(self) -> str:
+        explicit = str(self.config.get("persona_id") or "").strip()
+        if explicit:
+            return explicit
+        from . import series_panels
+
+        shared = series_panels.get_series_shared_config(self.context)
+        if isinstance(shared, dict):
+            return str(shared.get("persona_id") or "").strip()
+        return ""
+
+    def _persist_config_patch(self, patch: dict[str, Any]) -> None:
+        save = getattr(self.host_config, "save_config", None)
+        if callable(save):
+            self.onboarding.save_config(patch)
+            return
+        if isinstance(self.host_config, dict):
+            self.host_config.update(patch)
+        self.config.update(patch)
+
     def get_dynamics_summary(self, umo: str = "") -> dict:
         """Public, non-secret status summary for series companions."""
         world = getattr(self, "world", None)
@@ -180,7 +307,7 @@ class Main(Star):
             "schema_version": 1,
             "enabled": self.config.get("runtime_enabled") is True,
             "ready": self.runtime_allowed(),
-            "persona_id": str(self.config.get("persona_id") or ""),
+            "persona_id": self._effective_persona_id(),
             "card_count": cards,
             "active_sessions": len(sessions),
             "scope_bound": bool(umo and umo in sessions) if sessions else bool(self.config.get("narrative_all_groups")),
@@ -204,6 +331,123 @@ class Main(Star):
         from .series_hooks import build_series_scope_status
 
         return build_series_scope_status(self, umo)
+
+    async def set_series_scope_enabled(
+        self,
+        umo: str,
+        enabled: bool,
+        expected_version: str | int | None = None,
+    ) -> dict[str, Any]:
+        """Optimistically toggle a UMO's participation in Dynamics World."""
+        clean_umo = str(umo or "").strip()
+        if not clean_umo or len(clean_umo) > 300:
+            raise ValueError("invalid umo")
+        if not isinstance(enabled, bool):
+            raise ValueError("enabled must be a boolean")
+
+        async with self._migration_lock:
+            before = self.get_series_scope_status(clean_umo)
+            current_version = str(before.get("version") or self.onboarding.revision())
+            if expected_version is not None and str(expected_version).strip() != current_version:
+                return {
+                    "ok": False,
+                    "conflict": True,
+                    "reason": "version_conflict",
+                    "umo": clean_umo,
+                    "enabled": bool(before.get("enabled", False)),
+                    "version": current_version,
+                    "summary": "配置版本已变化，请刷新后重试",
+                }
+
+            sessions = [
+                str(s).strip()
+                for s in (self.config.get("narrative_sessions") or [])
+                if str(s).strip()
+            ]
+            all_groups = bool(self.config.get("narrative_all_groups"))
+            store = getattr(getattr(self, "world", None), "store", None)
+            if enabled:
+                if clean_umo not in sessions:
+                    sessions.append(clean_umo)
+                if store is not None:
+                    raw_sessions = getattr(getattr(store, "_store", None), "sessions", None)
+                    sess = raw_sessions.get(clean_umo) if isinstance(raw_sessions, dict) else None
+                    if sess is not None and (
+                        not getattr(sess, "enabled", True)
+                        or not getattr(sess, "inject_card_prompt", True)
+                        or getattr(sess, "card_id", "") == "__none__"
+                    ):
+                        patch_kwargs: dict[str, Any] = {
+                            "enabled": True,
+                            "inject_card_prompt": True,
+                        }
+                        if getattr(sess, "card_id", "") == "__none__":
+                            patch_kwargs["card_id"] = ""
+                        store.update_session(clean_umo, **patch_kwargs)
+                self._persist_config_patch({"narrative_sessions": sessions})
+            else:
+                sessions = [s for s in sessions if s != clean_umo]
+                self._persist_config_patch({"narrative_sessions": sessions})
+                if all_groups and store is not None:
+                    store.update_session(clean_umo, enabled=False)
+
+            narrative = getattr(getattr(self, "life", None), "narrative", None)
+            if narrative is not None and hasattr(narrative, "invalidate_snapshot_cache"):
+                narrative.invalidate_snapshot_cache()
+            from . import series_panels
+
+            series_panels.invalidate_presence_cache(
+                "astrbot_plugin_dynamics_world", context=self.context
+            )
+            self.web.bus.notify()
+            after = self.get_series_scope_status(clean_umo)
+            return {
+                "ok": True,
+                "umo": clean_umo,
+                "enabled": bool(after.get("enabled", enabled)),
+                "version": str(after.get("version") or self.onboarding.revision()),
+                "reason": "",
+                "summary": str(after.get("summary") or ("已接入持续生活" if enabled else "未绑定持续生活")),
+            }
+
+    async def activate_series_runtime(self) -> dict[str, Any]:
+        """Activate runtime_enabled for Setup Wizard step 4 when no legacy conflicts block it."""
+        async with self._migration_lock:
+            conflicts = self.conflicts()
+            if conflicts:
+                return {
+                    "ok": False,
+                    "runtime_enabled": self.config.get("runtime_enabled") is True,
+                    "ready": self.runtime_allowed(),
+                    "reason": "legacy_conflict",
+                    "conflicts": conflicts,
+                    "message": f"存在旧插件冲突：{'、'.join(conflicts)}",
+                }
+            if self.config.get("runtime_enabled") is True:
+                return {
+                    "ok": True,
+                    "runtime_enabled": True,
+                    "ready": self.runtime_allowed(),
+                    "already_enabled": True,
+                    "reason": "",
+                }
+            self._persist_config_patch({"runtime_enabled": True})
+            narrative = getattr(getattr(self, "life", None), "narrative", None)
+            if narrative is not None and hasattr(narrative, "invalidate_snapshot_cache"):
+                narrative.invalidate_snapshot_cache()
+            from . import series_panels
+
+            series_panels.invalidate_presence_cache(
+                "astrbot_plugin_dynamics_world", context=self.context
+            )
+            self.web.bus.notify()
+            return {
+                "ok": True,
+                "runtime_enabled": True,
+                "ready": self.runtime_allowed(),
+                "already_enabled": False,
+                "reason": "",
+            }
 
     def series_search_items(
         self, query: str, scope: str = "", limit: int = 8
@@ -303,14 +547,25 @@ class Main(Star):
 
     @filter.llm_tool(name="get_dynamics_world_state")
     async def world_state_tool(self, event: AstrMessageEvent, focus: str = "activity"):
-        """仅在对方询问角色现在的活动、位置、眼前场景、天气或项目进展时调用。普通聊天和单独的戳一戳跳过。
+        """仅在对方询问角色现在的活动、位置、眼前场景、天气、项目进展、院门信箱、花园、纪念格或居民近况时调用。普通聊天和单独的戳一戳跳过。
 
         Args:
-            focus (string): activity 当前活动（默认），location 所在位置，scene 当前场景，weather 当前天气，project 记录的项目进展。选与提问对应的一项。
+            focus (string): activity 当前活动（默认），location 所在位置，scene 当前场景，weather 当前天气，project 记录的项目进展，mailbox 院门信箱与最近拆阅记录，garden 花园作物/储物篮与访客状态，keepsakes 小屋纪念格与书架陈列，residents 近期居民互动与串门情况。选与提问对应的一项。
         """
         self._require_runtime()
-        if focus not in ("activity", "location", "scene", "weather", "project"):
-            return "可查询 activity、location、scene、weather 或 project。"
+        allowed_focuses = (
+            "activity",
+            "location",
+            "scene",
+            "weather",
+            "project",
+            "mailbox",
+            "garden",
+            "keepsakes",
+            "residents",
+        )
+        if focus not in allowed_focuses:
+            return "可查询 activity、location、scene、weather、project、mailbox、garden、keepsakes 或 residents。"
         scope = await self.life._scope_for_event(event)
         if scope is None:
             return "当前会话没有绑定角色。"
@@ -320,31 +575,63 @@ class Main(Star):
         engine = self.life.narrative
         if character is None:
             character = await self.world.get_character_context(scope)
-        with engine._db() as db:
-            db.execute("BEGIN IMMEDIATE")
-            now = engine.clock()
-            life = engine._snapshot(db, scope, now) if engine._allowed(scope) else {}
-            if life.get("spatial") is None:
-                engine.spatial.settle(db, scope, now)
-            actor = life.get("spatial") or engine.spatial.snapshot(db, scope, now)
-            env = engine.environment.snapshot(db, scope, now, actor)
-            engine.scenes.settle(db, scope, now)
-            scene = engine.scenes.snapshot(db, scope, now, admin=True)
-            scene_key, _, raw_scene = engine.scenes.load(db, scope)
-            if engine.ecology is not None:
-                engine.ecology.settle(db, scope, env, raw_scene, now)
-            if engine.mailbox is not None:
-                engine.mailbox.settle(db, scope, raw_scene, actor, now)
-            if engine.world_spaces is not None:
-                engine.world_spaces.settle(db, scope, now, actor, (character or {}).get("name", ""))
-            eco = engine.ecology.snapshot(db, scope, now, life_state=life, scene_state=raw_scene, env=env, actor=actor)
-            keepsakes = engine.keepsakes.snapshot(db, scope, raw_scene, now)
-            mailbox = engine.mailbox.snapshot(db, scope, now, character)
-            world_space = engine.world_spaces.snapshot(db, scope, now) if engine.world_spaces is not None else {}
+
+        def _collect_db_snapshot():
             from . import cabin_life
-            cabin_style = str(cabin_life.preference(db, scene_key).get("style") or "cottage")
-            from .web_api import _life_cues
-            cues = _life_cues(db, scope, now, self.life)
+            from .world_stream import _life_cues
+
+            with engine._db() as db:
+                db.execute("BEGIN IMMEDIATE")
+                now_ts = engine.clock()
+                life_snap = engine._snapshot(db, scope, now_ts) if engine._allowed(scope) else {}
+                if life_snap.get("spatial") is None:
+                    engine.spatial.settle(db, scope, now_ts)
+                actor_snap = life_snap.get("spatial") or engine.spatial.snapshot(db, scope, now_ts)
+                env_snap = engine.environment.snapshot(db, scope, now_ts, actor_snap)
+                engine.scenes.settle(db, scope, now_ts)
+                scene_snap = engine.scenes.snapshot(db, scope, now_ts, admin=True)
+                sc_key, _, raw_scene = engine.scenes.load(db, scope)
+                if engine.ecology is not None:
+                    engine.ecology.settle(db, scope, env_snap, raw_scene, now_ts)
+                if engine.mailbox is not None:
+                    engine.mailbox.settle(db, scope, raw_scene, actor_snap, now_ts)
+                if engine.world_spaces is not None:
+                    engine.world_spaces.settle(db, scope, now_ts, actor_snap, (character or {}).get("name", ""))
+                eco_snap = engine.ecology.snapshot(db, scope, now_ts, life_state=life_snap, scene_state=raw_scene, env=env_snap, actor=actor_snap)
+                ks_snap = engine.keepsakes.snapshot(db, scope, raw_scene, now_ts)
+                mb_snap = engine.mailbox.snapshot(db, scope, now_ts, character, read_only=True)
+                ws_snap = engine.world_spaces.snapshot(db, scope, now_ts) if engine.world_spaces is not None else {}
+                c_style = str(cabin_life.preference(db, sc_key).get("style") or "cottage")
+                cues_snap = _life_cues(db, scope, now_ts, self.life)
+                return (
+                    now_ts,
+                    life_snap,
+                    actor_snap,
+                    env_snap,
+                    scene_snap,
+                    sc_key,
+                    eco_snap,
+                    ks_snap,
+                    mb_snap,
+                    ws_snap,
+                    c_style,
+                    cues_snap,
+                )
+
+        (
+            now,
+            life,
+            actor,
+            env,
+            scene,
+            scene_key,
+            eco,
+            keepsakes,
+            mailbox,
+            world_space,
+            cabin_style,
+            cues,
+        ) = await asyncio.to_thread(_collect_db_snapshot)
 
         avatar_selection = {"model_id": "builtin", "texture_index": 0, "home_room_id": "", "garden_room_id": ""}
         avatar_model = None
@@ -418,7 +705,7 @@ class Main(Star):
         uid, uname = self._sender_identity(event)
         cooldown = int(self.config.get("cabin_mailbox_cooldown_seconds", 300) or 300)
         try:
-            receipt = self.life.narrative.mailbox.deliver_parcel(
+            receipt = await self.life.narrative.mailbox.deliver_parcel_async(
                 scope,
                 sender_id=uid,
                 sender_name=uname,
@@ -449,7 +736,7 @@ class Main(Star):
         uid, uname = self._sender_identity(event)
         cooldown = int(self.config.get("cabin_mailbox_cooldown_seconds", 300) or 300)
         try:
-            res = self.life.narrative.mailbox.enter_garden(
+            res = await self.life.narrative.mailbox.enter_garden_async(
                 scope,
                 user_id=uid,
                 display_name=uname,
@@ -528,6 +815,61 @@ class Main(Star):
         self.postcards.mark_used(cd_key, now)
         yield event.image_result(rendered["path"])
 
+    @filter.command("小屋", alias=["小屋帮助", "cabin_help"])
+    async def cabin_help_command(self, event: AstrMessageEvent, text: GreedyStr = ""):
+        if not self.runtime_allowed() or not self.config.get("group_cabin_commands_enabled", True):
+            yield event.plain_result("当前会话暂未启用群间小屋互动。")
+            return
+        scope = await self.life._scope_for_event(event)
+        if scope is None:
+            yield event.plain_result("当前会话尚未绑定角色。")
+            return
+        character = await self.world.get_character_context(scope, event)
+        engine = self.life.narrative
+
+        def _read_cabin_overview():
+            with engine._db(notify=False) as db:
+                db.execute("PRAGMA query_only = ON")
+                now = engine.clock()
+                actor = engine.spatial.snapshot(db, scope, now) if engine.spatial is not None else {}
+                env = engine.environment.snapshot(db, scope, now, actor) if engine.environment is not None else {}
+                scene = engine.scenes.snapshot(db, scope, now) if engine.scenes is not None else {}
+                mb = engine.mailbox.snapshot(db, scope, now, character, read_only=True) if engine.mailbox is not None else {}
+                return actor, env, scene, mb
+
+        actor, env, scene, mb = await asyncio.to_thread(_read_cabin_overview)
+        char_name = str((character or {}).get("name") or "小屋主人")
+        journey = actor.get("journey") if isinstance(actor, dict) else None
+        if isinstance(journey, dict) and journey.get("destination_name"):
+            loc_text = f"前往 {journey['destination_name']} 途中"
+        else:
+            place_name = str(scene.get("place_name") or actor.get("place_name") or "住所小屋")
+            room_name = str(scene.get("room_name") or "")
+            loc_text = f"{place_name} · {room_name}" if room_name else place_name
+        if env.get("available") and not env.get("stale") and isinstance(env.get("current"), dict):
+            cur = env["current"]
+            temp = cur.get("temperature")
+            day_str = "白天" if cur.get("is_day") else "夜间"
+            wx_text = f"{cur.get('label', '晴')} {temp}℃（{day_str}）" if temp is not None else f"{cur.get('label', '晴')}（{day_str}）"
+        else:
+            wx_text = "暂无天气实况"
+        policy_label = str(mb.get("policy_label") or "默认")
+        unopened = int(mb.get("unopened_count") or 0)
+        visitor_count = len(mb.get("visitors") or [])
+        lines = [
+            f"🏡 {char_name}的小屋实况导航",
+            f"📍 当前位置：{loc_text}",
+            f"🌤️ 当前天气：{wx_text}",
+            f"🚪 访客策略：{policy_label}（信箱未拆 {unopened} 封 · 花园访客 {visitor_count} 位）",
+            "",
+            "✨ 群友可用指令：",
+            "• /小屋实况 [全景|近景|院门] [附言] — 拍摄小屋实况拍立得明信片",
+            "• /投递 [明信片|鲜花|点心|礼物] <附言> — 往院门信箱寄送心意（角色回屋空闲时拆阅）",
+            "• /探访 [留言] — 来小屋花园驻足片刻（受访客策略约束）",
+            "• /小屋 或 /小屋帮助 — 查看小屋状态与指令说明",
+        ]
+        yield event.plain_result("\n".join(lines))
+
     @filter.command("投递")
     async def cabin_deliver_command(self, event: AstrMessageEvent, text: GreedyStr = ""):
         if not self.runtime_allowed() or not self.config.get("group_cabin_commands_enabled", True):
@@ -535,21 +877,27 @@ class Main(Star):
             return
         content = text.strip()
         if not content:
-            yield event.plain_result("用法：/投递 <想寄给角色的明信片/鲜花/点心附言>")
+            yield event.plain_result("用法：/投递 [明信片|鲜花|点心|礼物] <附言内容>")
             return
         scope = await self.life._scope_for_event(event)
         if scope is None:
             yield event.plain_result("当前会话尚未绑定角色。")
             return
-        kind = "flower" if any(k in content for k in ("花", "玫瑰", "洋甘菊", "薰衣草")) else "snack" if any(k in content for k in ("糕", "茶", "饼", "糖", "点心", "果")) else "postcard"
+        kind, clean_message = parse_mailbox_delivery(content)
         character = await self.world.get_character_context(scope, event)
         uid, uname = self._sender_identity(event)
         cooldown = int(self.config.get("cabin_mailbox_cooldown_seconds", 300) or 300)
         try:
-            res = self.life.narrative.mailbox.deliver_parcel(
-                scope, sender_id=uid, sender_name=uname, kind=kind, message=content, cooldown_seconds=cooldown, character_context=character
+            res = await self.life.narrative.mailbox.deliver_parcel_async(
+                scope,
+                sender_id=uid,
+                sender_name=uname,
+                kind=kind,
+                message=clean_message,
+                cooldown_seconds=cooldown,
+                character_context=character,
             )
-            yield event.plain_result(f"📮 已投入院门信箱：{res['title']}（主人空闲回屋时会亲自拆阅）")
+            yield event.plain_result(f"📮 已投入院门信箱（{res['kind_label']}）：{res['title']}（主人空闲回屋时会亲自拆阅）")
         except ValueError as exc:
             yield event.plain_result(f"📮 {exc}")
 
@@ -566,8 +914,13 @@ class Main(Star):
         uid, uname = self._sender_identity(event)
         cooldown = int(self.config.get("cabin_mailbox_cooldown_seconds", 300) or 300)
         try:
-            res = self.life.narrative.mailbox.enter_garden(
-                scope, user_id=uid, display_name=uname, note=text.strip() or "在花园木椅边静静看看风景", cooldown_seconds=cooldown, character_context=character
+            res = await self.life.narrative.mailbox.enter_garden_async(
+                scope,
+                user_id=uid,
+                display_name=uname,
+                note=text.strip() or "在花园木椅边静静看看风景",
+                cooldown_seconds=cooldown,
+                character_context=character,
             )
             if res.get("mode") == "critter":
                 form_zh = {"dove": "白色小信鸽", "squirrel": "林间小松鼠", "kitten": "三花小奶猫"}.get(res.get("form"), "林间小动物")

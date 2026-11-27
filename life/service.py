@@ -19,6 +19,7 @@ from astrbot.core.provider.entities import ProviderRequest
 
 from .. import creative_projects
 from ..series_panels import (
+    get_series_shared_config,
     is_provider_budget_busy_error,
     is_series_group_excluded,
     is_series_in_quiet_hours,
@@ -275,20 +276,29 @@ class LifeService:
             return {"disabled": True, "reason": "invalid_character_context"}
         return result
 
+    def _effective_persona_id(self) -> str:
+        explicit = str(self.config.get("persona_id", "") or "").strip()
+        if explicit:
+            return explicit
+        shared = get_series_shared_config(getattr(self, "context", None))
+        if isinstance(shared, dict):
+            return str(shared.get("persona_id", "") or "").strip()
+        return ""
+
     async def _scope_for_event(self, event: AstrMessageEvent) -> dict | None:
         """Return a concrete matching character; never inject one persona into another."""
         umo = str(event.unified_msg_origin)
+        configured = self._effective_persona_id()
         scope = {
             "platform": umo.split(":", 1)[0],
             "umo": umo,
-            "persona_id": str(self.config.get("persona_id", "")),
-            "instance_id": str(self.config.get("persona_id", "")),
+            "persona_id": configured,
+            "instance_id": configured,
         }
         character = await self._character(scope, event)
         persona_id = str(character.get("persona_id", ""))
         if character.get("disabled") or not persona_id:
             return None
-        configured = str(self.config.get("persona_id", ""))
         if configured and configured != persona_id:
             return None
         scope.update(persona_id=persona_id, instance_id=persona_id)
@@ -305,6 +315,7 @@ class LifeService:
         ):
             raise ValueError("Narrative character binding is unavailable")
         selected_provider_id = str(self.config.get("narrative_provider_id", "")).strip()
+        inherited_provider_id = ""
         if selected_provider_id:
             lookup = getattr(self.context, "get_provider_by_id", None)
             if not callable(lookup):
@@ -313,9 +324,27 @@ class LifeService:
                 )
             provider = lookup(selected_provider_id)
         else:
-            # Preserve older installations until an operator explicitly selects
-            # a dedicated background provider. An explicit missing ID fails closed.
-            provider = await self.generator._get_provider()
+            provider = None
+            explicit_llm_id = str(self.config.get("llm_provider_id", "") or "").strip()
+            if not explicit_llm_id:
+                shared = get_series_shared_config(getattr(self, "context", None))
+                if isinstance(shared, dict):
+                    candidate_id = str(
+                        shared.get("light_analysis_provider")
+                        or shared.get("decision_provider")
+                        or shared.get("reply_provider")
+                        or ""
+                    ).strip()
+                    if candidate_id:
+                        lookup = getattr(self.context, "get_provider_by_id", None)
+                        if callable(lookup):
+                            provider = lookup(candidate_id)
+                            if provider is not None:
+                                inherited_provider_id = candidate_id
+            if provider is None:
+                # Preserve older installations until an operator explicitly selects
+                # a dedicated background provider. An explicit missing ID fails closed.
+                provider = await self.generator._get_provider()
         if provider is None:
             raise NarrativeProviderUnavailable("Narrative provider is unavailable")
         text_chat = getattr(provider, "text_chat", None)
@@ -396,7 +425,9 @@ class LifeService:
                 },
             }
         resolved_provider_id = (
-            selected_provider_id or self.generator._provider_id_of(provider)
+            selected_provider_id
+            or inherited_provider_id
+            or self.generator._provider_id_of(provider)
         )
         purpose = (
             "resident_narrative"
@@ -519,6 +550,227 @@ class LifeService:
 
             _, _, scene = engine.scenes.load(db, scope)
             scene = scene or {}
+            if focus == "mailbox":
+                if engine.mailbox is None:
+                    return "院门信箱暂未启用。"
+                mb = engine.mailbox.snapshot(db, scope, now, read_only=True)
+                lines = [
+                    f"院门访客策略：{mb.get('policy_label') or mb.get('policy') or '未知'}",
+                    f"未拆来信：{int(mb.get('unopened_count') or 0)} 封",
+                ]
+                recent_opened = mb.get("recent_opened") or []
+                if recent_opened:
+                    lines.append("最近拆阅记录：")
+                    for rec in recent_opened[:3]:
+                        slot_note = (
+                            f"（已摆入 {rec['keepsake_slot']}）"
+                            if rec.get("keepsake_slot")
+                            else ""
+                        )
+                        lines.append(
+                            f"- {rec.get('sender_name', '群友')}寄来的"
+                            f"{rec.get('kind_label', '来信')}「{rec.get('title', '')}」："
+                            f"{str(rec.get('message', ''))[:60]}"
+                            f"｜{str(rec.get('reaction', ''))[:60]}{slot_note}"
+                        )
+                unopened_items = [
+                    p
+                    for p in (mb.get("parcels") or [])
+                    if isinstance(p, dict) and p.get("status") == "unopened"
+                ]
+                if unopened_items:
+                    pending_brief = "、".join(
+                        f"{p.get('sender_name', '群友')}的{p.get('kind_label', '来信')}"
+                        for p in unopened_items[:3]
+                    )
+                    lines.append(f"待拆来信：{pending_brief}")
+                if not recent_opened and not unopened_items:
+                    lines.append("信箱目前空空如也。")
+                return "\n".join(lines)
+
+            if focus == "garden":
+                lines = []
+                env = (
+                    engine.environment.snapshot(db, scope, now, actor)
+                    if engine.environment is not None
+                    else None
+                )
+                if engine.ecology is not None:
+                    eco = engine.ecology.snapshot(
+                        db, scope, now, scene_state=scene, env=env, actor=actor
+                    )
+                    season = eco.get("season") or {}
+                    if season.get("label") or season.get("solar_term"):
+                        lines.append(
+                            "节气时令："
+                            + " · ".join(
+                                str(x)
+                                for x in (season.get("label"), season.get("solar_term"))
+                                if x
+                            )
+                        )
+                    stage_zh = {
+                        "seedling": "幼苗抽芽",
+                        "growing": "生长中",
+                        "blooming": "繁花盛放（可采收）",
+                        "ripe": "成熟饱满（可采收）",
+                    }
+                    fb = eco.get("flowerbed") or {}
+                    vp = eco.get("veg_patch") or {}
+                    lines.append(
+                        f"花圃：{stage_zh.get(fb.get('stage', ''), fb.get('stage', '生长中'))}"
+                        f"（进度 {round(float(fb.get('progress') or 0) * 100)}%）"
+                    )
+                    lines.append(
+                        f"菜畦：{stage_zh.get(vp.get('stage', ''), vp.get('stage', '生长中'))}"
+                        f"（进度 {round(float(vp.get('progress') or 0) * 100)}%）"
+                    )
+                    pantry = {
+                        k: int(v)
+                        for k, v in (eco.get("pantry") or {}).items()
+                        if int(v or 0) > 0
+                    }
+                    if pantry:
+                        lines.append(
+                            "厨房储物篮："
+                            + "、".join(f"{k}×{v}" for k, v in pantry.items())
+                        )
+                    cat = eco.get("cat") or {}
+                    if cat.get("label") or cat.get("spot"):
+                        lines.append(
+                            f"小屋猫咪：{cat.get('label') or cat.get('spot')}"
+                        )
+                if engine.mailbox is not None:
+                    mb = engine.mailbox.snapshot(db, scope, now, read_only=True)
+                    visitors = mb.get("visitors") or []
+                    if visitors:
+                        form_zh = {
+                            "pixel_avatar": "像素访客",
+                            "dove": "白色小信鸽",
+                            "squirrel": "林间小松鼠",
+                            "kitten": "三花小奶猫",
+                        }
+                        v_desc = "；".join(
+                            f"{v.get('display_name', '访客')}（{form_zh.get(v.get('form', ''), '访客')}）"
+                            f"：{str(v.get('note', ''))[:40]}"
+                            for v in visitors[:2]
+                        )
+                        lines.append(f"当前花园访客：{v_desc}")
+                    else:
+                        lines.append("当前花园访客：暂无")
+                return "\n".join(lines) if lines else "当前暂无花园状态记录。"
+
+            if focus == "keepsakes":
+                if engine.keepsakes is None:
+                    return "小屋纪念格暂未启用。"
+                ks = engine.keepsakes.snapshot(db, scope, scene, now)
+                slot_labels = ks.get("slot_labels") or {}
+                slots = ks.get("slots") or {}
+                lines = []
+                if slots:
+                    lines.append("小屋纪念格当前陈列：")
+                    for slot_id, item in list(slots.items())[:8]:
+                        if not isinstance(item, dict):
+                            continue
+                        slabel = slot_labels.get(slot_id, slot_id)
+                        sender = (
+                            f"（来自 {item['sender']}）" if item.get("sender") else ""
+                        )
+                        desc = str(item.get("summary") or "")[:60]
+                        lines.append(
+                            f"- {slabel}：{item.get('title', '纪念小物')}{sender}"
+                            + (f" — {desc}" if desc else "")
+                        )
+                else:
+                    lines.append("小屋纪念格目前空置。")
+                archive_count = int(ks.get("archive_count") or 0)
+                if archive_count > 0:
+                    lines.append(f"收藏匣归档：{archive_count} 件")
+                vols = ks.get("bookshelf_volumes") or []
+                if vols:
+                    lines.append(
+                        "书架完结书册："
+                        + "、".join(
+                            f"《{v.get('title', '未命名')}》" for v in vols[:5]
+                        )
+                    )
+                return "\n".join(lines)
+
+            if focus == "residents":
+                lines = []
+                if engine.world_spaces is not None:
+                    ws = engine.world_spaces.snapshot(db, scope, now)
+                    guest = ws.get("active_guest") if isinstance(ws, dict) else None
+                    if isinstance(guest, dict) and guest.get("name"):
+                        lines.append(
+                            f"当前串门访客：{guest['name']}（{guest.get('activity') or '院中做客'}）"
+                        )
+                    encounters = (
+                        ws.get("recent_encounters") if isinstance(ws, dict) else None
+                    ) or []
+                    if encounters:
+                        lines.append(
+                            "最近偶遇："
+                            + str(encounters[0].get("summary") or "")[:80]
+                        )
+                if engine.causal is not None:
+                    proj = engine.causal.projection(db, scope, now, viewer="actor")
+                    residents = proj.get("residents") or []
+                    if residents:
+                        lines.append(
+                            "近期接触过的居民："
+                            + "、".join(
+                                str(r.get("name") or "已接触居民")[:24]
+                                for r in residents[:5]
+                                if isinstance(r, dict)
+                            )
+                        )
+                    invitations = [
+                        inv
+                        for inv in (proj.get("invitations") or [])
+                        if isinstance(inv, dict)
+                        and inv.get("status") in {"proposed", "accepted", "visiting"}
+                    ]
+                    if invitations:
+                        inv_status = {
+                            "proposed": "已发出邀请",
+                            "accepted": "已应约",
+                            "visiting": "正在拜访相处",
+                        }
+                        lines.append(
+                            "当前拜访约定："
+                            + "；".join(
+                                f"{inv_status.get(inv['status'], inv['status'])}"
+                                + (
+                                    f"（{str(inv.get('reason') or '')[:30]}）"
+                                    if inv.get("reason")
+                                    else ""
+                                )
+                                for inv in invitations[:3]
+                            )
+                        )
+                    perceived = [
+                        e
+                        for e in (proj.get("events") or [])
+                        if isinstance(e, dict)
+                        and e.get("kind")
+                        in {
+                            "speech.perceived",
+                            "invitation.proposed",
+                            "invitation.responded",
+                            "visit.arrived",
+                            "visit.completed",
+                        }
+                    ]
+                    if perceived:
+                        lines.append(
+                            "最近居民互动："
+                            + "；".join(
+                                str(e.get("summary") or "")[:60] for e in perceived[:2]
+                            )
+                        )
+                return "\n".join(lines) if lines else "目前没有已确认的居民互动或串门记录。"
+
             if focus == "project":
                 projects = sorted(
                     scene.get("projects", {}).values(),

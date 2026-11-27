@@ -162,13 +162,17 @@ class Onboarding:
             owner = identity(
                 {"persona_id": cfg["persona_id"], "instance_id": cfg["persona_id"]}
             )
-            with p.life.narrative._db() as db:
-                row = db.execute(
-                    "SELECT umo FROM scopes WHERE identity=? AND umo!='' ORDER BY CASE WHEN umo LIKE '%:GroupMessage:%' THEN 0 ELSE 1 END,umo LIMIT 1",
-                    (owner,),
-                ).fetchone()
-                if row:
-                    umo = row[0]
+
+            def _find_umo():
+                with p.life.narrative._db(notify=False) as db:
+                    return db.execute(
+                        "SELECT umo FROM scopes WHERE identity=? AND umo!='' ORDER BY CASE WHEN umo LIKE '%:GroupMessage:%' THEN 0 ELSE 1 END,umo LIMIT 1",
+                        (owner,),
+                    ).fetchone()
+
+            row = await asyncio.to_thread(_find_umo)
+            if row:
+                umo = row[0]
         cards = [
             {"id": c.id, "name": c.name, "persona_id": c.persona_id}
             for c in p.world.store.list_cards()
@@ -200,26 +204,33 @@ class Onboarding:
             try:
                 scope, _ = await p.web.scope(umo)
                 engine = p.life.narrative
-                with engine._db() as db:
-                    doc = engine.spatial.document(db, identity(scope))
-                    _, rev, state = engine.scenes.load(db, scope)
-                    result["world"] = {
-                        "has_map": bool(doc),
-                        "has_rooms": bool(state),
-                        "has_furniture": bool((state or {}).get("room_designs")),
-                        "scene_revision": rev,
-                        "places": [
-                            {k: x[k] for k in ("id", "name")}
-                            for x in (doc or {}).get("places", [])
-                        ],
-                        "rooms": list((state or {}).get("rooms", {}).values()),
-                        "designed_rooms": list((state or {}).get("room_designs", {})),
-                        "scope_bound": True,
-                    }
-                    result["world"]["position"] = engine.spatial.snapshot(
-                        db, scope, engine.clock()
-                    ).get("phase", "unknown")
-                    result["visual"] = engine.visuals.profiles.admin(db, scope)
+
+                def _read_world_status():
+                    with engine._db(notify=False) as db:
+                        doc = engine.spatial.document(db, identity(scope))
+                        _, rev, state = engine.scenes.load(db, scope)
+                        world_info = {
+                            "has_map": bool(doc),
+                            "has_rooms": bool(state),
+                            "has_furniture": bool((state or {}).get("room_designs")),
+                            "scene_revision": rev,
+                            "places": [
+                                {k: x[k] for k in ("id", "name")}
+                                for x in (doc or {}).get("places", [])
+                            ],
+                            "rooms": list((state or {}).get("rooms", {}).values()),
+                            "designed_rooms": list((state or {}).get("room_designs", {})),
+                            "scope_bound": True,
+                            "position": engine.spatial.snapshot(
+                                db, scope, engine.clock()
+                            ).get("phase", "unknown"),
+                        }
+                        visual_info = engine.visuals.profiles.admin(db, scope)
+                        return world_info, visual_info
+
+                world_info, visual_info = await asyncio.to_thread(_read_world_status)
+                result["world"] = world_info
+                result["visual"] = visual_info
             except (ValueError, TypeError):
                 result["world"]["scope_bound"] = False
         return result

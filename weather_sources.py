@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import hashlib
 import json
 import math
@@ -403,9 +402,18 @@ def solar(day, lat, lon, zone):
     return result
 
 
+@lru_cache(maxsize=4096)
+def _is_day_cached(lat_key: float, lon_key: float, stamp_minute: int) -> bool:
+    observer = Observer(latitude=lat_key, longitude=lon_key)
+    return (
+        elevation(observer, datetime.fromtimestamp(stamp_minute * 60, timezone.utc))
+        >= -0.833
+    )
+
+
 def project(payload, provider, now, lat, lon, zone):
-    result = copy.deepcopy(payload)
-    series = result.pop("_series", [])
+    result = {k: v for k, v in payload.items() if k != "_series"}
+    series = payload.get("_series") or []
     if provider == "met":
         choices = [p for p in series if p["time"] <= now]
         current = choices[-1] if choices else series[0]
@@ -414,13 +422,14 @@ def project(payload, provider, now, lat, lon, zone):
             not 0 <= now - current["time"] < 3600
             or now - result["source_updated_at"] > 86400
         )
+    elif isinstance(result.get("current"), dict):
+        result["current"] = dict(result["current"])
     result["forecast"] = [dict(p) for p in series if now < p["time"] <= now + 86400]
-    observer = Observer(latitude=lat, longitude=lon)
+    lat_key = round(float(lat), 4)
+    lon_key = round(float(lon), 4)
     for p in [result["current"], *result["forecast"]]:
         stamp = now if p is result["current"] else p["time"]
-        p["is_day"] = (
-            elevation(observer, datetime.fromtimestamp(stamp, timezone.utc)) >= -0.833
-        )
+        p["is_day"] = _is_day_cached(lat_key, lon_key, int(stamp // 60))
     result.update(
         solar(datetime.fromtimestamp(now, ZoneInfo(zone)).date(), lat, lon, zone),
         timezone=zone,
@@ -428,3 +437,9 @@ def project(payload, provider, now, lat, lon, zone):
         sun_source="本地天文计算",
     )
     return result
+
+
+async def project_async(payload, provider, now, lat, lon, zone):
+    import asyncio
+
+    return await asyncio.to_thread(project, payload, provider, now, lat, lon, zone)

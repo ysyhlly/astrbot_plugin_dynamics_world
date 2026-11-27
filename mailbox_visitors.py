@@ -1,6 +1,7 @@
 """Garden gate mailbox parcels, lore-safe visitor policies and strictly outdoor garden visitors."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import re
 import uuid
@@ -98,6 +99,24 @@ class MailboxVisitorService:
                     departs_at REAL NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS world_visitor_active ON world_garden_visitors(identity, departs_at DESC);
+                CREATE TABLE IF NOT EXISTS world_mailbox_receipts(
+                    parcel_id TEXT PRIMARY KEY,
+                    identity TEXT NOT NULL,
+                    umo TEXT NOT NULL,
+                    sender_id TEXT NOT NULL,
+                    sender_name TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    reaction TEXT NOT NULL,
+                    keepsake_slot TEXT NOT NULL DEFAULT '',
+                    summary TEXT NOT NULL,
+                    reply_status TEXT NOT NULL DEFAULT 'pending',
+                    reply_text TEXT NOT NULL DEFAULT '',
+                    opened_at REAL NOT NULL,
+                    replied_at REAL NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS world_mailbox_receipts_idx ON world_mailbox_receipts(identity, opened_at DESC);
                 """
             )
 
@@ -315,9 +334,39 @@ class MailboxVisitorService:
                 )
                 placed_slot = ks["slot"]
 
+            summary = (
+                f"拆阅了{row['sender_name']}寄来的{PARCEL_KINDS.get(kind, '来信')}"
+                f"「{row['title']}」：{row['message'][:60]}"
+            )
             db.execute(
                 "UPDATE world_mailbox SET status='opened',reaction=?,keepsake_slot=?,opened_at=? WHERE parcel_id=?",
                 (reaction, placed_slot, now, row["parcel_id"]),
+            )
+            db.execute(
+                "INSERT INTO world_mailbox_receipts("
+                "parcel_id,identity,umo,sender_id,sender_name,kind,title,message,"
+                "reaction,keepsake_slot,summary,reply_status,reply_text,opened_at,replied_at"
+                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(parcel_id) DO UPDATE SET "
+                "reaction=excluded.reaction,keepsake_slot=excluded.keepsake_slot,"
+                "summary=excluded.summary,opened_at=excluded.opened_at",
+                (
+                    row["parcel_id"],
+                    key,
+                    row["umo"],
+                    row["sender_id"],
+                    row["sender_name"],
+                    kind,
+                    row["title"],
+                    row["message"],
+                    reaction,
+                    placed_slot,
+                    summary,
+                    "pending",
+                    "",
+                    now,
+                    0.0,
+                ),
             )
             item = {
                 "parcel_id": row["parcel_id"],
@@ -325,16 +374,100 @@ class MailboxVisitorService:
                 "sender_name": row["sender_name"],
                 "umo": row["umo"],
                 "kind": kind,
+                "kind_label": PARCEL_KINDS.get(kind, "来信"),
                 "title": row["title"],
                 "message": row["message"],
                 "reaction": reaction,
+                "summary": summary,
                 "keepsake_slot": placed_slot,
+                "reply_status": "pending",
                 "opened_at": now,
             }
             opened.append(item)
             if self.engine.keepsakes is not None:
                 self.engine.keepsakes.record_keyframe(db, scope, "mailbox_opened", reaction, {}, now)
         return opened
+
+    def recent_opened_summaries(
+        self, db, scope: dict, *, limit: int = 3, umo: str = ""
+    ) -> list[dict]:
+        """Return recent opened parcel receipts/summaries (Wave 1 awareness + Wave 2 reply base)."""
+        key = identity(scope)
+        cap = max(1, min(16, int(limit or 3)))
+        params: tuple
+        if umo:
+            sql = (
+                "SELECT * FROM world_mailbox_receipts "
+                "WHERE identity=? AND (umo=? OR umo='') "
+                "ORDER BY opened_at DESC LIMIT ?"
+            )
+            params = (key, umo, cap)
+        else:
+            sql = (
+                "SELECT * FROM world_mailbox_receipts "
+                "WHERE identity=? ORDER BY opened_at DESC LIMIT ?"
+            )
+            params = (key, cap)
+        rows = db.execute(sql, params).fetchall()
+        out = [
+            {
+                "parcel_id": r["parcel_id"],
+                "umo": r["umo"],
+                "sender_id": r["sender_id"],
+                "sender_name": r["sender_name"],
+                "kind": r["kind"],
+                "kind_label": PARCEL_KINDS.get(r["kind"], "来信"),
+                "title": r["title"],
+                "message": r["message"],
+                "reaction": r["reaction"],
+                "keepsake_slot": r["keepsake_slot"],
+                "summary": r["summary"],
+                "reply_status": r["reply_status"],
+                "reply_text": r["reply_text"],
+                "opened_at": float(r["opened_at"]),
+                "replied_at": float(r["replied_at"]),
+            }
+            for r in rows
+        ]
+        if len(out) >= cap:
+            return out
+        seen = {item["parcel_id"] for item in out}
+        fallback_rows = db.execute(
+            "SELECT * FROM world_mailbox WHERE identity=? AND status='opened' "
+            "ORDER BY opened_at DESC LIMIT ?",
+            (key, cap),
+        ).fetchall()
+        for r in fallback_rows:
+            if r["parcel_id"] in seen:
+                continue
+            if umo and r["umo"] and r["umo"] != umo:
+                continue
+            kind = r["kind"]
+            out.append(
+                {
+                    "parcel_id": r["parcel_id"],
+                    "umo": r["umo"],
+                    "sender_id": r["sender_id"],
+                    "sender_name": r["sender_name"],
+                    "kind": kind,
+                    "kind_label": PARCEL_KINDS.get(kind, "来信"),
+                    "title": r["title"],
+                    "message": r["message"],
+                    "reaction": r["reaction"],
+                    "keepsake_slot": r["keepsake_slot"],
+                    "summary": (
+                        f"拆阅了{r['sender_name']}寄来的{PARCEL_KINDS.get(kind, '来信')}"
+                        f"「{r['title']}」：{r['message'][:60]}"
+                    ),
+                    "reply_status": "pending",
+                    "reply_text": "",
+                    "opened_at": float(r["opened_at"]),
+                    "replied_at": 0.0,
+                }
+            )
+            if len(out) >= cap:
+                break
+        return out
 
     def settle(self, db, scope: dict, scene_state: dict | None, actor: dict | None, now: float) -> list[dict]:
         """Expire departed garden visitors; auto-open aged parcels when character is home & idle."""
@@ -404,6 +537,7 @@ class MailboxVisitorService:
                 (key, now),
             ).fetchall()
         ]
+        recent_opened = self.recent_opened_summaries(db, scope, limit=3)
         return {
             "policy": mode,
             "policy_label": VISITOR_MODE_LABELS[mode],
@@ -411,4 +545,32 @@ class MailboxVisitorService:
             "unopened_count": int(unopened_count),
             "parcels": parcels,
             "visitors": visitors,
+            "latest_opened": recent_opened[0] if recent_opened else None,
+            "recent_opened": recent_opened,
         }
+
+    async def set_policy_async(self, scope: dict, mode: str) -> dict:
+        return await asyncio.to_thread(self.set_policy, scope, mode)
+
+    async def deliver_parcel_async(self, scope: dict, **kwargs) -> dict:
+        return await asyncio.to_thread(self.deliver_parcel, scope, **kwargs)
+
+    async def enter_garden_async(self, scope: dict, **kwargs) -> dict:
+        return await asyncio.to_thread(self.enter_garden, scope, **kwargs)
+
+    async def snapshot_async(
+        self,
+        scope: dict,
+        now: float | None = None,
+        character_context: dict | None = None,
+        *,
+        read_only: bool = True,
+    ) -> dict:
+        def _read():
+            ts = self.engine.clock() if now is None else float(now)
+            with self.engine._db(notify=False) as db:
+                return self.snapshot(
+                    db, scope, ts, character_context, read_only=read_only
+                )
+
+        return await asyncio.to_thread(_read)

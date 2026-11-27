@@ -435,12 +435,16 @@ def compute_domain_revisions(
     mailbox_rev = _short_rev_int(
         (
             mailbox.get("unopened_count", 0),
-            mailbox.get("visitor_mode", ""),
+            mailbox.get("policy", ""),
             [
-                (v.get("user_id"), v.get("spot"), v.get("form"))
+                (v.get("visitor_id"), v.get("spot"), v.get("form"))
                 for v in (mailbox.get("visitors") or [])
             ],
-            [(p.get("id"), p.get("status")) for p in (mailbox.get("recent") or [])[:6]],
+            [
+                (p.get("parcel_id"), p.get("status"))
+                for p in (mailbox.get("parcels") or [])[:6]
+            ],
+            (mailbox.get("latest_opened") or {}).get("parcel_id", ""),
         )
     )
     keepsakes_rev = _short_rev_int(
@@ -577,7 +581,7 @@ def _read_world_projection(api, services, scope, character, key, can_write):
             else {}
         )
         mailbox = (
-            engine.mailbox.snapshot(db, scope, now, character)
+            engine.mailbox.snapshot(db, scope, now, character, read_only=True)
             if engine.mailbox is not None
             else {}
         )

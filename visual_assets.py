@@ -89,6 +89,9 @@ class VisualAssetLibrary:
             if not index.exists() or asset_id not in json.loads(index.read_text("utf-8")):
                 target.unlink(missing_ok=True)
             raise
+        invalidate = getattr(self.profiles, "invalidate_assets_cache", None)
+        if callable(invalidate):
+            invalidate()
         return {"asset_id": asset_id, "role": role, "label": row["label"], "sha256": digest,
                 "source_url": source, "width": width, "height": height, "bytes": len(raw)}
 

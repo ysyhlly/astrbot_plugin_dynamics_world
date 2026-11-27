@@ -1,8 +1,10 @@
 """Persistent visual designs, separate from simulation state and generated jobs."""
 
+import asyncio
 import hashlib
 import json
 import re
+import threading
 import time
 
 from .room_design import layout_text
@@ -16,6 +18,7 @@ class VisualProfiles:
     def __init__(self, engine):
         self.engine = engine
         self.asset_root = engine.path.parent / "visual-assets"
+        self._assets_lock = threading.Lock()
         self._verified = {}
         self._manifest_cache_key = None
         self._manifest_rows = None
@@ -26,6 +29,17 @@ class VisualProfiles:
             db.execute(
                 "CREATE TABLE IF NOT EXISTS world_visual_profiles(identity TEXT PRIMARY KEY, revision INTEGER NOT NULL, profile TEXT NOT NULL)"
             )
+
+    def invalidate_assets_cache(self):
+        with self._assets_lock:
+            self._manifest_cache_key = None
+            self._manifest_rows = None
+            self._assets_cache_key = None
+            self._assets_cache_expires = 0.0
+            self._assets_cache_value = {}
+
+    async def assets_async(self):
+        return await asyncio.to_thread(self.assets)
 
     def migrate_legacy_style(self):
         """Pin the old global art style only for worlds that already existed."""
@@ -73,104 +87,107 @@ class VisualProfiles:
 
     def assets(self):
         """Only explicitly installed, content-verified files; never fetch on chat."""
-        try:
-            manifest = self.asset_root / "index.json"
-            mstat = manifest.stat()
-            if mstat.st_size > 65536:
-                return {}
-            manifest_key = (mstat.st_mtime_ns, mstat.st_size)
-            now_mono = time.monotonic()
-            if (
-                self._manifest_cache_key == manifest_key
-                and self._manifest_rows is not None
-            ):
-                entries = self._manifest_rows
-            else:
-                rows = json.loads(manifest.read_text("utf-8"))
-                root_resolved = self.asset_root.resolve()
-                entries = []
-                for key, row in list(rows.items())[:32]:
-                    if not re.fullmatch(r"[a-z0-9_-]{1,64}", key) or not isinstance(
-                        row, dict
-                    ):
-                        continue
-                    filename = row.get("file", "")
-                    if not isinstance(filename, str) or not re.fullmatch(
-                        r"[a-zA-Z0-9_-]+\.(png|jpg|jpeg|webp)", filename
-                    ):
-                        continue
-                    if row.get("role") not in {"style", "layout"}:
-                        continue
-                    path = self.asset_root / filename
-                    if path.is_symlink() or not path.resolve().is_relative_to(
-                        root_resolved
-                    ):
-                        continue
-                    entries.append((key, row, path))
-                self._manifest_cache_key = manifest_key
-                self._manifest_rows = entries
-                self._assets_cache_key = None
-
-            file_stamps = []
-            valid_stats = []
-            for key, row, path in entries:
-                try:
-                    stamp = path.stat()
-                except OSError:
-                    file_stamps.append((key, None, None))
-                    valid_stats.append((key, row, path, None))
-                    continue
-                file_stamps.append((key, stamp.st_mtime_ns, stamp.st_size))
-                valid_stats.append((key, row, path, stamp))
-
-            cache_key = (manifest_key, tuple(file_stamps))
-            if (
-                self._assets_cache_key == cache_key
-                and now_mono < self._assets_cache_expires
-            ):
-                return {k: dict(v) for k, v in self._assets_cache_value.items()}
-
-            result = {}
-            for key, row, path, stamp in valid_stats:
-                if stamp is None or not 0 < stamp.st_size <= 16 * 1024 * 1024:
-                    continue
-                try:
-                    if path.is_symlink():
-                        continue
-                    check = (
-                        str(path),
-                        stamp.st_mtime_ns,
-                        stamp.st_size,
-                        row.get("sha256"),
-                    )
-                    if check not in self._verified:
-                        if hashlib.sha256(path.read_bytes()).hexdigest() != row.get(
-                            "sha256"
+        with self._assets_lock:
+            try:
+                manifest = self.asset_root / "index.json"
+                mstat = manifest.stat()
+                if mstat.st_size > 65536:
+                    return {}
+                manifest_key = (mstat.st_mtime_ns, mstat.st_size)
+                now_mono = time.monotonic()
+                if (
+                    self._manifest_cache_key == manifest_key
+                    and self._manifest_rows is not None
+                ):
+                    entries = self._manifest_rows
+                    if not entries and now_mono < self._assets_cache_expires:
+                        return {}
+                else:
+                    rows = json.loads(manifest.read_text("utf-8"))
+                    root_resolved = self.asset_root.resolve()
+                    entries = []
+                    for key, row in list(rows.items())[:32]:
+                        if not re.fullmatch(r"[a-z0-9_-]{1,64}", key) or not isinstance(
+                            row, dict
                         ):
                             continue
-                        self._verified = {
-                            **dict(list(self._verified.items())[-127:]),
-                            check: True,
-                        }
-                except OSError:
-                    continue
-                result[key] = {
-                    "asset_id": key,
-                    "role": row["role"],
-                    "reference": str(path),
-                    "sha256": row["sha256"],
-                    "label": str(row.get("label", key))[:100],
-                    "source_url": str(row.get("source_url", ""))[:300],
-                }
-            self._assets_cache_key = cache_key
-            self._assets_cache_value = result
-            self._assets_cache_expires = now_mono + _ASSETS_CACHE_TTL_SECONDS
-            return {k: dict(v) for k, v in result.items()}
-        except (OSError, ValueError, AttributeError, TypeError):
-            self._manifest_cache_key = None
-            self._manifest_rows = None
-            self._assets_cache_key = None
-            return {}
+                        filename = row.get("file", "")
+                        if not isinstance(filename, str) or not re.fullmatch(
+                            r"[a-zA-Z0-9_-]+\.(png|jpg|jpeg|webp)", filename
+                        ):
+                            continue
+                        if row.get("role") not in {"style", "layout"}:
+                            continue
+                        path = self.asset_root / filename
+                        if path.is_symlink() or not path.resolve().is_relative_to(
+                            root_resolved
+                        ):
+                            continue
+                        entries.append((key, row, path))
+                    self._manifest_cache_key = manifest_key
+                    self._manifest_rows = entries
+                    self._assets_cache_key = None
+
+                file_stamps = []
+                valid_stats = []
+                for key, row, path in entries:
+                    try:
+                        stamp = path.stat()
+                    except OSError:
+                        file_stamps.append((key, None, None))
+                        valid_stats.append((key, row, path, None))
+                        continue
+                    file_stamps.append((key, stamp.st_mtime_ns, stamp.st_size))
+                    valid_stats.append((key, row, path, stamp))
+
+                cache_key = (manifest_key, tuple(file_stamps))
+                if (
+                    self._assets_cache_key == cache_key
+                    and now_mono < self._assets_cache_expires
+                ):
+                    return {k: dict(v) for k, v in self._assets_cache_value.items()}
+
+                result = {}
+                for key, row, path, stamp in valid_stats:
+                    if stamp is None or not 0 < stamp.st_size <= 16 * 1024 * 1024:
+                        continue
+                    try:
+                        if path.is_symlink():
+                            continue
+                        check = (
+                            str(path),
+                            stamp.st_mtime_ns,
+                            stamp.st_size,
+                            row.get("sha256"),
+                        )
+                        if check not in self._verified:
+                            if hashlib.sha256(path.read_bytes()).hexdigest() != row.get(
+                                "sha256"
+                            ):
+                                continue
+                            self._verified = {
+                                **dict(list(self._verified.items())[-127:]),
+                                check: True,
+                            }
+                    except OSError:
+                        continue
+                    result[key] = {
+                        "asset_id": key,
+                        "role": row["role"],
+                        "reference": str(path),
+                        "sha256": row["sha256"],
+                        "label": str(row.get("label", key))[:100],
+                        "source_url": str(row.get("source_url", ""))[:300],
+                    }
+                self._assets_cache_key = cache_key
+                self._assets_cache_value = result
+                self._assets_cache_expires = now_mono + _ASSETS_CACHE_TTL_SECONDS
+                return {k: dict(v) for k, v in result.items()}
+            except (OSError, ValueError, AttributeError, TypeError):
+                self._manifest_cache_key = None
+                self._manifest_rows = None
+                self._assets_cache_key = None
+                return {}
 
     def load(self, db, scope):
         key = self.engine.scenes.key(db, scope)

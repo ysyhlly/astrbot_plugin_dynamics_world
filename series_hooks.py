@@ -13,6 +13,7 @@ from astrbot.api import logger
 
 from .series_panels import (
     find_provider_silently,
+    get_series_shared_config,
     is_series_group_excluded,
     resolve_series_provider,
     resolve_series_timezone,
@@ -217,6 +218,17 @@ def _card_persona_id(card) -> str:
     return f"wb_{cid}" if cid else ""
 
 
+def _effective_persona_id(plugin) -> str:
+    cfg = getattr(plugin, "config", None) or {}
+    explicit = str(cfg.get("persona_id") or "").strip()
+    if explicit:
+        return explicit
+    shared = get_series_shared_config(getattr(plugin, "context", None))
+    if isinstance(shared, dict):
+        return str(shared.get("persona_id") or "").strip()
+    return ""
+
+
 def _resolve_sync_scope(
     plugin, umo: str = "", persona: str = "", *, strict: bool = False
 ) -> dict | None:
@@ -252,13 +264,14 @@ def _resolve_sync_scope(
             _record_hook_error("resolve_sync_scope.list_cards", exc)
             card = None
     card_persona = _card_persona_id(card)
+    fallback_persona = _effective_persona_id(plugin)
     if strict:
         if clean_persona:
             persona_id = clean_persona
         elif card_persona:
             persona_id = card_persona
         elif store is None:
-            persona_id = str(cfg.get("persona_id") or "").strip()
+            persona_id = fallback_persona
         else:
             return None
         if not persona_id or persona_id in _UNBOUND_PERSONA_SENTINELS:
@@ -267,7 +280,7 @@ def _resolve_sync_scope(
         persona_id = (
             clean_persona
             or card_persona
-            or str(cfg.get("persona_id") or "").strip()
+            or fallback_persona
             or "default"
         )
     platform = clean_umo.split(":", 1)[0] if ":" in clean_umo else ""
@@ -416,7 +429,7 @@ def build_series_scope_status(plugin, umo: str) -> dict:
     all_groups = bool(cfg.get("narrative_all_groups"))
     store = getattr(getattr(plugin, "world", None), "store", None)
     unbound = False
-    persona_id = str(cfg.get("persona_id") or "")
+    persona_id = _effective_persona_id(plugin)
     if store is not None and clean_umo:
         _, card, disabled = _read_session_and_card(store, clean_umo)
         if disabled:
@@ -453,7 +466,7 @@ def build_series_scope_status(plugin, umo: str) -> dict:
             from .spatial import identity as spatial_identity
 
             owner = spatial_identity(scope)
-            with narrative._db() as db:
+            with narrative._db(notify=False) as db:
                 scene_key = narrative.scenes.key(db, scope)
                 c_scene = int(
                     db.execute(
@@ -482,18 +495,24 @@ def build_series_scope_status(plugin, umo: str) -> dict:
     onboarding = getattr(plugin, "onboarding", None)
     if onboarding is not None and callable(getattr(onboarding, "revision", None)):
         try:
-            version = str(onboarding.revision())
+            base_rev = str(onboarding.revision())
+            version = f"{base_rev}:u" if unbound else base_rev
         except Exception as exc:
             _record_hook_error("scope_status.revision", exc)
             version = "0"
 
+    mode = str(cfg.get("mode", "narrative") or "narrative")
     return {
+        "umo": clean_umo,
         "enabled": enabled,
-        "supported": False,
+        "supported": True,
+        "writable": True,
+        "mode": mode,
         "excluded_by_core": excluded_by_core,
         "persona_id": persona_id,
         "activity_today": activity_today,
         "summary": summary,
+        "detail": summary,
         "version": version,
     }
 
@@ -1062,7 +1081,7 @@ def build_series_health(plugin) -> dict:
     ready = bool(plugin.runtime_allowed()) if callable(getattr(plugin, "runtime_allowed", None)) else False
     runtime_enabled = bool(cfg.get("runtime_enabled") is True)
     mode = str(cfg.get("mode", "legacy") or "legacy")
-    persona_id = str(cfg.get("persona_id") or "").strip()
+    persona_id = _effective_persona_id(plugin)
     sessions = [str(s).strip() for s in (cfg.get("narrative_sessions") or []) if s]
     all_groups = bool(cfg.get("narrative_all_groups") is True)
 
@@ -1085,10 +1104,19 @@ def build_series_health(plugin) -> dict:
 
     explicit_narrative = str(cfg.get("narrative_provider_id") or "").strip()
     explicit_llm = str(cfg.get("llm_provider_id") or "").strip()
-    resolved_narrative = resolve_series_provider(
-        context, explicit_narrative, explicit_llm, role="summary"
+    shared_cfg = get_series_shared_config(context)
+    shared_light = (
+        str(shared_cfg.get("light_analysis_provider") or "").strip()
+        if isinstance(shared_cfg, dict)
+        else ""
     )
-    resolved_daily = resolve_series_provider(context, explicit_llm, role="reply")
+    resolved_narrative = (
+        explicit_narrative
+        or explicit_llm
+        or shared_light
+        or resolve_series_provider(context, "", "", role="summary")
+    )
+    resolved_daily = resolve_series_provider(context, explicit_llm, shared_light, role="reply")
 
     for role, pid in (
         ("narrative", resolved_narrative),

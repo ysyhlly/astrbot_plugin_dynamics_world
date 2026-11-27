@@ -77,8 +77,10 @@ def _install_offline_astrbot_stubs() -> None:
     class TextPart:
         def __init__(self, text: str = ""):
             self.text = text
+            self._no_save = False
 
         def mark_as_temp(self):
+            self._no_save = True
             return self
 
     class StarTools:

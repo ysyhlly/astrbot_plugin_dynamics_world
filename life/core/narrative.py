@@ -26,6 +26,7 @@ from astrbot.api import logger
 
 if __package__:
     from ...series_panels import (
+        get_series_shared_config,
         is_series_group_excluded,
         is_series_in_quiet_hours,
         resolve_series_timezone,
@@ -91,6 +92,9 @@ else:
     def is_series_group_excluded(context, umo: str = "", group_id: str = "") -> bool:
         return False
 
+    def get_series_shared_config(context) -> dict:
+        return {}
+
     def is_series_in_quiet_hours(context) -> bool:
         return False
 
@@ -117,6 +121,8 @@ else:
 
 _DEBUG_LEVEL = 10
 _INFO_LEVEL = 20
+_SNAPSHOT_CACHE_TTL_SECONDS = 4.0
+_SNAPSHOT_CACHE_MAX_ENTRIES = 64
 
 
 def _snapshot_scope_hash(scope: dict) -> str:
@@ -232,6 +238,8 @@ class NarrativeEngine(
             "resident": None,
         }
         self._generation_lock = threading.Lock()
+        self._snapshot_cache_lock = threading.Lock()
+        self._snapshot_cache: dict[tuple, tuple[float, int, tuple, float, float, dict]] = {}
         self._tls = threading.local()
         self._backup_before_retry_extension()
         self._backup_before_v20_extension()
@@ -260,6 +268,7 @@ class NarrativeEngine(
                 wrote = True
                 with self._generation_lock:
                     self._context_generation += 1
+                self.invalidate_snapshot_cache()
             return sqlite3.SQLITE_OK
 
         conn.set_authorizer(authorize)
@@ -275,8 +284,14 @@ class NarrativeEngine(
             if wrote:
                 with self._generation_lock:
                     self._context_generation += 1
+                self.invalidate_snapshot_cache()
             if notify and committed:
                 self._notify_db_write()
+
+    def invalidate_snapshot_cache(self) -> None:
+        """Drop all cached read-only snapshots immediately after any write or config mutation."""
+        with self._snapshot_cache_lock:
+            self._snapshot_cache.clear()
 
     def _notify_db_write(self) -> None:
         cb = self.on_db_write
@@ -371,16 +386,27 @@ class NarrativeEngine(
             explicit_tz=str(explicit_tz or cfg_tz or ""),
         )
 
+    def _effective_persona_id(self) -> str:
+        explicit = str(self.config.get("persona_id", "") or "").strip()
+        if explicit:
+            return explicit
+        shared = get_series_shared_config(getattr(self, "host_context", None))
+        if isinstance(shared, dict):
+            return str(shared.get("persona_id", "") or "").strip()
+        return ""
+
     def is_managed(self, scope: dict) -> bool:
         """Return whether the concrete persona manages this full UMO."""
         try:
             scope = normalize_scope(scope)
         except ValueError:
             return False
+        effective_persona = self._effective_persona_id()
         if (
             self._closed
             or self.config.get("mode", "legacy") != "narrative"
-            or scope["persona_id"] != str(self.config.get("persona_id", ""))
+            or not effective_persona
+            or scope["persona_id"] != effective_persona
         ):
             return False
         umo = scope["umo"]
@@ -424,15 +450,17 @@ class NarrativeEngine(
             {
                 "platform": "",
                 "umo": "",
-                "persona_id": str(self.config.get("persona_id", "")),
+                "persona_id": self._effective_persona_id(),
             }
         )
 
     def _allowed(self, scope: dict) -> bool:
+        effective_persona = self._effective_persona_id()
         return self.is_managed(scope) or (
             not scope["umo"]
             and self.config.get("mode", "legacy") == "narrative"
-            and scope["persona_id"] == str(self.config.get("persona_id", ""))
+            and bool(effective_persona)
+            and scope["persona_id"] == effective_persona
             and self._has_targets()
             and not self._closed
         )
@@ -746,6 +774,27 @@ class NarrativeEngine(
                             2 ** (-max(0, now - item["updated_at"]) / 600), 3
                         )
                     humanlike[key].append(presentation)
+        causal_actor = (
+            self.causal.projection(db, scope, now, viewer="actor")
+            if self.causal is not None
+            else None
+        )
+        world_brief = self._build_world_brief(
+            mailbox_snap,
+            ecology_snap,
+            keepsakes_snap,
+            causal_actor,
+            world_space_snap,
+        )
+        base_summary = (scoped["summary"] if scoped_current else "") or (
+            state["summary"] if not expired else ""
+        )
+        world_summary = world_brief.get("summary_text", "")
+        effective_summary = base_summary
+        if scope["umo"] and world_summary:
+            effective_summary = (
+                f"{base_summary}；{world_summary}" if base_summary else world_summary
+            )
         return {
             "schema_version": 1,
             "managed": self._allowed(scope),
@@ -785,12 +834,12 @@ class NarrativeEngine(
             "keepsakes": keepsakes_snap,
             "mailbox": mailbox_snap,
             "world_space": world_space_snap,
+            "world_brief": world_brief,
             "horizons_desk": horizons_desk,
             "availability": state["availability"] if not expired else "unknown",
             "subjective_state": (scoped["subjective_state"] if scoped_current else "")
             or (state["subjective_state"] if not expired else ""),
-            "summary": (scoped["summary"] if scoped_current else "")
-            or (state["summary"] if not expired else ""),
+            "summary": effective_summary,
             "commitments": commitments,
             "global_presentation": {
                 k: state.get(k, "") if not expired else ""
@@ -828,17 +877,151 @@ class NarrativeEngine(
             "activity_started_at": state.get("activity_started_at"),
             "narrated_until": state.get("narrated_until", state["valid_from"]),
             "energy": (
-                self.causal.projection(db, scope, now)["body"]
-                if self.causal is not None
+                causal_actor["body"]
+                if causal_actor is not None
                 else self._energy(state, now)
             ),
-            "causal_life": self.causal.projection(db, scope, now, viewer="actor")
-            if self.causal is not None
-            else None,
+            "causal_life": causal_actor,
             "humanlike": humanlike,
             "stale": expired,
             "paused": self._paused(db, scope),
             "outreach_paused": self._outreach_paused(db, scope),
+        }
+
+    @staticmethod
+    def _build_world_brief(
+        mailbox_snap: dict | None,
+        ecology_snap: dict | None,
+        keepsakes_snap: dict | None,
+        causal_actor: dict | None,
+        world_space_snap: dict | None,
+    ) -> dict:
+        parts: list[str] = []
+        mb = mailbox_snap if isinstance(mailbox_snap, dict) else {}
+        unopened_count = int(mb.get("unopened_count") or 0)
+        latest_opened = mb.get("latest_opened")
+        if not isinstance(latest_opened, dict):
+            latest_opened = None
+        if unopened_count > 0:
+            parts.append(f"院门信箱有{unopened_count}封未拆来信")
+        if latest_opened:
+            sender = str(latest_opened.get("sender_name") or "群友")[:20]
+            title = str(latest_opened.get("title") or latest_opened.get("kind_label") or "来信")[:24]
+            parts.append(f"刚拆阅{sender}寄来的「{title}」")
+
+        visitors = [
+            v for v in (mb.get("visitors") or []) if isinstance(v, dict)
+        ]
+        eco = ecology_snap if isinstance(ecology_snap, dict) else {}
+        flower = eco.get("flowerbed") or {}
+        veg = eco.get("veg_patch") or {}
+        flower_ready = flower.get("stage") == "blooming" or float(flower.get("progress") or 0) >= 0.85
+        veg_ready = veg.get("stage") == "ripe" or float(veg.get("progress") or 0) >= 0.85
+        garden_bits: list[str] = []
+        if visitors:
+            names = "、".join(str(v.get("display_name") or "访客")[:16] for v in visitors[:2])
+            garden_bits.append(f"花园访客:{names}")
+        ripe_bits = []
+        if flower_ready:
+            ripe_bits.append("花圃盛放")
+        if veg_ready:
+            ripe_bits.append("菜畦成熟可采收")
+        if ripe_bits:
+            garden_bits.append("、".join(ripe_bits))
+        if garden_bits:
+            parts.append("；".join(garden_bits))
+
+        ks = keepsakes_snap if isinstance(keepsakes_snap, dict) else {}
+        slots = ks.get("slots") if isinstance(ks.get("slots"), dict) else {}
+        displayed = [
+            {
+                "slot": slot_id,
+                "title": str(item.get("title") or "")[:24],
+                "sender": str(item.get("sender") or "")[:16],
+            }
+            for slot_id, item in slots.items()
+            if isinstance(item, dict) and item.get("title")
+        ]
+        if displayed:
+            top_ks = "、".join(d["title"] for d in displayed[:2])
+            parts.append(f"纪念格陈列({len(displayed)}):{top_ks}")
+
+        residents_raw = (
+            causal_actor.get("residents")
+            if isinstance(causal_actor, dict) and isinstance(causal_actor.get("residents"), list)
+            else []
+        )
+        ws = world_space_snap if isinstance(world_space_snap, dict) else {}
+        active_guest = ws.get("active_guest") if isinstance(ws.get("active_guest"), dict) else None
+        res_bits: list[str] = []
+        if active_guest and active_guest.get("name"):
+            res_bits.append(f"{str(active_guest['name'])[:16]}来院串门")
+        if residents_raw:
+            rnames = "、".join(
+                str(r.get("name") or "居民")[:16] for r in residents_raw[:2] if isinstance(r, dict)
+            )
+            if rnames:
+                res_bits.append(f"近期接触居民:{rnames}")
+        if res_bits:
+            parts.append("；".join(res_bits))
+
+        summary_text = "；".join(p for p in parts if p)[:200]
+        return {
+            "unopened_mail_count": unopened_count,
+            "latest_opened_mail": (
+                {
+                    "parcel_id": latest_opened.get("parcel_id", ""),
+                    "sender_name": latest_opened.get("sender_name", ""),
+                    "kind": latest_opened.get("kind", ""),
+                    "kind_label": latest_opened.get("kind_label", ""),
+                    "title": latest_opened.get("title", ""),
+                    "summary": latest_opened.get("summary", ""),
+                    "keepsake_slot": latest_opened.get("keepsake_slot", ""),
+                    "opened_at": latest_opened.get("opened_at", 0.0),
+                }
+                if latest_opened
+                else None
+            ),
+            "garden": {
+                "visitor_count": len(visitors),
+                "visitors": [
+                    {
+                        "display_name": v.get("display_name", ""),
+                        "form": v.get("form", ""),
+                        "spot": v.get("spot", ""),
+                    }
+                    for v in visitors[:2]
+                ],
+                "flower_stage": str(flower.get("stage") or ""),
+                "veg_stage": str(veg.get("stage") or ""),
+                "harvest_ready": bool(flower_ready or veg_ready),
+            },
+            "keepsakes": {
+                "displayed_count": len(displayed),
+                "displayed": displayed[:4],
+                "bookshelf_count": len(ks.get("bookshelf_volumes") or []),
+            },
+            "residents": {
+                "encountered_count": len(residents_raw),
+                "recent": [
+                    {
+                        "id": r.get("id", ""),
+                        "name": r.get("name", ""),
+                        "last_observed_at": r.get("last_observed_at", 0.0),
+                    }
+                    for r in residents_raw[:3]
+                    if isinstance(r, dict)
+                ],
+                "active_guest": (
+                    {
+                        "name": active_guest.get("name", ""),
+                        "activity": active_guest.get("activity", ""),
+                    }
+                    if active_guest and active_guest.get("name")
+                    else None
+                ),
+            },
+            "summary_text": summary_text,
         }
 
     @staticmethod
@@ -871,6 +1054,90 @@ class NarrativeEngine(
             "previous_rest_seconds": state.get("previous_rest_seconds", 0),
         }
 
+    @staticmethod
+    def _snapshot_min_deadline(snapshot: dict, now: float) -> float:
+        candidates: list[float] = []
+        for raw in (
+            snapshot.get("valid_until"),
+            ((snapshot.get("scene") or {}).get("action") or {}).get("step_ends_at")
+            if isinstance(snapshot.get("scene"), dict)
+            else None,
+            ((snapshot.get("spatial") or {}).get("journey") or {}).get("arrives_at")
+            if isinstance(snapshot.get("spatial"), dict)
+            else None,
+            (snapshot.get("environment") or {}).get("expires_at")
+            if isinstance(snapshot.get("environment"), dict)
+            else None,
+        ):
+            if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+                val = float(raw)
+                if math.isfinite(val) and val > now:
+                    candidates.append(val)
+        return min(candidates) if candidates else 0.0
+
+    def _db_file_stamp(self) -> tuple[int, int, int, int]:
+        """Lightweight stat stamp of main DB + WAL files to detect external SQLite commits."""
+        try:
+            st_main = self.path.stat()
+            main_sig = (st_main.st_size, st_main.st_mtime_ns)
+        except OSError:
+            main_sig = (0, 0)
+        try:
+            st_wal = Path(str(self.path) + "-wal").stat()
+            wal_sig = (st_wal.st_size, st_wal.st_mtime_ns)
+        except OSError:
+            wal_sig = (0, 0)
+        return (*main_sig, *wal_sig)
+
+    def _lookup_snapshot_cache(self, key: tuple, current_gen: int) -> dict | None:
+        now_mono = time.monotonic()
+        clock_now = float(self.clock())
+        with self._snapshot_cache_lock:
+            cached = self._snapshot_cache.get(key)
+        if cached is None:
+            return None
+        mono_exp, cached_gen, cached_stamp, cached_clock, min_deadline, cached_payload = cached
+        if (
+            now_mono < mono_exp
+            and cached_gen == current_gen
+            and 0.0 <= (clock_now - cached_clock) < _SNAPSHOT_CACHE_TTL_SECONDS
+            and not (min_deadline > 0.0 and cached_clock < min_deadline <= clock_now)
+            and self._db_file_stamp() == cached_stamp
+        ):
+            return copy.deepcopy(cached_payload)
+        return None
+
+    def _store_snapshot_cache(
+        self, key: tuple, pre_gen: int, pre_stamp: tuple, result: dict
+    ) -> None:
+        with self._generation_lock:
+            post_gen = self._context_generation
+        if post_gen != pre_gen:
+            return
+        post_stamp = self._db_file_stamp()
+        if post_stamp != pre_stamp:
+            return
+        post_clock = float(self.clock())
+        min_deadline = self._snapshot_min_deadline(result, post_clock)
+        store_mono = time.monotonic()
+        with self._snapshot_cache_lock:
+            if len(self._snapshot_cache) >= _SNAPSHOT_CACHE_MAX_ENTRIES:
+                expired_keys = [
+                    k for k, entry in self._snapshot_cache.items() if entry[0] <= store_mono
+                ]
+                for k in expired_keys:
+                    self._snapshot_cache.pop(k, None)
+                if len(self._snapshot_cache) >= _SNAPSHOT_CACHE_MAX_ENTRIES:
+                    self._snapshot_cache.clear()
+            self._snapshot_cache[key] = (
+                store_mono + _SNAPSHOT_CACHE_TTL_SECONDS,
+                post_gen,
+                post_stamp,
+                post_clock,
+                min_deadline,
+                copy.deepcopy(result),
+            )
+
     async def get_snapshot(self, scope: dict) -> dict:
         """Return scoped state without making a model call or inventing a life."""
         scope = normalize_scope(scope)
@@ -878,6 +1145,12 @@ class NarrativeEngine(
         if not self._snapshot_allowed(scope):
             return unavailable
         key = tuple(scope[name] for name in ("platform", "umo", "persona_id", "instance_id"))
+        if "_read_snapshot" not in self.__dict__:
+            with self._generation_lock:
+                current_gen = self._context_generation
+            cached = self._lookup_snapshot_cache(key, current_gen)
+            if cached is not None:
+                return cached
         try:
             result = await self._snapshot_io.run(
                 self._read_snapshot, scope, key=key, scope_hash=_snapshot_scope_hash(scope)
@@ -897,6 +1170,13 @@ class NarrativeEngine(
         unavailable = {"schema_version": 1, "managed": False, "scope": scope}
         if not self._snapshot_allowed(scope):
             return unavailable
+        key = tuple(scope[name] for name in ("platform", "umo", "persona_id", "instance_id"))
+        with self._generation_lock:
+            pre_gen = self._context_generation
+        cached = self._lookup_snapshot_cache(key, pre_gen)
+        if cached is not None:
+            return cached
+        pre_stamp = self._db_file_stamp()
         started = time.perf_counter()
         began = executed = None
         stage = "begin"
@@ -920,6 +1200,8 @@ class NarrativeEngine(
                     return unavailable
                 stage = "finish"
             stage = "done"
+            if result.get("managed"):
+                self._store_snapshot_cache(key, pre_gen, pre_stamp, result)
             return result
         finally:
             self._tls.read_only_snapshot = prev_ro
@@ -3991,7 +4273,7 @@ class NarrativeEngine(
         now = self.clock() if now is None else _timestamp(now)
         if (
             self.config.get("mode", "legacy") != "narrative"
-            or not self.config.get("persona_id")
+            or not self._effective_persona_id()
             or not self._has_targets()
             or self._closed
         ):
@@ -4058,4 +4340,5 @@ class NarrativeEngine(
     async def close(self) -> None:
         """Invalidate permissions; no persistent connection or private task survives."""
         self._closed = True
+        self.invalidate_snapshot_cache()
         await self._snapshot_io.close()

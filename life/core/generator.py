@@ -457,6 +457,14 @@ class Generator:
         provider_id = resolve_series_provider(
             self.context, explicit_id, role="reply"
         )
+        if not provider_id and not explicit_id:
+            shared = get_series_defaults(self.context)
+            if isinstance(shared, dict):
+                provider_id = str(
+                    shared.get("light_analysis_provider")
+                    or shared.get("decision_provider")
+                    or ""
+                ).strip()
         if provider_id:
             provider = self.context.get_provider_by_id(provider_id)
             if provider is not None or explicit_id:

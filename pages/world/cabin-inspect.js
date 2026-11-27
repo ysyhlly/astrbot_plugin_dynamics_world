@@ -326,11 +326,12 @@ export function createCabinInspector(stage,{onResetFocus,onOpenDrawer,onCycleTim
   }
  });
 
- function makeBtn(label,cls,handler,disabled=false){
+ function makeBtn(label,cls,handler,disabled=false,title=''){
   const b=document.createElement('button');
   b.type='button';
   b.className='wb-button tiny '+cls;
   b.disabled=disabled||actionBusy;
+  if(title)b.title=msg(title);
   setText(b,msg(label));
   b.addEventListener('click',handler);
   return b;
@@ -547,12 +548,21 @@ export function createCabinInspector(stage,{onResetFocus,onOpenDrawer,onCycleTim
    const pantry=eco.pantry||{};
    const hasHerb=(Number(pantry['洋甘菊'])||0)+(Number(pantry['薄荷叶'])||0)>0;
    const hasVeg=(Number(pantry['卷心菜'])||0)+(Number(pantry['小南瓜'])||0)>0;
+   const missingParts=[];
+   if(!hasVeg)missingParts.push('鲜蔬（卷心菜/小南瓜）');
+   if(!hasHerb)missingParts.push('花草（洋甘菊/薄荷叶）');
    row.append(
     makeBtn('喝一口水','primary',()=>runQuick('drink'),!canSceneAct),
-    makeBtn('下厨备餐','',()=>runQuick('prepare_meal'),!canSceneAct&&!hasVeg?!canSceneAct:!canSceneAct),
-    makeBtn('冲泡花草茶','',()=>runQuick('brew_tea'),!canSceneAct&&!hasHerb?!canSceneAct:!canSceneAct),
+    makeBtn('下厨备餐','',()=>runQuick('prepare_meal'),!canSceneAct||!hasVeg,!hasVeg?'缺少鲜蔬（卷心菜/小南瓜），请先去花园采收':''),
+    makeBtn('冲泡花草茶','',()=>runQuick('brew_tea'),!canSceneAct||!hasHerb,!hasHerb?'缺少花草（洋甘菊/薄荷叶），请先去花园采收':''),
     makeBtn('室内动作','',()=>{hideCard();onOpenDrawer?.('scenes');}),
    );
+   if(missingParts.length){
+    const hint=document.createElement('div');
+    hint.className='cabin-inspect-hint';
+    setText(hint,msg(`缺少${missingParts.join('、')}，请先去花园采收后再下厨或煮茶。`));
+    actions.append(hint);
+   }
   }else if(key==='window'){
    row.append(
     makeBtn('切换窗帘','primary',()=>runQuick('curtains_cycle'),!canWrite||!scene.available),
