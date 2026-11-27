@@ -1,4 +1,5 @@
 import base64
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -6,7 +7,7 @@ import pytest_asyncio
 
 from astrbot_plugin_dynamics_world.world.core import web_api as transport
 from astrbot_plugin_dynamics_world.world.core.character import CharacterCard
-from test_avatar_models import GEOMETRY, json_package, png, texture
+from test_avatar_models import ANIMATIONS, GEOMETRY, encrypted_zip_package, json_package, png, texture, zip_package
 from test_scenes import finish, start
 from test_spatial import document
 from test_world_integration import UMO, make_plugin, seed
@@ -165,11 +166,50 @@ async def test_avatar_room_bindings_validate_current_scene_and_are_scoped(avatar
 
 
 @pytest.mark.asyncio
+async def test_avatar_unencrypted_ysm_upload_succeeds_via_api(avatar_api):
+    plugin, call = avatar_api
+    manifest = {
+        "spec": 2,
+        "properties": {"name": "星野小樱"},
+        "files": {
+            "player": {
+                "model": "models/main.json",
+                "animation": "animations/main.animation.json",
+                "texture": [{"uv": "textures/default.png"}, {"path": "textures/alt.png"}],
+            }
+        },
+    }
+    entries = [
+        ("ysm.json", json.dumps(manifest)),
+        ("models/main.json", json.dumps(GEOMETRY)),
+        ("animations/main.animation.json", json.dumps({"animations": ANIMATIONS})),
+        ("textures/default.png", png("red")),
+        ("textures/alt.png", png("blue")),
+        ("sounds/voice.ogg", b"OggS" + b"\x00" * 1024),
+    ]
+    entries.extend((f"lang/k_{i}.lang", b"ok=1") for i in range(70))
+    raw = zip_package(entries)
+    payload = {
+        "umo": UMO,
+        "filename": "sakura.ysm",
+        "name": "",
+        "file_base64": base64.b64encode(raw).decode("ascii"),
+    }
+    uploaded = (await call("avatar_upload", body=payload))["data"]
+    assert uploaded["name"] == "星野小樱"
+    assert [t["name"] for t in uploaded["textures"]] == ["default", "alt"]
+    catalog = (await call("avatar"))["data"]
+    assert any(m["id"] == uploaded["id"] and m["name"] == "星野小樱" for m in catalog["models"])
+
+
+@pytest.mark.asyncio
 async def test_avatar_invalid_uploads_do_not_publish_models(avatar_api):
     plugin, call = avatar_api
     before = (await call('avatar'))['data']
+    enc_zip = encrypted_zip_package([('main.json', json.dumps(GEOMETRY)), ('default.png', png())])
     for payload, message in [
-        (upload_body(b'YSM\x00\xff', 'encrypted.ysm'), '加密 .ysm'),
+        (upload_body(b'YSM\x00\xff', 'encrypted.ysm'), '加密保护格式（DRM）'),
+        (upload_body(enc_zip, 'protected.ysm'), '加密保护格式（DRM）'),
         (upload_body(b'{broken JSON'), 'JSON'),
         ({'umo': UMO, 'filename': 'test-avatar.json', 'file_base64': 'not+base64!'}, '编码'),
         (['not a JSON object'], 'JSON 对象'),

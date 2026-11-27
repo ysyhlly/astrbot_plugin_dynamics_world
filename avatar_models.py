@@ -12,22 +12,24 @@ from hashlib import sha256
 from io import BytesIO
 from pathlib import Path, PurePosixPath
 from tempfile import NamedTemporaryFile
-from zipfile import ZIP_DEFLATED, ZIP_STORED, BadZipFile, ZipFile
+from zipfile import ZIP_DEFLATED, ZIP_STORED, BadZipFile, ZipFile, is_zipfile
 from zlib import error as ZlibError
 
 from PIL import Image
 
-MAX_PACKAGE_BYTES = 8 * 1024 * 1024
-MAX_EXPANDED_BYTES = 16 * 1024 * 1024
+MAX_PACKAGE_BYTES = 24 * 1024 * 1024
+MAX_EXPANDED_BYTES = 32 * 1024 * 1024
 MAX_JSON_BYTES = 2 * 1024 * 1024
 MAX_PNG_BYTES = 4 * 1024 * 1024
 MAX_TEXTURE_EDGE = 2048
-MAX_FILES = 64
+MAX_FILES = 512
 MAX_BONES = 128
 MAX_CUBES = 2048
-MAX_TEXTURES = 16
+MAX_TEXTURES = 32
 MAX_MODELS = 32
 MAX_TRANSFORM = 32768
+
+ENCRYPTED_YSM_ERROR = "该 .ysm 文件为加密保护格式（DRM），无法绕过解密导入，请使用未加密 .ysm / .zip 源文件"
 
 PNG_PREFIX = "data:image/png;base64,"
 MODEL_ID = re.compile(r"[a-f0-9]{64}")
@@ -447,7 +449,7 @@ def _json_package(raw):
         raise ValueError("模型几何与动画 JSON 不得超过 2 MiB")
     images = document.get("textures", [])
     if not isinstance(images, list) or len(images) > MAX_TEXTURES:
-        raise ValueError("模型最多支持 16 张贴图")
+        raise ValueError(f"模型最多支持 {MAX_TEXTURES} 张贴图")
     textures = []
     for entry in images:
         entry = _obj(entry, "贴图")
@@ -480,12 +482,17 @@ def _archive_path(path):
     return path
 
 
+def _is_encrypted_ysm_bytes(raw):
+    return raw.startswith(b"YSM\x00") or (raw.startswith(b"YSM") and not is_zipfile(BytesIO(raw)))
+
+
 def _zip_entries(archive):
     entries = archive.infolist()
-    if len(entries) > MAX_FILES or sum(entry.file_size for entry in entries) > MAX_EXPANDED_BYTES:
-        raise ValueError("ZIP 包最多 64 个条目，解压内容不得超过 16 MiB")
+    if len(entries) > MAX_FILES:
+        raise ValueError(f"ZIP 包最多 {MAX_FILES} 个条目")
     files = {}
     seen = set()
+    expanded_bytes = 0
     for entry in entries:
         name = _archive_path(entry.orig_filename).casefold()
         kind = stat.S_IFMT(entry.external_attr >> 16)
@@ -494,7 +501,7 @@ def _zip_entries(archive):
         if name in seen:
             raise ValueError("ZIP 包内路径重复")
         if entry.flag_bits & 1:
-            raise ValueError("请提供未加密的 ZIP 模型源文件")
+            raise ValueError(ENCRYPTED_YSM_ERROR)
         seen.add(name)
         if entry.is_dir() or "__macosx" in name.split("/") or PurePosixPath(name).name.startswith("._"):
             continue
@@ -504,6 +511,9 @@ def _zip_entries(archive):
             continue
         if entry.file_size > limit:
             raise ValueError(f"ZIP 包内单个 {suffix} 文件超过大小上限")
+        expanded_bytes += entry.file_size
+        if expanded_bytes > MAX_EXPANDED_BYTES:
+            raise ValueError("ZIP 包内解压模型资源不得超过 32 MiB")
         if entry.compress_type not in (ZIP_STORED, ZIP_DEFLATED):
             raise ValueError("ZIP 模型请使用常规 ZIP 压缩")
         files[name] = entry
@@ -535,28 +545,86 @@ def _pack_reference(manifest, reference):
     return f"{prefix}/{path}" if prefix else path
 
 
+def _extract_texture_ref(value):
+    if isinstance(value, str):
+        cleaned = value.strip()
+        return cleaned or None
+    if isinstance(value, dict):
+        for key in ("uv", "path", "texture", "file"):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+    return None
+
+
+def _manifest_name(document):
+    if not isinstance(document, dict):
+        return ""
+    for section_key in ("properties", "metadata"):
+        section = document.get(section_key)
+        if not isinstance(section, dict):
+            continue
+        raw_name = section.get("name")
+        if isinstance(raw_name, str):
+            cleaned = raw_name.strip()[:120]
+            if cleaned:
+                try:
+                    return _text(cleaned, "模型名称")
+                except ValueError:
+                    continue
+    return ""
+
+
 def _player_assets(documents):
     manifests = sorted((key for key in documents if key.split("/")[-1] == "ysm.json"), key=lambda key: (key.count("/"), key))
     if not manifests:
-        return None, None, []
+        return None, None, [], ""
     path = manifests[0]
-    files = documents[path].get("files")
+    manifest = documents[path]
+    manifest_name = _manifest_name(manifest)
+    files = manifest.get("files")
     player = files.get("player") if isinstance(files, dict) else None
     if not isinstance(player, dict):
-        return None, None, []
+        return None, None, [], manifest_name
     model = player.get("model")
     animation = player.get("animation")
-    main = model.get("main") if isinstance(model, dict) else None
-    motion = animation.get("main") if isinstance(animation, dict) else None
+    main = model if isinstance(model, str) else (model.get("main") if isinstance(model, dict) else None)
+    motion = animation if isinstance(animation, str) else (animation.get("main") if isinstance(animation, dict) else None)
     textures = player.get("texture")
+    raw_skins = []
+    if isinstance(textures, str):
+        ref = _extract_texture_ref(textures)
+        if ref:
+            raw_skins.append(ref)
+    elif isinstance(textures, list):
+        for item in textures:
+            ref = _extract_texture_ref(item)
+            if ref:
+                raw_skins.append(ref)
+    elif isinstance(textures, dict):
+        direct = _extract_texture_ref(textures)
+        if direct:
+            raw_skins.append(direct)
+        else:
+            for item in textures.values():
+                ref = _extract_texture_ref(item)
+                if ref:
+                    raw_skins.append(ref)
     return (
-        _pack_reference(path, main) if isinstance(main, str) and main else None,
-        _pack_reference(path, motion) if isinstance(motion, str) and motion else None,
-        [_pack_reference(path, image) for image in textures if isinstance(image, str)] if isinstance(textures, list) else [],
+        _pack_reference(path, main.strip()) if isinstance(main, str) and main.strip() else None,
+        _pack_reference(path, motion.strip()) if isinstance(motion, str) and motion.strip() else None,
+        [_pack_reference(path, image) for image in raw_skins],
+        manifest_name,
     )
 
 
-def _zip_package(raw):
+def _zip_package(raw, *, is_ysm=False):
+    if _is_encrypted_ysm_bytes(raw):
+        raise ValueError(ENCRYPTED_YSM_ERROR)
+    if not is_zipfile(BytesIO(raw)):
+        if is_ysm:
+            raise ValueError("该 .ysm 文件不是有效的未加密 ZIP 模型包（可能为加密保护格式 DRM 或文件损坏），无法绕过解密导入，请使用未加密 .ysm / .zip 源文件")
+        raise ValueError("ZIP 模型包损坏或压缩方式不受支持")
     warnings = set()
     try:
         with ZipFile(BytesIO(raw)) as archive:
@@ -566,7 +634,7 @@ def _zip_package(raw):
                 for name, entry in files.items()
                 if name.endswith(".json")
             }
-            main, motion, skins = _player_assets(documents)
+            main, motion, skins, manifest_name = _player_assets(documents)
             geometries = sorted(
                 (name for name, doc in documents.items() if "minecraft:geometry" in doc),
                 key=_geometry_priority,
@@ -588,7 +656,7 @@ def _zip_package(raw):
                 )
             skins = list(dict.fromkeys(skins))
             if len(skins) > MAX_TEXTURES:
-                raise ValueError("模型最多支持 16 张贴图")
+                raise ValueError(f"模型最多支持 {MAX_TEXTURES} 张贴图")
             textures = []
             for name in skins:
                 if name not in files or not name.endswith(".png"):
@@ -615,7 +683,7 @@ def _zip_package(raw):
                 warnings.add("YSM 动画控制器未导入")
     except (BadZipFile, EOFError, ZlibError, NotImplementedError, RuntimeError) as exc:
         raise ValueError("ZIP 模型包损坏或压缩方式不受支持") from exc
-    return geometry, textures, animations, warnings
+    return geometry, textures, animations, warnings, manifest_name
 
 
 def _summary(model):
@@ -660,23 +728,24 @@ class AvatarLibrary:
         if "/" in filename or "\\" in filename or ":" in filename or filename in (".", ".."):
             raise ValueError("模型文件名无效")
         extension = PurePosixPath(filename).suffix.lower()
-        if extension == ".ysm":
-            raise ValueError("加密 .ysm 文件无法导入，请上传作者提供的未加密 ZIP 模型源文件")
         if not isinstance(raw_bytes, bytes) or not 0 < len(raw_bytes) <= MAX_PACKAGE_BYTES:
-            raise ValueError("模型包不得为空或超过 8 MiB")
-        if extension == ".zip":
-            geometry, textures, animations, warnings = _zip_package(raw_bytes)
+            raise ValueError("模型包不得为空或超过 24 MiB")
+        manifest_name = ""
+        if extension in (".zip", ".ysm"):
+            geometry, textures, animations, warnings, manifest_name = _zip_package(
+                raw_bytes, is_ysm=(extension == ".ysm")
+            )
         elif extension == ".json":
             geometry, textures, animations, warnings = _json_package(raw_bytes)
         else:
-            raise ValueError("请上传未加密 ZIP 或 JSON 模型包")
+            raise ValueError("请上传未加密 .ysm / .zip 或 .json 模型包")
         geometry = _geometry(geometry, warnings)
         bone_set = {bone["name"] for bone in geometry["bones"]}
         molang_animations = _extract_molang_animations(animations, bone_set)
         animations = _animations(animations, bone_set, warnings)
         assets = {"geometry": geometry, "textures": textures, "animations": animations}
         model_id = sha256(_encoded(assets)).hexdigest()
-        name = _text(name, "模型名称", empty=True).strip() or PurePosixPath(filename).stem[:120]
+        name = _text(name, "模型名称", empty=True).strip() or manifest_name or PurePosixPath(filename).stem[:120]
         model = {
             "id": model_id,
             "name": name,

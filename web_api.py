@@ -667,7 +667,10 @@ class WorldAPI(CausalAPIMixin):
             guard = await self.guard("avatar_upload", True)
             if guard is not None:
                 return guard
-            body = await _body(12 * 1024 * 1024)
+            from .avatar_models import MAX_PACKAGE_BYTES
+
+            max_base64_len = ((MAX_PACKAGE_BYTES + 2) // 3) * 4
+            body = await _body(max_base64_len + 1024 * 1024)
             if "__invalid__" in body:
                 return _err(body["__invalid__"])
             if set(body) - {"umo", "filename", "name", "file_base64"}:
@@ -680,9 +683,11 @@ class WorldAPI(CausalAPIMixin):
                 encoded = body.get("file_base64")
                 if (
                     not isinstance(encoded, str)
-                    or not 0 < len(encoded) <= ((8 * 1024 * 1024 + 2) // 3) * 4
+                    or not 0 < len(encoded) <= max_base64_len
                 ):
-                    raise ValueError("模型包最大 8 MiB")
+                    raise ValueError(
+                        f"模型包最大 {MAX_PACKAGE_BYTES // (1024 * 1024)} MiB"
+                    )
                 try:
                     raw = base64.b64decode(encoded, validate=True)
                 except (ValueError, binascii.Error):
